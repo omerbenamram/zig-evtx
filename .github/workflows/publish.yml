@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v2
       - uses: astral-sh/setup-uv@v5
       - name: install
-        run: uv sync --all-extras
+        run: uv sync --group build
       - name: build package
         run: uv run python -m build
       - name: upload package artifacts
