@@ -72,3 +72,8 @@ length_sort = true
 
 [tool.ruff]
 line-length = 120
+
+[dependency-groups]
+build = [
+    "build>=1.2.2.post1",
+]
