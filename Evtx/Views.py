@@ -31,7 +31,7 @@ class UnexpectedElementException(Exception):
 
 
 # ref: https://www.w3.org/TR/xml11/#charsets
-RESTRICTED_CHARS = re.compile("[\x01-\x08\x0B\x0C\x0E-\x1F\x7F-\x84\x86-\x9F]")
+RESTRICTED_CHARS = re.compile("[\x01-\x08\x0b\x0c\x0e-\x1f\x7f-\x84\x86-\x9f]")
 
 
 def escape_attr(s):
