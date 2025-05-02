@@ -7,7 +7,7 @@ name = "python-evtx"
 version = "0.8.0"
 description = "Pure Python parser for Windows event log files (.evtx)."
 readme = "README.md"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
 authors = [
     { name = "Willi Ballenthin", email = "willi.ballenthin@gmail.com" },
 ]
@@ -19,7 +19,6 @@ classifiers = [
     "Development Status :: 5 - Production/Stable", # Assuming based on version 0.8.0
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
-    "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
