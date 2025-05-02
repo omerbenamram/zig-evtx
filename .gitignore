@@ -41,3 +41,4 @@ testing-evtxs/*
 .direnv/
 .env/
 .envrc
+.venv
