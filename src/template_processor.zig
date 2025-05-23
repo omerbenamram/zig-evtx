@@ -7,6 +7,7 @@ const BinaryParserError = binary_parser.BinaryParserError;
 const variant_types = @import("variant_types.zig");
 const VariantTypeNode = variant_types.VariantTypeNode;
 const BinaryXMLError = variant_types.BinaryXMLError;
+const bxml_parser = @import("bxml_parser.zig");
 
 // Import actual EVTX types
 const evtx = @import("evtx.zig");
@@ -67,6 +68,23 @@ pub const SubstitutionArray = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        // Free any allocated strings in the variant nodes
+        for (self.entries) |*entry| {
+            switch (entry.data) {
+                .WString => |str| self.allocator.free(str),
+                .String => |str| self.allocator.free(str),
+                .Binary => |data| self.allocator.free(data),
+                .GUID => |data| self.allocator.free(data),
+                .SizeT => |data| self.allocator.free(data),
+                .Systemtime => |data| self.allocator.free(data),
+                .SID => |data| self.allocator.free(data),
+                .HexInt32 => |data| self.allocator.free(data),
+                .HexInt64 => |data| self.allocator.free(data),
+                .BinXml => |data| self.allocator.free(data),
+                .WStringArray => |data| self.allocator.free(data),
+                else => {},
+            }
+        }
         self.allocator.free(self.entries);
     }
 
@@ -269,7 +287,166 @@ pub const RootNode = struct {
     }
 };
 
+// Substitution processor - applies substitution values to template format strings
+pub const SubstitutionProcessor = struct {
+    allocator: Allocator,
+    template_xml: []const u8,
+    substitutions: *const SubstitutionArray,
+    
+    const Self = @This();
+    
+    pub fn init(allocator: Allocator, template_xml: []const u8, substitutions: *const SubstitutionArray) Self {
+        return Self{
+            .allocator = allocator,
+            .template_xml = template_xml,
+            .substitutions = substitutions,
+        };
+    }
+    
+    pub fn process(self: *Self) ![]u8 {
+        var result = std.ArrayList(u8).init(self.allocator);
+        defer result.deinit();
+        
+        var i: usize = 0;
+        while (i < self.template_xml.len) {
+            // Look for substitution markers
+            if (self.findSubstitutionMarker(i)) |marker| {
+                // Add any text before the marker
+                try result.appendSlice(self.template_xml[i..marker.start]);
+                
+                // Process the substitution
+                if (marker.index < self.substitutions.entries.len) {
+                    const value = try self.substitutions.getValueString(marker.index);
+                    defer self.allocator.free(value);
+                    
+                    // For conditional substitutions, check if we should include it
+                    if (marker.is_conditional) {
+                        // Check if this is a null/empty value
+                        const variant_node = &self.substitutions.entries[marker.index];
+                        if (variant_node.tag != .Null and value.len > 0) {
+                            // Escape XML special characters
+                            try self.appendXmlEscaped(&result, value);
+                        }
+                        // Otherwise suppress the value (and potentially the parent element)
+                    } else {
+                        // Normal substitution - always include
+                        try self.appendXmlEscaped(&result, value);
+                    }
+                } else {
+                    // Index out of bounds - log warning and keep marker
+                    std.log.warn("Substitution index {} out of bounds (max {})", .{marker.index, self.substitutions.entries.len});
+                    try result.appendSlice(self.template_xml[marker.start..marker.end]);
+                }
+                
+                i = marker.end;
+            } else {
+                // No more markers, copy the rest
+                try result.appendSlice(self.template_xml[i..]);
+                break;
+            }
+        }
+        
+        return try result.toOwnedSlice();
+    }
+    
+    const SubstitutionMarker = struct {
+        start: usize,
+        end: usize,
+        index: usize,
+        is_conditional: bool,
+    };
+    
+    fn findSubstitutionMarker(self: *const Self, start_pos: usize) ?SubstitutionMarker {
+        const normal_prefix = "[Normal Substitution(index=";
+        const conditional_prefix = "[Conditional Substitution(index=";
+        
+        // Find the next substitution marker
+        var pos = start_pos;
+        while (pos < self.template_xml.len) {
+            if (std.mem.startsWith(u8, self.template_xml[pos..], normal_prefix)) {
+                return self.parseMarker(pos, normal_prefix.len, false);
+            } else if (std.mem.startsWith(u8, self.template_xml[pos..], conditional_prefix)) {
+                return self.parseMarker(pos, conditional_prefix.len, true);
+            }
+            pos += 1;
+        }
+        
+        return null;
+    }
+    
+    fn parseMarker(self: *const Self, start: usize, prefix_len: usize, is_conditional: bool) ?SubstitutionMarker {
+        const index_start = start + prefix_len;
+        var index_end = index_start;
+        
+        // Find the comma after the index
+        while (index_end < self.template_xml.len and self.template_xml[index_end] != ',') : (index_end += 1) {}
+        
+        if (index_end >= self.template_xml.len) return null;
+        
+        // Parse the index
+        const index_str = self.template_xml[index_start..index_end];
+        const index = std.fmt.parseInt(usize, index_str, 10) catch return null;
+        
+        // Find the closing bracket
+        var marker_end = index_end;
+        while (marker_end < self.template_xml.len and self.template_xml[marker_end] != ']') : (marker_end += 1) {}
+        
+        if (marker_end >= self.template_xml.len) return null;
+        marker_end += 1; // Include the closing bracket
+        
+        return SubstitutionMarker{
+            .start = start,
+            .end = marker_end,
+            .index = index,
+            .is_conditional = is_conditional,
+        };
+    }
+    
+    fn appendXmlEscaped(self: *const Self, list: *std.ArrayList(u8), text: []const u8) !void {
+        _ = self;
+        for (text) |char| {
+            switch (char) {
+                '<' => try list.appendSlice("&lt;"),
+                '>' => try list.appendSlice("&gt;"),
+                '&' => try list.appendSlice("&amp;"),
+                '"' => try list.appendSlice("&quot;"),
+                '\'' => try list.appendSlice("&apos;"),
+                else => try list.append(char),
+            }
+        }
+    }
+};
+
 // Core template processing workflow
+pub fn processTemplateInstance(allocator: Allocator, template_inst: bxml_parser.TemplateInstanceNode, chunk: *ChunkHeader) ![]u8 {
+    const template_id = template_inst.template_id;
+    
+    // Get template from chunk
+    const template = chunk.getTemplate(template_id) catch |err| {
+        std.log.warn("Error getting template {d}: {any}", .{template_id, err});
+        return try allocator.dupe(u8, "<Event><!-- Template parsing error --></Event>");
+    } orelse {
+        std.log.warn("Template {d} not found in chunk", .{template_id});
+        return try allocator.dupe(u8, "<Event><!-- Template not found --></Event>");
+    };
+    
+    std.log.info("Found template {d}, XML format length: {d}", .{template_id, template.xml_format.len});
+    
+    // Parse the substitution data from the TemplateInstance
+    var block = Block.init(template_inst.substitution_data, 0);
+    var substitutions = SubstitutionArray.parse(allocator, &block, 0) catch |err| {
+        std.log.err("Failed to parse substitutions: {}", .{err});
+        return try allocator.dupe(u8, template.xml_format);
+    };
+    defer substitutions.deinit();
+    
+    std.log.info("Parsed {d} substitution values", .{substitutions.entries.len});
+    
+    // Create a substitution processor to apply values to the template
+    var processor = SubstitutionProcessor.init(allocator, template.xml_format, &substitutions);
+    return processor.process();
+}
+
 pub fn processRecord(allocator: Allocator, record_data: []const u8, chunk: *ChunkHeader, template_id: u32) ![]u8 {
     _ = record_data; // TODO: Use for substitution processing
     // Get template from chunk

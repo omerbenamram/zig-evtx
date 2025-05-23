@@ -405,6 +405,11 @@ pub const ChunkHeader = struct {
             templates_map.deinit();
         }
         if (self.strings) |*strings_map| {
+            // Free the stored strings
+            var iterator = strings_map.iterator();
+            while (iterator.next()) |entry| {
+                self.allocator.free(entry.value_ptr.*);
+            }
             strings_map.deinit();
         }
     }
@@ -434,8 +439,15 @@ pub const ChunkHeader = struct {
                 
                 // Parse template at this offset
                 const template = try self.parseTemplate(ofs);
-                std.log.info("Found template with ID: {d}", .{template.template_id});
-                try self.templates.?.put(template.template_id, template);
+                std.log.info("Found template with ID: {d} at offset {d}", .{template.template_id, ofs});
+                
+                // Only store if we don't already have this template ID, or if this one is better
+                if (!self.templates.?.contains(template.template_id)) {
+                    try self.templates.?.put(template.template_id, template);
+                    std.log.info("Stored template {d} from offset {d}", .{template.template_id, ofs});
+                } else {
+                    std.log.info("Template {d} already exists, skipping duplicate at offset {d}", .{template.template_id, ofs});
+                }
                 
                 // Move to next template in chain (templates are linked)
                 const next_offset = try self.block.unpackDword(ofs);
@@ -462,7 +474,7 @@ pub const ChunkHeader = struct {
         @memcpy(&guid, guid_data);
         
         // Parse the binary XML template
-        const xml_format = bxml_parser.parseTemplateXml(self.allocator, &self.block, offset + 0x18, data_length) catch |err| {
+        const xml_format = bxml_parser.parseTemplateXml(self.allocator, &self.block, offset + 0x18, data_length, self) catch |err| {
             std.log.warn("Failed to parse template XML for ID {d}: {any}", .{template_id, err});
             // Create a working template that shows the system works
             const basic_template = try std.fmt.allocPrint(self.allocator, 
@@ -494,6 +506,74 @@ pub const ChunkHeader = struct {
             .data = template_data,
             .xml_format = xml_format,
         };
+    }
+    
+    pub fn loadStrings(self: *Self) EvtxError!void {
+        if (self.strings != null) return;
+        
+        self.strings = std.AutoHashMap(u32, []const u8).init(self.allocator);
+        
+        // String table is stored in a hash table starting at offset 0x80
+        // There are 64 possible string slots, each 4 bytes
+        var i: u32 = 0;
+        while (i < 64) : (i += 1) {
+            var string_offset = try self.block.unpackDword(0x80 + (i * 4));
+            
+            while (string_offset > 0) {
+                // Parse string node at this offset
+                const string_node = try self.parseStringNode(string_offset);
+                try self.strings.?.put(string_offset, string_node.string);
+                std.log.debug("Loaded string at offset {d}: '{s}'", .{string_offset, string_node.string});
+                
+                // Move to next string in chain
+                string_offset = string_node.next_offset;
+            }
+        }
+    }
+    
+    const StringNode = struct {
+        next_offset: u32,
+        hash: u16,
+        string_length: u16,
+        string: []const u8,
+    };
+    
+    pub fn parseStringNode(self: *const Self, offset: u32) EvtxError!StringNode {
+        // String node structure:
+        // 0x00: next_offset (4 bytes)
+        // 0x04: hash (2 bytes) 
+        // 0x06: string_length (2 bytes)
+        // 0x08: string data (UTF-16, variable length)
+        
+        const next_offset = try self.block.unpackDword(offset);
+        const hash = try self.block.unpackWord(offset + 0x04);
+        const string_length = try self.block.unpackWord(offset + 0x06);
+        
+        // Create a temporary allocator for the string
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+        const temp_allocator = arena.allocator();
+        
+        // Read UTF-16 string and convert to UTF-8
+        const utf8_string = try self.block.unpackWstring(temp_allocator, offset + 0x08, string_length);
+        
+        // Copy to persistent allocator
+        const persistent_string = try self.allocator.dupe(u8, utf8_string);
+        
+        return StringNode{
+            .next_offset = next_offset,
+            .hash = hash,
+            .string_length = string_length,
+            .string = persistent_string,
+        };
+    }
+    
+    pub fn getStringAtOffset(self: *Self, offset: u32) EvtxError!?[]const u8 {
+        if (self.strings == null) {
+            try self.loadStrings();
+        }
+        
+        return self.strings.?.get(offset);
     }
     
     pub fn getTemplate(self: *Self, template_id: u32) EvtxError!?*const Template {
@@ -586,6 +666,36 @@ pub const Record = struct {
 
     pub fn offset(self: *const Self) usize {
         return self.block.getOffset();
+    }
+    
+    pub fn templateId(self: *const Self) EvtxError!u32 {
+        // Template ID is typically stored at offset 0x18 in the record
+        return self.block.unpackDword(0x18);
+    }
+    
+    pub fn xml(self: *const Self, allocator: Allocator) EvtxError![]u8 {
+        
+        // Get record data
+        const record_data = self.data() catch |err| {
+            std.log.warn("Failed to get record data: {any}", .{err});
+            return try allocator.dupe(u8, "<Event><!-- Failed to get record data --></Event>");
+        };
+        
+        // Binary XML starts at offset 0x18 (24 bytes) after the record header
+        const bxml_offset = 0x18;
+        if (record_data.len < bxml_offset) {
+            return try allocator.dupe(u8, "<Event><!-- Record too small --></Event>");
+        }
+        
+        const bxml_data = record_data[bxml_offset..];
+        var block = @import("binary_parser.zig").Block.init(bxml_data, 0);
+        
+        // Parse the record's binary XML which should contain a TemplateInstance
+        const chunk_mut = @constCast(self.chunk);
+        return bxml_parser.parseRecordXml(allocator, &block, 0, @intCast(bxml_data.len), chunk_mut) catch |err| {
+            std.log.warn("Failed to parse record XML: {any}", .{err});
+            return try std.fmt.allocPrint(allocator, "<Event><!-- XML parsing error: {any} --></Event>", .{err});
+        };
     }
 };
 

@@ -130,6 +130,32 @@ pub const Block = struct {
         return result;
     }
 
+    pub fn unpackStringNullTerminated(self: Block, allocator: Allocator, relative_offset: usize) BinaryParserError![]u8 {
+        // Find null terminator first
+        var length: usize = 0;
+        var pos = relative_offset;
+        while (pos < self.buf.len - self.offset) : (pos += 1) {
+            const byte = self.buf[self.offset + pos];
+            if (byte == 0) break;
+            length += 1;
+        }
+        
+        return self.unpackString(allocator, relative_offset, length);
+    }
+
+    pub fn unpackWstringNullTerminated(self: Block, allocator: Allocator, relative_offset: usize) BinaryParserError![]u8 {
+        // Find null terminator first
+        var length: usize = 0;
+        var pos = relative_offset;
+        while (pos + 1 < self.buf.len - self.offset) : (pos += 2) {
+            const word = std.mem.readInt(u16, self.buf[self.offset + pos..self.offset + pos + 2][0..2], .little);
+            if (word == 0) break;
+            length += 1;
+        }
+        
+        return self.unpackWstring(allocator, relative_offset, length);
+    }
+
     pub fn unpackWstring(self: Block, allocator: Allocator, relative_offset: usize, length: usize) BinaryParserError![]u8 {
         try self.checkBounds(relative_offset, length * 2);
         const utf16_data = self.buf[self.offset + relative_offset..self.offset + relative_offset + length * 2];

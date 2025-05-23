@@ -66,27 +66,9 @@ pub fn escapeXmlAttr(allocator: Allocator, input: []const u8) ViewsError![]u8 {
 }
 
 pub fn renderRecordAsXml(allocator: Allocator, record: *const Record) ViewsError![]u8 {
-    // Try to parse using template processing first
-    const raw_data = try record.data();
-    
-    // Use the actual chunk header from the record
-    var chunk_header = @constCast(record.chunk);
-    
-    // Load templates from the chunk
-    chunk_header.loadTemplates() catch |err| {
-        std.log.warn("Failed to load templates: {any}", .{err});
-    };
-    
-    // Parse the template ID from the record's binary XML data
-    const template_id_opt = parseTemplateIdFromRecord(raw_data);
-    const template_id = template_id_opt orelse {
-        std.log.warn("Could not parse template ID from record", .{});
-        return try allocator.dupe(u8, "<Event><!-- Could not parse template ID --></Event>");
-    };
-    
-    std.log.info("Looking for template ID: {d}", .{template_id});
-    
-    const template_xml = template_processor.processRecord(allocator, raw_data, chunk_header, template_id) catch blk: {
+    // Simply use the record's xml() method which handles all the template processing
+    return record.xml(allocator) catch |err| blk: {
+        std.log.warn("Failed to render record as XML: {}", .{err});
         // Fallback to basic XML structure with base64 data
         var result = std.ArrayList(u8).init(allocator);
         defer result.deinit();
@@ -119,6 +101,13 @@ pub fn renderRecordAsXml(allocator: Allocator, record: *const Record) ViewsError
         // Add raw data as base64 for fallback
         try result.appendSlice("<EventData>");
         
+        const raw_data = record.data() catch {
+            try result.appendSlice("<Error>Failed to get record data</Error>");
+            try result.appendSlice("</EventData>");
+            try result.appendSlice("</Event>");
+            break :blk try result.toOwnedSlice();
+        };
+        
         const encoded_size = std.base64.standard.Encoder.calcSize(raw_data.len);
         const encoded = try allocator.alloc(u8, encoded_size);
         defer allocator.free(encoded);
@@ -134,8 +123,6 @@ pub fn renderRecordAsXml(allocator: Allocator, record: *const Record) ViewsError
 
         break :blk try result.toOwnedSlice();
     };
-    
-    return template_xml;
 }
 
 pub fn renderEvtxAsXml(allocator: Allocator, evtx_parser: *evtx.Evtx) ViewsError![]u8 {

@@ -45,24 +45,50 @@ pub fn main() !void {
         std.debug.print("  Is Full: {}\n", .{header.isFull()});
     }
 
-    // Generate XML output
-    std.debug.print("\nGenerating XML output...\n", .{});
-    const xml_output = try views.renderEvtxAsXml(allocator, &evtx_parser);
-    defer allocator.free(xml_output);
+    const stdout = std.io.getStdOut().writer();
+    
+    // Print XML header
+    try stdout.print("{s}", .{views.XML_HEADER});
+    try stdout.print("<Events>\n", .{});
 
-    // Write to output file
-    const output_file = try std.fs.cwd().createFile("output.xml", .{});
-    defer output_file.close();
-
-    try output_file.writeAll(xml_output);
-    std.debug.print("XML output written to output.xml\n", .{});
-
-    // Count records
-    var record_count: u32 = 0;
-    var record_iter = evtx_parser.records();
-    while (record_iter.next()) |_| {
-        record_count += 1;
+    // Process all chunks to ensure templates are loaded
+    var chunk_iter = evtx_parser.chunks();
+    var chunks = std.ArrayList(evtx.ChunkHeader).init(allocator);
+    defer chunks.deinit();
+    
+    while (chunk_iter.next()) |chunk| {
+        var chunk_copy = chunk;
+        try chunk_copy.loadTemplates();
+        try chunks.append(chunk_copy);
     }
-
-    std.debug.print("Total records processed: {d}\n", .{record_count});
+    
+    // Now iterate through records and output XML
+    var error_count: u32 = 0;
+    var record_count: u32 = 0;
+    
+    for (chunks.items) |*chunk| {
+        var record_iter = chunk.records();
+        while (record_iter.next()) |record| {
+            record_count += 1;
+            
+            // Generate XML for this record
+            const xml = record.xml(allocator) catch |err| {
+                error_count += 1;
+                std.debug.print("<!-- Error processing record {d}: {} -->\n", .{record.record_num_val, err});
+                continue;
+            };
+            defer allocator.free(xml);
+            
+            try stdout.print("{s}\n", .{xml});
+        }
+    }
+    
+    try stdout.print("</Events>\n", .{});
+    
+    // Print summary to stderr
+    std.debug.print("\nProcessed {d} records", .{record_count});
+    if (error_count > 0) {
+        std.debug.print(" ({d} errors)", .{error_count});
+    }
+    std.debug.print("\n", .{});
 }

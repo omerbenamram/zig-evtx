@@ -56,15 +56,25 @@ pub const VariantTypeNode = struct {
         switch (variant_type) {
             0x00 => return VariantTypeNode{ .tag = .Null, .data = VariantData{ .Null = {} } },
             0x01 => {
-                // For WString, we need to read until null terminator or use length prefix
-                // Simplified implementation - read 256 chars max
-                const wstring = try block.unpackWstring(allocator, pos.*, 256);
-                pos.* += wstring.len * 2 + 2; // Approximate, should calculate actual size
+                // WString - null terminated UTF-16
+                const wstring = try block.unpackWstringNullTerminated(allocator, pos.*);
+                // Calculate actual bytes consumed: UTF-16 chars * 2 + 2 for null terminator
+                var bytes_consumed: usize = 0;
+                var check_pos = pos.*;
+                while (check_pos + 1 < block.buf.len) : (check_pos += 2) {
+                    const word = std.mem.readInt(u16, block.buf[check_pos..check_pos + 2][0..2], .little);
+                    bytes_consumed += 2;
+                    if (word == 0) break;
+                }
+                pos.* += bytes_consumed;
                 return VariantTypeNode{ .tag = .WString, .data = VariantData{ .WString = wstring } };
             },
             0x02 => {
-                const string = try block.unpackString(allocator, pos.*, 256);
-                pos.* += string.len + 1; // ASCII + null terminator
+                // String - null terminated ASCII
+                const string = try block.unpackStringNullTerminated(allocator, pos.*);
+                // Calculate bytes consumed
+                const bytes_consumed: usize = string.len + 1; // string + null terminator
+                pos.* += bytes_consumed;
                 return VariantTypeNode{ .tag = .String, .data = VariantData{ .String = string } };
             },
             0x03 => {
