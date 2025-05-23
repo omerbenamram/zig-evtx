@@ -78,7 +78,13 @@ pub fn renderRecordAsXml(allocator: Allocator, record: *const Record) ViewsError
     };
     
     // Parse the template ID from the record's binary XML data
-    const template_id = parseTemplateIdFromRecord(raw_data) orelse 0;
+    const template_id_opt = parseTemplateIdFromRecord(raw_data);
+    const template_id = template_id_opt orelse {
+        std.log.warn("Could not parse template ID from record", .{});
+        return try allocator.dupe(u8, "<Event><!-- Could not parse template ID --></Event>");
+    };
+    
+    std.log.info("Looking for template ID: {d}", .{template_id});
     
     const template_xml = template_processor.processRecord(allocator, raw_data, chunk_header, template_id) catch blk: {
         // Fallback to basic XML structure with base64 data

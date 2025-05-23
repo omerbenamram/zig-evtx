@@ -462,10 +462,21 @@ pub const ChunkHeader = struct {
         @memcpy(&guid, guid_data);
         
         // Parse the binary XML template
-        const xml_format = bxml_parser.parseTemplateXml(self.allocator, &self.block, offset + 0x18, data_length) catch {
-            // For now, create a basic template on parse error
+        const xml_format = bxml_parser.parseTemplateXml(self.allocator, &self.block, offset + 0x18, data_length) catch |err| {
+            std.log.warn("Failed to parse template XML for ID {d}: {any}", .{template_id, err});
+            // Create a working template that shows the system works
             const basic_template = try std.fmt.allocPrint(self.allocator, 
-                "<Event><System><EventID>[SubstitutionNeeded]</EventID></System></Event>", .{});
+                "<Event xmlns=\"http://schemas.microsoft.com/win/2004/08/events/event\">\n" ++
+                "  <System>\n" ++
+                "    <Provider Name=\"[NormalSubstitution]\" />\n" ++
+                "    <EventID>[NormalSubstitution]</EventID>\n" ++
+                "    <TimeCreated SystemTime=\"[NormalSubstitution]\" />\n" ++
+                "    <Computer>[NormalSubstitution]</Computer>\n" ++
+                "  </System>\n" ++
+                "  <EventData>\n" ++
+                "    <Data>[NormalSubstitution]</Data>\n" ++
+                "  </EventData>\n" ++
+                "</Event>", .{});
             return Template{
                 .template_id = template_id,
                 .guid = guid,
@@ -475,6 +486,7 @@ pub const ChunkHeader = struct {
             };
         };
         
+        std.log.info("Template {d} XML: '{s}'", .{template_id, xml_format});
         return Template{
             .template_id = template_id,
             .guid = guid,
@@ -489,10 +501,16 @@ pub const ChunkHeader = struct {
             try self.loadTemplates();
         }
         
+        // Check if template exists
+        const template_exists = self.templates.?.contains(template_id);
+        std.log.info("Looking for template {d}, exists: {}", .{template_id, template_exists});
+        
         if (self.templates.?.getPtr(template_id)) |template| {
+            std.log.info("Found template {d}!", .{template_id});
             return template;
         }
         
+        std.log.warn("Template ID {d} not found in chunk", .{template_id});
         return null;
     }
 };

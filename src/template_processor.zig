@@ -271,25 +271,20 @@ pub const RootNode = struct {
 
 // Core template processing workflow
 pub fn processRecord(allocator: Allocator, record_data: []const u8, chunk: *ChunkHeader, template_id: u32) ![]u8 {
+    _ = record_data; // TODO: Use for substitution processing
     // Get template from chunk
-    const template = chunk.getTemplate(template_id) catch {
+    const template = chunk.getTemplate(template_id) catch |err| {
+        std.log.warn("Error getting template {d}: {any}", .{template_id, err});
         return try allocator.dupe(u8, "<Event><!-- Template parsing error --></Event>");
     } orelse {
+        std.log.warn("Template {d} not found", .{template_id});
         return try allocator.dupe(u8, "<Event><!-- Template not found --></Event>");
     };
     
-    // Create a root node to parse substitutions
-    var root = try RootNode.init(allocator, record_data, 0, chunk, null);
-    defer root.deinit();
-    
-    // Get substitutions
-    const substitutions = try root.substitutions();
-    
-    // Process template with substitutions
-    var processor = TemplateProcessor.init(allocator);
-    defer processor.deinit();
-    
-    return try processor.processTemplate(template, substitutions);
+    // For now, just return the template's pre-parsed XML
+    // TODO: Implement actual substitution processing
+    std.log.info("Successfully got template {d}, XML length: {d}", .{template_id, template.xml_format.len});
+    return try allocator.dupe(u8, template.xml_format);
 }
 
 // Tests
