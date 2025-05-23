@@ -1,0 +1,36 @@
+---
+description:
+globs:
+alwaysApply: true
+---
+## Project Context
+
+**Goal**: Port a complete Python EVTX parser to Zig with full compatibility for template processing and structured XML output generation.
+
+**Key Requirements**:
+- Parse EVTX file format (Windows Event Log binary format)
+- Extract and process templates from chunk headers
+- Generate structured XML output with substitution placeholders
+- Handle binary XML parsing with 16+ system tokens and 24+ variant data types
+- Maintain compatibility with the feature-complete Python parser
+
+## Development Environment Setup
+
+### Python Virtual Environment
+
+```bash
+# Navigate to project directory
+cd /Users/omerba/Workspace/python-evtx
+
+# Activate Python virtual environment
+source .venv/bin/activate
+
+# Install required dependencies
+uv add hexdump  # Add any missing dependencies as needed
+```
+
+# Development process
+
+- you will maintain tests for each node type that check for binary output.
+- you will utilze python scripts and the python parser to carefully debug the output of the zig parser.
+- you have [zig_014.md](mdc:zig_014.md) changelog if you are missing knowledge of recent zig version

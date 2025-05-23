@@ -4,15 +4,9 @@ const Allocator = std.mem.Allocator;
 const binary_parser = @import("binary_parser.zig");
 const Block = binary_parser.Block;
 const BinaryParserError = binary_parser.BinaryParserError;
-
-pub const BinaryXMLError = error{
-    InvalidVariantType,
-    OutOfMemory,
-    UnexpectedEndOfFile,
-    InvalidGuid,
-    InvalidFiletime,
-    InvalidSID,
-} || BinaryParserError;
+const tokens = @import("tokens.zig");
+pub const BinaryXMLError = tokens.BinaryXMLError;
+pub const VariantType = tokens.VariantType;
 
 // Unified variant data union for all data types
 pub const VariantData = union(enum) {
@@ -49,10 +43,163 @@ pub const VariantTypeNode = struct {
 
     const Self = @This();
 
-    pub fn fromBinary(allocator: Allocator, block: *Block, pos: *usize) BinaryXMLError!Self {
-        const variant_type = try block.unpackByte(pos.*);
-        pos.* += 1;
+    pub fn parseWithKnownSize(allocator: Allocator, block: *Block, pos: *usize, variant_type: u8, size: u16) BinaryXMLError!Self {
+        switch (variant_type) {
+            0x00 => return VariantTypeNode{ .tag = .Null, .data = VariantData{ .Null = {} } },
+            0x01 => {
+                // WString with known size - size is in bytes (not characters)
+                // In substitution arrays, the size is already in bytes
+                if (pos.* + size > block.buf.len) {
+                    std.log.err("WString buffer overrun: pos={d}, size={d}, buf_len={d}", .{pos.*, size, block.buf.len});
+                    return BinaryXMLError.BufferOverrun;
+                }
+                const wstring = try block.unpackWstring(allocator, pos.*, size);
+                pos.* += size;
+                return VariantTypeNode{ .tag = .WString, .data = VariantData{ .WString = wstring } };
+            },
+            0x02 => {
+                // String with known size
+                if (pos.* + size > block.buf.len) return BinaryXMLError.BufferOverrun;
+                const string = try allocator.alloc(u8, size);
+                @memcpy(string, block.buf[pos.* .. pos.* + size]);
+                pos.* += size;
+                return VariantTypeNode{ .tag = .String, .data = VariantData{ .String = string } };
+            },
+            0x03 => {
+                const value = try block.unpackInt8(pos.*);
+                pos.* += 1;
+                return VariantTypeNode{ .tag = .SignedByte, .data = VariantData{ .SignedByte = value } };
+            },
+            0x04 => {
+                const value = try block.unpackByte(pos.*);
+                pos.* += 1;
+                return VariantTypeNode{ .tag = .UnsignedByte, .data = VariantData{ .UnsignedByte = value } };
+            },
+            0x05 => {
+                const value = try block.unpackInt16(pos.*);
+                pos.* += 2;
+                return VariantTypeNode{ .tag = .SignedWord, .data = VariantData{ .SignedWord = value } };
+            },
+            0x06 => {
+                const value = try block.unpackWord(pos.*);
+                pos.* += 2;
+                return VariantTypeNode{ .tag = .UnsignedWord, .data = VariantData{ .UnsignedWord = value } };
+            },
+            0x07 => {
+                const value = try block.unpackInt32(pos.*);
+                pos.* += 4;
+                return VariantTypeNode{ .tag = .SignedDword, .data = VariantData{ .SignedDword = value } };
+            },
+            0x08 => {
+                const value = try block.unpackDword(pos.*);
+                pos.* += 4;
+                return VariantTypeNode{ .tag = .UnsignedDword, .data = VariantData{ .UnsignedDword = value } };
+            },
+            0x09 => {
+                const value = try block.unpackInt64(pos.*);
+                pos.* += 8;
+                return VariantTypeNode{ .tag = .SignedQword, .data = VariantData{ .SignedQword = value } };
+            },
+            0x0A => {
+                const value = try block.unpackQword(pos.*);
+                pos.* += 8;
+                return VariantTypeNode{ .tag = .UnsignedQword, .data = VariantData{ .UnsignedQword = value } };
+            },
+            0x0B => {
+                const value = try block.unpackFloat(pos.*);
+                pos.* += 4;
+                return VariantTypeNode{ .tag = .Real32, .data = VariantData{ .Real32 = value } };
+            },
+            0x0C => {
+                const value = try block.unpackDouble(pos.*);
+                pos.* += 8;
+                return VariantTypeNode{ .tag = .Real64, .data = VariantData{ .Real64 = value } };
+            },
+            0x0D => {
+                const value = try block.unpackByte(pos.*);
+                pos.* += 1;
+                return VariantTypeNode{ .tag = .Boolean, .data = VariantData{ .Boolean = value != 0 } };
+            },
+            0x0E => {
+                // Binary with known size
+                if (pos.* + size > block.buf.len) return BinaryXMLError.BufferOverrun;
+                const bytes_slice = try block.unpackBinary(pos.*, size);
+                const bytes = try allocator.dupe(u8, bytes_slice);
+                pos.* += size;
+                return VariantTypeNode{ .tag = .Binary, .data = VariantData{ .Binary = bytes } };
+            },
+            0x0F => {
+                const guid_bytes_slice = try block.unpackBinary(pos.*, 16);
+                const guid_bytes = try allocator.dupe(u8, guid_bytes_slice);
+                pos.* += 16;
+                return VariantTypeNode{ .tag = .GUID, .data = VariantData{ .GUID = guid_bytes } };
+            },
+            0x10 => {
+                // SizeT with known size
+                if (pos.* + size > block.buf.len) return BinaryXMLError.BufferOverrun;
+                const bytes_slice = try block.unpackBinary(pos.*, size);
+                const bytes = try allocator.dupe(u8, bytes_slice);
+                pos.* += size;
+                return VariantTypeNode{ .tag = .SizeT, .data = VariantData{ .SizeT = bytes } };
+            },
+            0x11 => {
+                const filetime = try block.unpackQword(pos.*);
+                pos.* += 8;
+                return VariantTypeNode{ .tag = .Filetime, .data = VariantData{ .Filetime = filetime } };
+            },
+            0x12 => {
+                const systime_bytes_slice = try block.unpackBinary(pos.*, 16);
+                const systime_bytes = try allocator.dupe(u8, systime_bytes_slice);
+                pos.* += 16;
+                return VariantTypeNode{ .tag = .Systemtime, .data = VariantData{ .Systemtime = systime_bytes } };
+            },
+            0x13 => {
+                // SID with known size
+                if (pos.* + size > block.buf.len) return BinaryXMLError.BufferOverrun;
+                const sid_bytes_slice = try block.unpackBinary(pos.*, size);
+                const sid_bytes = try allocator.dupe(u8, sid_bytes_slice);
+                pos.* += size;
+                return VariantTypeNode{ .tag = .SID, .data = VariantData{ .SID = sid_bytes } };
+            },
+            0x14 => {
+                // HexInt32 with known size
+                if (pos.* + size > block.buf.len) return BinaryXMLError.BufferOverrun;
+                const hex_bytes_slice = try block.unpackBinary(pos.*, size);
+                const hex_bytes = try allocator.dupe(u8, hex_bytes_slice);
+                pos.* += size;
+                return VariantTypeNode{ .tag = .HexInt32, .data = VariantData{ .HexInt32 = hex_bytes } };
+            },
+            0x15 => {
+                // HexInt64 with known size
+                if (pos.* + size > block.buf.len) return BinaryXMLError.BufferOverrun;
+                const hex_bytes_slice = try block.unpackBinary(pos.*, size);
+                const hex_bytes = try allocator.dupe(u8, hex_bytes_slice);
+                pos.* += size;
+                return VariantTypeNode{ .tag = .HexInt64, .data = VariantData{ .HexInt64 = hex_bytes } };
+            },
+            0x21 => {
+                // BinXml with known size
+                if (pos.* + size > block.buf.len) return BinaryXMLError.BufferOverrun;
+                const bytes_slice = try block.unpackBinary(pos.*, size);
+                const bytes = try allocator.dupe(u8, bytes_slice);
+                pos.* += size;
+                return VariantTypeNode{ .tag = .BinXml, .data = VariantData{ .BinXml = bytes } };
+            },
+            0x81 => {
+                // WStringArray with known size (size is total bytes)
+                if (pos.* + size > block.buf.len) return BinaryXMLError.BufferOverrun;
+                const string_data_slice = try block.unpackBinary(pos.*, size);
+                const string_data = try allocator.dupe(u8, string_data_slice);
+                pos.* += size;
+                return VariantTypeNode{ .tag = .WStringArray, .data = VariantData{ .WStringArray = string_data } };
+            },
+            else => return BinaryXMLError.InvalidVariantType,
+        }
+    }
 
+    pub fn parseWithType(allocator: Allocator, block: *Block, pos: *usize, variant_type: u8) BinaryXMLError!Self {
+        std.log.debug("parseWithType: variant type 0x{x:0>2} at pos {d}", .{variant_type, pos.*});
+        
         switch (variant_type) {
             0x00 => return VariantTypeNode{ .tag = .Null, .data = VariantData{ .Null = {} } },
             0x01 => {
@@ -62,7 +209,7 @@ pub const VariantTypeNode = struct {
                 var bytes_consumed: usize = 0;
                 var check_pos = pos.*;
                 while (check_pos + 1 < block.buf.len) : (check_pos += 2) {
-                    const word = std.mem.readInt(u16, block.buf[check_pos..check_pos + 2][0..2], .little);
+                    const word = std.mem.readInt(u16, block.buf[check_pos .. check_pos + 2][0..2], .little);
                     bytes_consumed += 2;
                     if (word == 0) break;
                 }
@@ -138,7 +285,8 @@ pub const VariantTypeNode = struct {
                 return VariantTypeNode{ .tag = .Binary, .data = VariantData{ .Binary = bytes } };
             },
             0x0F => {
-                const guid_bytes = try block.unpackBinary(pos.*, 16);
+                const guid_bytes_slice = try block.unpackBinary(pos.*, 16);
+                const guid_bytes = try allocator.dupe(u8, guid_bytes_slice);
                 pos.* += 16;
                 return VariantTypeNode{ .tag = .GUID, .data = VariantData{ .GUID = guid_bytes } };
             },
@@ -155,7 +303,8 @@ pub const VariantTypeNode = struct {
                 return VariantTypeNode{ .tag = .Filetime, .data = VariantData{ .Filetime = filetime } };
             },
             0x12 => {
-                const systime_bytes = try block.unpackBinary(pos.*, 16);
+                const systime_bytes_slice = try block.unpackBinary(pos.*, 16);
+                const systime_bytes = try allocator.dupe(u8, systime_bytes_slice);
                 pos.* += 16;
                 return VariantTypeNode{ .tag = .Systemtime, .data = VariantData{ .Systemtime = systime_bytes } };
             },
@@ -198,6 +347,12 @@ pub const VariantTypeNode = struct {
         }
     }
 
+    pub fn fromBinary(allocator: Allocator, block: *Block, pos: *usize) BinaryXMLError!Self {
+        const variant_type = try block.unpackByte(pos.*);
+        pos.* += 1;
+        return parseWithType(allocator, block, pos, variant_type);
+    }
+
     pub fn toString(self: *const VariantTypeNode, allocator: std.mem.Allocator) ![]u8 {
         switch (self.tag) {
             .Null => return try allocator.dupe(u8, ""),
@@ -223,10 +378,7 @@ pub const VariantTypeNode = struct {
             },
             .GUID => {
                 const bytes = self.data.GUID;
-                return try std.fmt.allocPrint(allocator, 
-                    "{{{x:0>8}-{x:0>4}-{x:0>4}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}}}",
-                    .{ @as(u32, @bitCast(bytes[0..4].*)), @as(u16, @bitCast(bytes[4..6].*)), @as(u16, @bitCast(bytes[6..8].*)),
-                       bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15] });
+                return try std.fmt.allocPrint(allocator, "{{{x:0>8}-{x:0>4}-{x:0>4}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}}}", .{ @as(u32, @bitCast(bytes[0..4].*)), @as(u16, @bitCast(bytes[4..6].*)), @as(u16, @bitCast(bytes[6..8].*)), bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15] });
             },
             .SizeT => {
                 var result = std.ArrayList(u8).init(allocator);
@@ -257,14 +409,14 @@ pub const VariantTypeNode = struct {
                 try result.appendSlice("S-");
                 const bytes = self.data.SID;
                 if (bytes.len < 2) return try allocator.dupe(u8, "S-INVALID");
-                
+
                 const revision = bytes[0];
                 const authority_count = bytes[1];
                 try result.writer().print("{d}-{d}", .{ revision, authority_count });
-                
+
                 var i: usize = 2;
                 while (i + 4 <= bytes.len) : (i += 4) {
-                    const subauth_bytes = bytes[i..i+4];
+                    const subauth_bytes = bytes[i .. i + 4];
                     const subauth = std.mem.readInt(u32, subauth_bytes[0..4], .little);
                     try result.writer().print("-{d}", .{subauth});
                 }
