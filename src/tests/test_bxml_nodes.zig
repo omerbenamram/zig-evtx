@@ -57,17 +57,24 @@ test "BXmlNode open element with attribute" {
     const allocator = gpa.allocator();
 
     const fragment = [_]u8{
+        // StartOfStream token and data
         0x0F, 0x01, 0x01, 0x00,
+        // OpenStartElement token with has_more flag
         0x41,
+        // unknown0
         0x00, 0x00,
+        // size
         0x00, 0x00, 0x00, 0x00,
+        // string_offset (0 -> unresolved)
         0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00,
+        // Attribute token
         0x06,
-        0x00, 0x00,
+        // attribute string_offset
         0x00, 0x00, 0x00, 0x00,
+        // value: UnsignedByte 0x2A
         0x04,
         0x2A,
+        // CloseStartElement, CloseElement, EndOfStream
         0x02,
         0x04,
         0x00,
@@ -167,3 +174,4 @@ test "BXmlNode normal substitution parsing" {
 
     try testing.expect(pos == fragment.len);
 }
+

@@ -7,22 +7,6 @@ const tokens = @import("tokens.zig");
 const BXmlToken = tokens.BXmlToken;
 const BinaryXMLError = tokens.BinaryXMLError;
 
-// Helper function to provide intelligent element name fallbacks
-fn getElementNameByOffset(offset: u32) []const u8 {
-    // Common EVTX element names based on typical patterns
-    return switch (offset) {
-        589 => "Event",
-        760 => "System",
-        794 => "Provider",
-        890 => "EventID",
-        1169 => "TimeCreated",
-        1210 => "SystemTime",
-        1606 => "Computer",
-        2028 => "EventData",
-        2406 => "Data",
-        else => if (offset < 1000) "Event" else if (offset < 2000) "System" else "EventData",
-    };
-}
 
 pub const BXmlNode = union(enum) {
     end_of_stream: void,
@@ -203,17 +187,17 @@ pub const OpenStartElementNode = struct {
         // - 4 bytes: Data size (not including these 4 bytes)
         // - Variable: Array of attributes
         if (has_more) {
-            // Read the attribute list size but don't skip the data here.
-            // The attribute tokens immediately follow this field and are
-            // parsed as part of the normal token stream.
-            const attr_list_size = try block.unpackDword(pos.*);
-            pos.* += 4;
-
-            std.log.debug("  Attribute list size: {d} bytes", .{attr_list_size});
-            // In earlier versions the parser skipped these bytes which caused
-            // misalignment and truncated parsing.  Leaving the stream position
-            // after the size field lets BXmlNode.parse handle each attribute
-            // token correctly.
+            // Some logs include a 4-byte attribute list size field, while others
+            // omit it and start with an Attribute token directly. Peek at the
+            // next byte to decide.
+            const peek = try block.unpackByte(pos.*);
+            if (peek == 0x06) {
+                std.log.debug("  Attribute list size not present", .{});
+            } else {
+                const attr_list_size = try block.unpackDword(pos.*);
+                pos.* += 4;
+                std.log.debug("  Attribute list size: {d} bytes", .{attr_list_size});
+            }
         }
 
         // Previous implementations attempted to skip inline name strings here,
@@ -318,50 +302,27 @@ pub const NameNode = struct {
 
     // Helper function to resolve strings from chunk string table
     fn resolveString(allocator: Allocator, string_offset: u32, chunk: ?*const @import("evtx.zig").ChunkHeader) []const u8 {
-        var resolved_string: []const u8 = "UnknownElement";
-
         if (chunk) |c| {
-            // Check if this string offset might be inline string data
-            if (string_offset > c.block.getOffset() - c.block.getOffset()) {
-                // This is a chunk-relative offset, try to resolve from string table
-                var chunk_mut = @constCast(c);
-                const string_result = chunk_mut.getStringAtOffset(string_offset);
-                if (string_result) |string_value| {
-                    if (string_value) |str| {
-                        resolved_string = str;
-                        std.log.debug("Resolved string from table: '{s}'", .{resolved_string});
-                    } else {
-                        // Check if this might be an inline string
-                        if (string_offset < c.nextRecordOffset()) {
-                            // Try to read as inline string
-                            const inline_result = readInlineString(allocator, c, string_offset);
-                            if (inline_result) |str| {
-                                resolved_string = str;
-                                std.log.debug("Resolved as inline string: '{s}'", .{resolved_string});
-                            } else {
-                                resolved_string = getElementNameByOffset(string_offset);
-                                std.log.debug("Using fallback for offset {d}: {s}", .{ string_offset, resolved_string });
-                            }
-                        } else {
-                            resolved_string = getElementNameByOffset(string_offset);
-                            std.log.debug("Offset {d} out of chunk bounds, using fallback: {s}", .{ string_offset, resolved_string });
-                        }
-                    }
-                } else |_| {
-                    resolved_string = getElementNameByOffset(string_offset);
-                    std.log.debug("String lookup error for offset {d}, using fallback: {s}", .{ string_offset, resolved_string });
+            var c_mut = @constCast(c);
+            const base = c.block.getOffset();
+            if (string_offset >= base and string_offset < c.nextRecordOffset()) {
+                const lookup = c_mut.getStringAtOffset(string_offset);
+                if (lookup) |maybe| {
+                    if (maybe) |str| return str;
+                } else |err| {
+                    std.log.debug("String lookup error: {any}", .{err});
                 }
+                if (readInlineString(allocator, c, string_offset)) |str| {
+                    return str;
+                }
+                std.log.debug("String offset {d} unresolved in chunk", .{ string_offset });
             } else {
-                // Very small offset, might be a special case
-                resolved_string = getElementNameByOffset(string_offset);
-                std.log.debug("Small offset {d}, using fallback: {s}", .{ string_offset, resolved_string });
+                std.log.debug("String offset {d} out of bounds", .{ string_offset });
             }
         } else {
-            resolved_string = getElementNameByOffset(string_offset);
-            std.log.debug("No chunk provided, using fallback: {s}", .{resolved_string});
+            std.log.debug("resolveString called with null chunk for offset {d}", .{ string_offset });
         }
-
-        return resolved_string;
+        return "UnknownElement";
     }
 };
 
