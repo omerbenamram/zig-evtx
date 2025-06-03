@@ -203,21 +203,17 @@ pub const OpenStartElementNode = struct {
         // - 4 bytes: Data size (not including these 4 bytes)
         // - Variable: Array of attributes
         if (has_more) {
-            // Read the attribute list size
+            // Read the attribute list size but don't skip the data here.
+            // The attribute tokens immediately follow this field and are
+            // parsed as part of the normal token stream.
             const attr_list_size = try block.unpackDword(pos.*);
             pos.* += 4;
 
             std.log.debug("  Attribute list size: {d} bytes", .{attr_list_size});
-
-            // Skip over the attribute data to position the parser at the
-            // first child element.  Attribute data size is specified by the
-            // attribute list size field.
-            if (pos.* + attr_list_size <= block.buf.len - block.offset) {
-                pos.* += attr_list_size;
-            } else {
-                std.log.warn("  Attribute list would exceed buffer, adjusting", .{});
-                pos.* = block.buf.len - block.offset;
-            }
+            // In earlier versions the parser skipped these bytes which caused
+            // misalignment and truncated parsing.  Leaving the stream position
+            // after the size field lets BXmlNode.parse handle each attribute
+            // token correctly.
         }
 
         // If the name string is stored inline after this node, skip it
