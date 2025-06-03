@@ -24,8 +24,7 @@ collection of debug scripts.
 3. Use `uv run` to execute Python tools or the test suite.
 
 ## Running Tests
-- **Python:** `uv run pytest tests/` (or `just test`)
-- **Zig unit tests:** `zig test src/test_runner.zig`
+- **Zig unit tests:** `zig test src/test_runner.zig` (INCOMPLETE - these do NOT indicate parser is currently working, we need to rely on comparison scripts.)
 - **Zig/Python comparison:** `zig run test_template_comparison.zig`
 
 Run both suites when modifying related code.
