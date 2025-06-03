@@ -467,6 +467,13 @@ pub const CDataSectionNode = struct {
         const text_data = try block.unpackBinary(pos.*, string_len * 2); // UTF-16
         pos.* += string_len * 2;
 
+        // Align to 4-byte boundary (padding after CDATA)
+        const consumed = 2 + string_len * 2;
+        const padding = @as(usize, (4 - (consumed % 4)) % 4);
+        if (pos.* + padding <= block.getSize()) {
+            pos.* += padding;
+        }
+
         // For now, return the raw UTF-16 data
         // TODO: Convert UTF-16 to UTF-8
         return CDataSectionNode{
