@@ -61,7 +61,8 @@ pub const BXmlNode = union(enum) {
                 return BXmlNode{ .end_of_stream = {} };
             },
             .OpenStartElement => {
-                const node = try OpenStartElementNode.parse(allocator, block, pos, has_more, chunk);
+                const flags = BXmlToken.getFlags(token_byte);
+                const node = try OpenStartElementNode.parse(allocator, block, pos, has_more, flags, chunk);
                 return BXmlNode{ .open_start_element = node };
             },
             .CloseStartElement => return BXmlNode{ .close_start_element = {} },
@@ -148,7 +149,7 @@ pub const OpenStartElementNode = struct {
     name: NameNode,
     has_more: bool,
 
-    pub fn parse(allocator: Allocator, block: *Block, pos: *usize, has_more: bool, chunk: ?*const @import("evtx.zig").ChunkHeader) BinaryXMLError!OpenStartElementNode {
+    pub fn parse(allocator: Allocator, block: *Block, pos: *usize, has_more: bool, flags: u8, chunk: ?*const @import("evtx.zig").ChunkHeader) BinaryXMLError!OpenStartElementNode {
 
         // Remember start of this node relative to the block
         const start_pos = pos.*;
@@ -188,6 +189,25 @@ pub const OpenStartElementNode = struct {
         const string_offset = try block.unpackDword(pos.*);
         pos.* += 4;
 
+        // Optional dependency ID if flag 0x04 is set
+        if (flags & 0x04 != 0) {
+            _ = try block.unpackDword(pos.*);
+            pos.* += 4;
+        }
+
+        // Skip inline name string if the string offset points inside the template
+        if (chunk) |_| {
+            const start_relative = start_pos;
+            if (string_offset > start_relative) {
+                // Inline NameString node
+                const str_len = try block.unpackWord(string_offset + 6);
+                const inline_len = 10 + (@as(usize, str_len) * 2);
+                if (string_offset + inline_len > pos.*) {
+                    pos.* = string_offset + inline_len;
+                }
+            }
+        }
+
         std.log.debug("  unknown0: 0x{x:0>4}, size: {d}, string_offset: {d} (0x{x:0>8})", .{ unknown0, size, string_offset, string_offset });
 
         // Resolve the element name from string table
@@ -198,23 +218,6 @@ pub const OpenStartElementNode = struct {
         };
         std.log.debug("  name resolved to: '{s}'", .{name.string});
 
-        // According to EVTX documentation and our analysis:
-        // When has_more flag is set, there's an attribute list structure:
-        // - 4 bytes: Data size (not including these 4 bytes)
-        // - Variable: Array of attributes
-        if (has_more) {
-            // Read the attribute list size but don't skip the data here.
-            // The attribute tokens immediately follow this field and are
-            // parsed as part of the normal token stream.
-            const attr_list_size = try block.unpackDword(pos.*);
-            pos.* += 4;
-
-            std.log.debug("  Attribute list size: {d} bytes", .{attr_list_size});
-            // In earlier versions the parser skipped these bytes which caused
-            // misalignment and truncated parsing.  Leaving the stream position
-            // after the size field lets BXmlNode.parse handle each attribute
-            // token correctly.
-        }
 
         // Previous implementations attempted to skip inline name strings here,
         // but that caused misalignment when attribute lists were present.
@@ -480,11 +483,13 @@ pub const CharRefNode = struct {
         return CharRefNode{ .value = val };
     }
 
-    pub fn toXml(self: CharRefNode, allocator: Allocator, writer: anytype) !void {
+    pub fn toXml(self: CharRefNode, allocator: Allocator, writer: anytype) BinaryXMLError!void {
         _ = allocator;
         var buf: [10]u8 = undefined;
-        const len = try std.fmt.bufPrint(&buf, "&#x{X:0>4};", .{self.value});
-        try writer.writeAll(buf[0..len]);
+        const slice = std.fmt.bufPrint(&buf, "&#x{X:0>4};", .{self.value}) catch {
+            return BinaryXMLError.OutOfMemory;
+        };
+        try writer.writeAll(slice);
     }
 };
 
@@ -771,6 +776,9 @@ fn parseStream(
             },
             .entity_reference => |entity| {
                 try entity.toXml(allocator, writer);
+            },
+            .char_reference => |charref| {
+                try charref.toXml(allocator, writer);
             },
             else => {
                 std.log.debug("Unhandled node type in XML generation", .{});
