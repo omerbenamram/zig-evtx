@@ -433,6 +433,10 @@ pub const SubstitutionNode = struct {
         pos.* += 2;
         const value_type = try block.unpackByte(pos.*);
         pos.* += 1;
+        // Skip padding byte present in substitution tokens
+        if (pos.* < block.getSize()) {
+            pos.* += 1;
+        }
 
         return SubstitutionNode{
             .index = index,
@@ -513,11 +517,19 @@ pub const EntityReferenceNode = struct {
 pub const StreamNode = struct {
     pub fn parse(allocator: Allocator, block: *Block, pos: *usize) BinaryXMLError!StreamNode {
         _ = allocator;
-        _ = block;
-        _ = pos;
-        // StartOfStream has NO additional data!
-        // This was the bug - we were consuming the next token as data
-        std.log.debug("StartOfStream token (no additional data)", .{});
+
+        // The StartOfStream token is followed by three bytes of
+        // additional data: a single byte and a 16-bit value.
+        // These values are typically 0x01, 0x0001.
+        const unknown0 = try block.unpackByte(pos.*);
+        pos.* += 1;
+        const unknown1 = try block.unpackWord(pos.*);
+        pos.* += 2;
+
+        std.log.debug(
+            "StartOfStream token: unknown0=0x{x:0>2}, unknown1=0x{x:0>4}",
+            .{ unknown0, unknown1 },
+        );
 
         return StreamNode{};
     }
@@ -530,13 +542,14 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
     var pos: usize = offset;
     const end_pos = offset + length;
 
-    // Parse StartOfStream (1 byte only - no additional data!)
+    // Parse StartOfStream (token + 3 bytes of data)
     const start_token = try block.unpackByte(pos);
     if (start_token != 0x0f) {
         std.log.warn("Expected StartOfStream (0x0f), got 0x{x:0>2}", .{start_token});
         return BinaryXMLError.InvalidToken;
     }
-    pos += 1; // StartOfStream is 1 byte only
+    // Skip the 3 bytes of StartOfStream data
+    pos += 4;
 
     // Parse TemplateInstance
     const template_token = try block.unpackByte(pos);
