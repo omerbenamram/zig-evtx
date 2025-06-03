@@ -33,6 +33,7 @@ pub const BXmlNode = union(enum) {
     value: ValueNode,
     attribute: AttributeNode,
     cdata_section: CDataSectionNode,
+    char_reference: CharRefNode,
     entity_reference: EntityReferenceNode,
     template_instance: TemplateInstanceNode,
     normal_substitution: SubstitutionNode,
@@ -100,9 +101,8 @@ pub const BXmlNode = union(enum) {
                 return BXmlNode{ .entity_reference = node };
             },
             .CharRef => {
-                // Character references are less common, skip for now
-                std.log.warn("Unsupported token: {} at pos {d}", .{ token, pos.* });
-                return BinaryXMLError.InvalidData;
+                const node = try CharRefNode.parse(allocator, block, pos);
+                return BXmlNode{ .char_reference = node };
             },
             .TemplateInstance => {
                 const node = try TemplateInstanceNode.parse(allocator, block, pos);
@@ -133,6 +133,7 @@ pub const BXmlNode = union(enum) {
             .value => |node| try node.toXml(allocator, writer),
             .attribute => |node| try node.toXml(allocator, writer),
             .cdata_section => |node| try node.toXml(allocator, writer),
+            .char_reference => |node| try node.toXml(allocator, writer),
             .template_instance => {}, // Not rendered directly
             .normal_substitution => |node| try node.toXml(allocator, writer),
             .conditional_substitution => |node| try node.toXml(allocator, writer),
@@ -148,7 +149,6 @@ pub const OpenStartElementNode = struct {
     has_more: bool,
 
     pub fn parse(allocator: Allocator, block: *Block, pos: *usize, has_more: bool, chunk: ?*const @import("evtx.zig").ChunkHeader) BinaryXMLError!OpenStartElementNode {
-        _ = allocator;
 
         // Remember start of this node relative to the block
         const start_pos = pos.*;
@@ -191,7 +191,7 @@ pub const OpenStartElementNode = struct {
         std.log.debug("  unknown0: 0x{x:0>4}, size: {d}, string_offset: {d} (0x{x:0>8})", .{ unknown0, size, string_offset, string_offset });
 
         // Resolve the element name from string table
-        const resolved_string = NameNode.resolveString(string_offset, chunk);
+        const resolved_string = NameNode.resolveString(allocator, string_offset, chunk);
         const name = NameNode{
             .string_offset = string_offset,
             .string = resolved_string,
@@ -216,19 +216,9 @@ pub const OpenStartElementNode = struct {
             // token correctly.
         }
 
-        // If the name string is stored inline after this node, skip it
-        if (chunk != null) {
-            if (string_offset > start_pos and string_offset < block.getSize()) {
-                const str_len = block.unpackWord(string_offset + 0x06) catch 0;
-                const inline_size = @as(usize, str_len) * 2 + 10;
-
-                if (pos.* <= string_offset) {
-                    pos.* = string_offset + inline_size;
-                } else if (pos.* < string_offset + inline_size) {
-                    pos.* = string_offset + inline_size;
-                }
-            }
-        }
+        // Previous implementations attempted to skip inline name strings here,
+        // but that caused misalignment when attribute lists were present.
+        // Allow the parser to naturally consume any inline string tokens.
 
         return OpenStartElementNode{
             .dependency_id = null, // Simplified for now
@@ -297,14 +287,12 @@ pub const NameNode = struct {
 
     // For OpenStartElement - just parse string offset (4 bytes)
     pub fn parseForElement(allocator: Allocator, block: *Block, pos: *usize, chunk: ?*const @import("evtx.zig").ChunkHeader) BinaryXMLError!NameNode {
-        _ = allocator;
-
         const string_offset = try block.unpackDword(pos.*);
         pos.* += 4;
 
         std.log.debug("NameNode (element): string_offset={d} (0x{x:0>8})", .{ string_offset, string_offset });
 
-        const resolved_string = resolveString(string_offset, chunk);
+        const resolved_string = resolveString(allocator, string_offset, chunk);
 
         return NameNode{
             .string_offset = string_offset,
@@ -314,14 +302,13 @@ pub const NameNode = struct {
 
     // For attributes - parse string offset (4 bytes)
     pub fn parse(allocator: Allocator, block: *Block, pos: *usize, chunk: ?*const @import("evtx.zig").ChunkHeader) BinaryXMLError!NameNode {
-        _ = allocator;
         // NameNode structure for attributes simply stores a dword string offset
         const string_offset = try block.unpackDword(pos.*);
         pos.* += 4;
 
         std.log.debug("NameNode (attribute): string_offset={d} (0x{x:0>8})", .{ string_offset, string_offset });
 
-        const resolved_string = resolveString(string_offset, chunk);
+        const resolved_string = resolveString(allocator, string_offset, chunk);
 
         return NameNode{
             .string_offset = string_offset,
@@ -330,7 +317,7 @@ pub const NameNode = struct {
     }
 
     // Helper function to resolve strings from chunk string table
-    fn resolveString(string_offset: u32, chunk: ?*const @import("evtx.zig").ChunkHeader) []const u8 {
+    fn resolveString(allocator: Allocator, string_offset: u32, chunk: ?*const @import("evtx.zig").ChunkHeader) []const u8 {
         var resolved_string: []const u8 = "UnknownElement";
 
         if (chunk) |c| {
@@ -347,7 +334,7 @@ pub const NameNode = struct {
                         // Check if this might be an inline string
                         if (string_offset < c.nextRecordOffset()) {
                             // Try to read as inline string
-                            const inline_result = readInlineString(c, string_offset);
+                            const inline_result = readInlineString(allocator, c, string_offset);
                             if (inline_result) |str| {
                                 resolved_string = str;
                                 std.log.debug("Resolved as inline string: '{s}'", .{resolved_string});
@@ -379,10 +366,11 @@ pub const NameNode = struct {
 };
 
 // Helper function to read inline strings
-fn readInlineString(chunk: *const @import("evtx.zig").ChunkHeader, offset: u32) ?[]const u8 {
-    // Try to parse as NameStringNode
-    const result = chunk.parseStringNode(offset) catch return null;
-    return result.string;
+fn readInlineString(allocator: Allocator, chunk: *const @import("evtx.zig").ChunkHeader, offset: u32) ?[]const u8 {
+    const block = chunk.block;
+    const length = block.unpackWord(offset + 0x06) catch return null;
+    const utf8_string = block.unpackWstring(allocator, offset + 0x08, length) catch return null;
+    return utf8_string;
 }
 
 pub const TemplateInstanceNode = struct {
@@ -479,6 +467,24 @@ pub const CDataSectionNode = struct {
         // TODO: Properly escape CDATA content
         try writer.writeAll("<![CDATA[");
         try writer.writeAll("]]>");
+    }
+};
+
+pub const CharRefNode = struct {
+    value: u16,
+
+    pub fn parse(allocator: Allocator, block: *Block, pos: *usize) BinaryXMLError!CharRefNode {
+        _ = allocator;
+        const val = try block.unpackWord(pos.*);
+        pos.* += 2;
+        return CharRefNode{ .value = val };
+    }
+
+    pub fn toXml(self: CharRefNode, allocator: Allocator, writer: anytype) !void {
+        _ = allocator;
+        var buf: [10]u8 = undefined;
+        const len = try std.fmt.bufPrint(&buf, "&#x{X:0>4};", .{self.value});
+        try writer.writeAll(buf[0..len]);
     }
 };
 
@@ -692,33 +698,47 @@ pub fn parseTemplateXml(allocator: Allocator, block: *Block, offset: u32, length
     var node_count: u32 = 0;
     var depth: u32 = 0;
 
-    // Parse the complete hierarchical structure
-    while (pos < end_pos) {
-        const node = BXmlNode.parse(temp_allocator, block, &pos, chunk) catch |err| {
-            std.log.warn("Failed to parse node at pos {d}: {any}", .{ pos - offset, err });
+    try parseStream(allocator, temp_allocator, block, &pos, end_pos, chunk, writer, &element_stack, &depth, &node_count);
+
+    std.log.info("Parsed {d} nodes, output length: {d}, final depth: {d}", .{ node_count, output.items.len, depth });
+    return output.toOwnedSlice();
+}
+
+fn parseStream(
+    allocator: Allocator,
+    temp_allocator: Allocator,
+    block: *Block,
+    pos: *usize,
+    end_pos: usize,
+    chunk: ?*const @import("evtx.zig").ChunkHeader,
+    writer: anytype,
+    element_stack: *std.ArrayList([]const u8),
+    depth: *u32,
+    node_count: *u32,
+) BinaryXMLError!void {
+    while (pos.* < end_pos) {
+        const node = BXmlNode.parse(temp_allocator, block, pos, chunk) catch |err| {
+            std.log.warn("Failed to parse node at pos {d}: {any}", .{ pos.*, err });
             return err;
         };
-        node_count += 1;
+        node_count.* += 1;
 
         switch (node) {
             .start_of_stream => {
                 std.log.debug("Parsed StartOfStream", .{});
-                continue;
+                depth.* += 1;
+                try parseStream(allocator, temp_allocator, block, pos, end_pos, chunk, writer, element_stack, depth, node_count);
+                depth.* -= 1;
             },
             .end_of_stream => {
-                std.log.debug("Parsed EndOfStream at depth {d}", .{depth});
-                // Only break if we're at the root level
-                if (depth == 0) {
-                    break;
-                }
-                // Otherwise, this might be end of a nested structure
-                continue;
+                std.log.debug("Parsed EndOfStream at depth {d}", .{depth.*});
+                return;
             },
             .open_start_element => |elem| {
                 try elem.toXml(allocator, writer);
                 try element_stack.append(elem.name.string);
-                depth += 1;
-                std.log.debug("Opened element '{s}', depth now {d}", .{ elem.name.string, depth });
+                depth.* += 1;
+                std.log.debug("Opened element '{s}', depth now {d}", .{ elem.name.string, depth.* });
             },
             .close_start_element => {
                 try writer.writeAll(">");
@@ -728,16 +748,16 @@ pub fn parseTemplateXml(allocator: Allocator, block: *Block, offset: u32, length
                 try writer.writeAll("/>");
                 if (element_stack.items.len > 0) {
                     _ = element_stack.pop();
-                    depth -= 1;
-                    std.log.debug("Closed empty element, depth now {d}", .{depth});
+                    depth.* -= 1;
+                    std.log.debug("Closed empty element, depth now {d}", .{depth.*});
                 }
             },
             .close_element => {
                 if (element_stack.items.len > 0) {
                     const elem_name = element_stack.pop() orelse unreachable;
-                    depth -= 1;
+                    depth.* -= 1;
                     try writer.print("</{s}>", .{elem_name});
-                    std.log.debug("Closed element '{s}', depth now {d}", .{ elem_name, depth });
+                    std.log.debug("Closed element '{s}', depth now {d}", .{ elem_name, depth.* });
                 }
             },
             .attribute => |attr| {
@@ -757,13 +777,9 @@ pub fn parseTemplateXml(allocator: Allocator, block: *Block, offset: u32, length
             },
         }
 
-        // Safety check to prevent infinite loops
-        if (node_count > 10000) {
+        if (node_count.* > 10000) {
             std.log.warn("Parsed too many nodes, stopping", .{});
-            break;
+            return;
         }
     }
-
-    std.log.info("Parsed {d} nodes, output length: {d}, final depth: {d}", .{ node_count, output.items.len, depth });
-    return output.toOwnedSlice();
 }
