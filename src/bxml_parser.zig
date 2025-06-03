@@ -149,27 +149,24 @@ pub const OpenStartElementNode = struct {
 
     pub fn parse(allocator: Allocator, block: *Block, pos: *usize, has_more: bool, chunk: ?*const @import("evtx.zig").ChunkHeader) BinaryXMLError!OpenStartElementNode {
         _ = allocator;
-        std.log.debug("OpenStartElementNode.parse: starting at pos {d}, has_more={}", .{ pos.*, has_more });
 
-        // Parse like Python does - simple and consistent
+        // Remember start of this node relative to the block
+        const start_pos = pos.*;
+        std.log.debug("OpenStartElementNode.parse: starting at pos {d}, has_more={}", .{ start_pos, has_more });
+
         // Read unknown0 (2 bytes)
         const unknown0 = try block.unpackWord(pos.*);
         pos.* += 2;
 
         // Check if this is a ROOT OpenStartElement marker
-        // ROOT markers have unknown0 = 1 and are followed immediately by another token
         if (!has_more and unknown0 == 1) {
-            // Peek at next byte to see if it looks like a token
             if (block.offset + pos.* < block.buf.len) {
                 const next_byte = block.buf[block.offset + pos.*];
                 const next_token = BXmlToken.fromByte(next_byte);
-                
-                // If next byte is a valid token (especially 0x41 = OpenStartElement with has_more),
-                // then this is a ROOT marker
+
                 if (next_token != null and (next_byte == 0x41 or next_byte == 0x01)) {
                     std.log.debug("  Detected ROOT OpenStartElement marker (unknown0=1, next byte=0x{x:02})", .{next_byte});
-                    
-                    // ROOT element - return minimal node
+
                     return OpenStartElementNode{
                         .dependency_id = null,
                         .data_size = 0,
@@ -201,7 +198,6 @@ pub const OpenStartElementNode = struct {
         };
         std.log.debug("  name resolved to: '{s}'", .{name.string});
 
-        
         // According to EVTX documentation and our analysis:
         // When has_more flag is set, there's an attribute list structure:
         // - 4 bytes: Data size (not including these 4 bytes)
@@ -221,6 +217,20 @@ pub const OpenStartElementNode = struct {
             } else {
                 std.log.warn("  Attribute list would exceed buffer, adjusting", .{});
                 pos.* = block.buf.len - block.offset;
+            }
+        }
+
+        // If the name string is stored inline after this node, skip it
+        if (chunk != null) {
+            if (string_offset > start_pos and string_offset < block.getSize()) {
+                const str_len = block.unpackWord(string_offset + 0x06) catch 0;
+                const inline_size = @as(usize, str_len) * 2 + 10;
+
+                if (pos.* <= string_offset) {
+                    pos.* = string_offset + inline_size;
+                } else if (pos.* < string_offset + inline_size) {
+                    pos.* = string_offset + inline_size;
+                }
             }
         }
 
@@ -246,8 +256,8 @@ pub const ValueNode = struct {
     pub fn parse(allocator: Allocator, block: *Block, pos: *usize) BinaryXMLError!ValueNode {
         const value_type = try block.unpackByte(pos.*);
         pos.* += 1;
-        std.log.debug("ValueNode: parsing variant type 0x{x:0>2} at pos {d}", .{value_type, pos.*});
-        
+        std.log.debug("ValueNode: parsing variant type 0x{x:0>2} at pos {d}", .{ value_type, pos.* });
+
         // Don't call fromBinary which reads the type again, use parseWithType
         const value_data = try VariantTypeNode.parseWithType(allocator, block, pos, value_type);
 
@@ -288,18 +298,18 @@ pub const AttributeNode = struct {
 pub const NameNode = struct {
     string_offset: ?u32,
     string: []const u8,
-    
+
     // For OpenStartElement - just parse string offset (4 bytes)
     pub fn parseForElement(allocator: Allocator, block: *Block, pos: *usize, chunk: ?*const @import("evtx.zig").ChunkHeader) BinaryXMLError!NameNode {
         _ = allocator;
-        
+
         const string_offset = try block.unpackDword(pos.*);
         pos.* += 4;
-        
+
         std.log.debug("NameNode (element): string_offset={d} (0x{x:0>8})", .{ string_offset, string_offset });
-        
+
         const resolved_string = resolveString(string_offset, chunk);
-        
+
         return NameNode{
             .string_offset = string_offset,
             .string = resolved_string,
@@ -327,7 +337,7 @@ pub const NameNode = struct {
             .string = resolved_string,
         };
     }
-    
+
     // Helper function to resolve strings from chunk string table
     fn resolveString(string_offset: u32, chunk: ?*const @import("evtx.zig").ChunkHeader) []const u8 {
         var resolved_string: []const u8 = "UnknownElement";
@@ -372,7 +382,7 @@ pub const NameNode = struct {
             resolved_string = getElementNameByOffset(string_offset);
             std.log.debug("No chunk provided, using fallback: {s}", .{resolved_string});
         }
-        
+
         return resolved_string;
     }
 };
@@ -480,7 +490,7 @@ pub const EntityReferenceNode = struct {
         pos.* += 4;
 
         var entity_name: []const u8 = "unknown";
-        
+
         if (chunk) |c| {
             var chunk_mut = @constCast(c);
             const string_result = chunk_mut.getStringAtOffset(string_offset) catch null;
@@ -548,20 +558,20 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
 
     // Check what comes next
     const next_byte = try block.unpackByte(pos);
-    
+
     if (next_byte == 0x00) {
         // EndOfStream - this record contains the resident template
         std.log.debug("Found EndOfStream at pos {d}, resident template follows", .{pos - offset});
         pos += 1;
-        
+
         // Parse through the resident template to find where substitutions start
         // For now, use a simple heuristic: look for valid substitution count
         var found_subs = false;
         var subs_pos = pos;
-        
+
         while (subs_pos + 4 <= end_pos and !found_subs) {
             const potential_count = try block.unpackDword(subs_pos);
-            
+
             // Check if this could be a valid substitution count
             if (potential_count > 0 and potential_count < 100) {
                 // Verify it looks like valid declarations
@@ -572,14 +582,14 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
                         const decl_pos = subs_pos + 4 + (i * 4);
                         const size = try block.unpackWord(decl_pos);
                         const typ = try block.unpackByte(decl_pos + 2);
-                        
+
                         // Basic validation
                         if (size > 1000 or typ > 0x30) {
                             looks_valid = false;
                             break;
                         }
                     }
-                    
+
                     if (looks_valid) {
                         std.log.info("Found likely substitution count {d} at pos {d}", .{ potential_count, subs_pos - offset });
                         pos = subs_pos;
@@ -587,10 +597,10 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
                     }
                 }
             }
-            
+
             subs_pos += 1;
         }
-        
+
         if (!found_subs) {
             std.log.err("Could not find substitution array in resident template", .{});
             return try allocator.dupe(u8, "<Event><!-- Could not find substitutions --></Event>");
@@ -603,9 +613,9 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
 
     // Parse substitution array
     const template_processor = @import("template_processor.zig");
-    
+
     // Log what's at the substitution position
-    std.log.debug("Parsing substitutions at pos {d} (0x{x})", .{pos - offset, pos});
+    std.log.debug("Parsing substitutions at pos {d} (0x{x})", .{ pos - offset, pos });
     if (pos + 16 <= block.getSize()) {
         var preview: [16]u8 = undefined;
         for (0..16) |i| {
@@ -613,16 +623,16 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
         }
         std.log.debug("First 16 bytes: {x}", .{preview});
     }
-    
+
     var subs = template_processor.SubstitutionArray.parseWithDeclarations(allocator, block, pos) catch |err| {
-        std.log.err("Failed to parse substitution array at pos {d}: {any}", .{pos - offset, err});
-        
+        std.log.err("Failed to parse substitution array at pos {d}: {any}", .{ pos - offset, err });
+
         // Log more details about the failure
         if (pos + 4 <= block.getSize()) {
             const count = try block.unpackDword(pos);
-            std.log.err("Count at position would be: {d} (0x{x})", .{count, count});
+            std.log.err("Count at position would be: {d} (0x{x})", .{ count, count });
         }
-        
+
         return try allocator.dupe(u8, "<Event><!-- Failed to parse substitutions --></Event>");
     };
     defer subs.deinit();
@@ -637,14 +647,14 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
     }
 
     const template = template_opt.?;
-    
+
     std.log.info("Template XML format length: {d}", .{template.xml_format.len});
     std.log.debug("Template XML: {s}", .{template.xml_format});
 
     // Apply substitutions
     var processor = template_processor.SubstitutionProcessor.init(allocator, template.xml_format, &subs);
     const result = try processor.process();
-    
+
     std.log.info("Result after substitution: {s}", .{result});
     return result;
 }
@@ -657,7 +667,7 @@ pub fn parseTemplateXml(allocator: Allocator, block: *Block, offset: u32, length
     errdefer output.deinit();
 
     const writer = output.writer();
-    var pos: usize = offset;  // pos is block-relative throughout parsing
+    var pos: usize = offset; // pos is block-relative throughout parsing
     const end_pos: usize = offset + length;
 
     var element_stack = std.ArrayList([]const u8).init(allocator);
