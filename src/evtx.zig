@@ -402,6 +402,11 @@ pub const ChunkHeader = struct {
 
     pub fn deinit(self: *Self) void {
         if (self.templates) |*templates_map| {
+            var iter = templates_map.iterator();
+            while (iter.next()) |entry| {
+                // Free template XML strings allocated during parsing
+                self.allocator.free(entry.value_ptr.*.xml_format);
+            }
             templates_map.deinit();
         }
         if (self.strings) |*strings_map| {

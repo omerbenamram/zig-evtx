@@ -82,6 +82,11 @@ pub fn main() !void {
             try stdout.print("{s}\n", .{xml});
         }
     }
+
+    // Free allocated templates and strings for each chunk
+    for (chunks.items) |*chunk| {
+        chunk.deinit();
+    }
     
     try stdout.print("</Events>\n", .{});
     
