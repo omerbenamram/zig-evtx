@@ -201,8 +201,6 @@ pub const OpenStartElementNode = struct {
         };
         std.log.debug("  name resolved to: '{s}'", .{name.string});
 
-        // Store the starting position to calculate tag_length later
-        _ = pos.* - 1; // element_start would be pos.* - 1 (already consumed token)
         
         // According to EVTX documentation and our analysis:
         // When has_more flag is set, there's an attribute list structure:
@@ -212,34 +210,17 @@ pub const OpenStartElementNode = struct {
             // Read the attribute list size
             const attr_list_size = try block.unpackDword(pos.*);
             pos.* += 4;
-            
+
             std.log.debug("  Attribute list size: {d} bytes", .{attr_list_size});
-            
-            // The attribute list size tells us how many bytes of attribute data follow
-            // BUT: Python's tag_length calculation shows that there's more to the element structure
-            // For template 3346188909's Event element:
-            // - Basic structure: 11 bytes (token + unknown0 + size + string_offset)
-            // - Attribute list size field: 4 bytes
-            // - Attribute data: 0 bytes (in this case)
-            // - Additional data: 20 bytes (unknown structure)
-            // Total tag_length: 35 bytes
-            
-            // For now, let's calculate the tag_length based on the data_size field
-            // The data_size field in OpenStartElement includes everything up to child elements
-            // So children start at: element_start + 11 + (4 if has_more) + additional_data
-            
-            // Based on empirical analysis of template 3346188909:
-            // Event element starts at 0x1242, children start at 0x1265
-            // That's a difference of 35 bytes (0x23)
-            // We've consumed: 1 (token) + 2 (unknown0) + 4 (size) + 4 (string_offset) + 4 (attr_list_size) = 15
-            // So we need to skip 35 - 15 = 20 more bytes
-            
-            const additional_skip: usize = 20;
-            if (pos.* + additional_skip <= block.buf.len - block.offset) {
-                std.log.debug("  Skipping {d} additional bytes to reach children", .{additional_skip});
-                pos.* += additional_skip;
+
+            // Skip over the attribute data to position the parser at the
+            // first child element.  Attribute data size is specified by the
+            // attribute list size field.
+            if (pos.* + attr_list_size <= block.buf.len - block.offset) {
+                pos.* += attr_list_size;
             } else {
-                std.log.warn("  Cannot skip {d} bytes, would exceed buffer", .{additional_skip});
+                std.log.warn("  Attribute list would exceed buffer, adjusting", .{});
+                pos.* = block.buf.len - block.offset;
             }
         }
 
