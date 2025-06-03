@@ -29,9 +29,7 @@ def debug_python_template():
             print(f"Checking chunk 1")
             
             # Load templates  
-            template_dict = {}
-            for template in chunk.templates():
-                template_dict[template.template_id()] = template
+            template_dict = chunk.templates()
                 
             print(f"Found {len(template_dict)} templates in chunk 1")
             
@@ -49,3 +47,4 @@ def debug_python_template():
 
 if __name__ == "__main__":
     debug_python_template()
+

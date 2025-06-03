@@ -105,7 +105,8 @@ pub fn main() !void {
             std.log.info("Found template 3346188909", .{});
             
             // Debug the binary XML parsing for this template
-            try debugBinaryXmlParsing(allocator, &chunk.block, 574 + 0x18, 1170, &chunk);
+            // The template data starts at chunk offset 550 + 0x18 = 574
+            try debugBinaryXmlParsing(allocator, &chunk.block, 574, 1170, &chunk);
         }
     }
 }
