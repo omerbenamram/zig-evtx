@@ -10,8 +10,8 @@ pub const BXmlToken = enum(u8) {
     Value = 0x05,
     Attribute = 0x06,
     CDataSection = 0x07,
-    EntityReference = 0x08,
-    CharRef = 0x09,
+    CharRef = 0x08,
+    EntityReference = 0x09,
     ProcessingInstructionTarget = 0x0A,
     ProcessingInstructionData = 0x0B,
     TemplateInstance = 0x0C,
@@ -88,8 +88,8 @@ pub const token_names = [_][]const u8{
     "Value", // 0x05
     "Attribute", // 0x06
     "CDataSection", // 0x07
-    "EntityReference", // 0x08
-    "CharRef", // 0x09
+    "CharRef", // 0x08
+    "EntityReference", // 0x09
     "ProcessingInstructionTarget", // 0x0A
     "ProcessingInstructionData", // 0x0B
     "TemplateInstance", // 0x0C
