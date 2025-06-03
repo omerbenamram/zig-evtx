@@ -312,19 +312,14 @@ pub const NameNode = struct {
         };
     }
 
-    // For attributes - parse hash (2 bytes) + string offset (4 bytes)
+    // For attributes - parse string offset (4 bytes)
     pub fn parse(allocator: Allocator, block: *Block, pos: *usize, chunk: ?*const @import("evtx.zig").ChunkHeader) BinaryXMLError!NameNode {
         _ = allocator;
-        // NameNode structure for attributes:
-        // - hash (2 bytes)
-        // - string_offset (4 bytes) - offset within chunk
-        const hash = try block.unpackWord(pos.*);
-        pos.* += 2;
-
+        // NameNode structure for attributes simply stores a dword string offset
         const string_offset = try block.unpackDword(pos.*);
         pos.* += 4;
 
-        std.log.debug("NameNode (attribute): hash=0x{x:0>4}, string_offset={d} (0x{x:0>8})", .{ hash, string_offset, string_offset });
+        std.log.debug("NameNode (attribute): string_offset={d} (0x{x:0>8})", .{ string_offset, string_offset });
 
         const resolved_string = resolveString(string_offset, chunk);
 
