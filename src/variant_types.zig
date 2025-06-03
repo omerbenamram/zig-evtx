@@ -207,26 +207,22 @@ pub const VariantTypeNode = struct {
         switch (variant_type) {
             0x00 => return VariantTypeNode{ .tag = .Null, .data = VariantData{ .Null = {} } },
             0x01 => {
-                // WString - null terminated UTF-16
-                const wstring = try block.unpackWstringNullTerminated(allocator, pos.*);
-                // Calculate actual bytes consumed: UTF-16 chars * 2 + 2 for null terminator
-                var bytes_consumed: usize = 0;
-                var check_pos = pos.*;
-                while (check_pos + 1 < block.buf.len) : (check_pos += 2) {
-                    const word = std.mem.readInt(u16, block.buf[check_pos .. check_pos + 2][0..2], .little);
-                    bytes_consumed += 2;
-                    if (word == 0) break;
-                }
-                pos.* += bytes_consumed;
+                // WString - length prefixed UTF-16 string
+                const length = try block.unpackWord(pos.*);
+                pos.* += 2;
+                const wstring = try block.unpackWstring(allocator, pos.*, length);
+                pos.* += @as(usize, length) * 2;
                 return VariantTypeNode{ .tag = .WString, .data = VariantData{ .WString = wstring } };
             },
             0x02 => {
-                // String - null terminated ASCII
-                const string = try block.unpackStringNullTerminated(allocator, pos.*);
-                // Calculate bytes consumed
-                const bytes_consumed: usize = string.len + 1; // string + null terminator
-                pos.* += bytes_consumed;
-                return VariantTypeNode{ .tag = .String, .data = VariantData{ .String = string } };
+                // String - length prefixed ASCII string
+                const length = try block.unpackWord(pos.*);
+                pos.* += 2;
+                if (pos.* + length > block.buf.len) return BinaryXMLError.BufferOverrun;
+                const slice = try allocator.alloc(u8, length);
+                @memcpy(slice, block.buf[pos.* .. pos.* + length]);
+                pos.* += length;
+                return VariantTypeNode{ .tag = .String, .data = VariantData{ .String = slice } };
             },
             0x03 => {
                 const value = try block.unpackInt8(pos.*);
