@@ -42,3 +42,5 @@ testing-evtxs/*
 .env/
 .envrc
 .venv
+.zig-cache/
+zig-linux-*
