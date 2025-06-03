@@ -8,6 +8,23 @@ const CliError = error{
     OutOfMemory,
 } || evtx.EvtxError || views.ViewsError;
 
+fn printUsage(program_name: []const u8) void {
+    std.debug.print("EVTX Parser - Windows Event Log Binary Parser\n\n", .{});
+    std.debug.print("USAGE:\n", .{});
+    std.debug.print("    {s} [OPTIONS] <evtx_file>\n\n", .{program_name});
+    std.debug.print("ARGS:\n", .{});
+    std.debug.print("    <evtx_file>    Path to the EVTX file to parse\n\n", .{});
+    std.debug.print("OPTIONS:\n", .{});
+    std.debug.print("    -h, --help     Print this help message and exit\n\n", .{});
+    std.debug.print("DESCRIPTION:\n", .{});
+    std.debug.print("    Parses Windows Event Log (EVTX) binary files and outputs structured XML.\n", .{});
+    std.debug.print("    The parser extracts templates from chunk headers and generates XML with\n", .{});
+    std.debug.print("    proper substitution handling for all supported binary XML tokens.\n\n", .{});
+    std.debug.print("EXAMPLES:\n", .{});
+    std.debug.print("    {s} System.evtx\n", .{program_name});
+    std.debug.print("    {s} /path/to/Security.evtx > events.xml\n", .{program_name});
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -16,8 +33,21 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
+    if (args.len < 2) {
+        std.debug.print("Error: Missing required argument\n\n", .{});
+        printUsage(args[0]);
+        return CliError.InvalidArguments;
+    }
+
+    // Check for help flag
+    if (std.mem.eql(u8, args[1], "--help") or std.mem.eql(u8, args[1], "-h")) {
+        printUsage(args[0]);
+        return;
+    }
+
     if (args.len != 2) {
-        std.debug.print("Usage: {s} <evtx_file>\n", .{args[0]});
+        std.debug.print("Error: Too many arguments\n\n", .{});
+        printUsage(args[0]);
         return CliError.InvalidArguments;
     }
 
@@ -46,7 +76,7 @@ pub fn main() !void {
     }
 
     const stdout = std.io.getStdOut().writer();
-    
+
     // Print XML header
     try stdout.print("{s}", .{views.XML_HEADER});
     try stdout.print("<Events>\n", .{});
@@ -55,30 +85,30 @@ pub fn main() !void {
     var chunk_iter = evtx_parser.chunks();
     var chunks = std.ArrayList(evtx.ChunkHeader).init(allocator);
     defer chunks.deinit();
-    
+
     while (chunk_iter.next()) |chunk| {
         var chunk_copy = chunk;
         try chunk_copy.loadTemplates();
         try chunks.append(chunk_copy);
     }
-    
+
     // Now iterate through records and output XML
     var error_count: u32 = 0;
     var record_count: u32 = 0;
-    
+
     for (chunks.items) |*chunk| {
         var record_iter = chunk.records();
         while (record_iter.next()) |record| {
             record_count += 1;
-            
+
             // Generate XML for this record
             const xml = record.xml(allocator) catch |err| {
                 error_count += 1;
-                std.debug.print("<!-- Error processing record {d}: {} -->\n", .{record.record_num_val, err});
+                std.debug.print("<!-- Error processing record {d}: {} -->\n", .{ record.record_num_val, err });
                 continue;
             };
             defer allocator.free(xml);
-            
+
             try stdout.print("{s}\n", .{xml});
         }
     }
@@ -87,9 +117,9 @@ pub fn main() !void {
     for (chunks.items) |*chunk| {
         chunk.deinit();
     }
-    
+
     try stdout.print("</Events>\n", .{});
-    
+
     // Print summary to stderr
     std.debug.print("\nProcessed {d} records", .{record_count});
     if (error_count > 0) {

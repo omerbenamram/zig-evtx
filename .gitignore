@@ -44,3 +44,5 @@ testing-evtxs/*
 .venv
 .zig-cache/
 zig-linux-*
+zig_errors.txt
+zig_output.txt
