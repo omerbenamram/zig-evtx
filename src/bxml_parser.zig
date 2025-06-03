@@ -666,6 +666,11 @@ pub fn parseTemplateXml(allocator: Allocator, block: *Block, offset: u32, length
     var output = std.ArrayList(u8).init(allocator);
     errdefer output.deinit();
 
+    // Use a temporary arena for node allocations so they don't leak
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const temp_allocator = arena.allocator();
+
     const writer = output.writer();
     var pos: usize = offset; // pos is block-relative throughout parsing
     const end_pos: usize = offset + length;
@@ -678,7 +683,7 @@ pub fn parseTemplateXml(allocator: Allocator, block: *Block, offset: u32, length
 
     // Parse the complete hierarchical structure
     while (pos < end_pos) {
-        const node = BXmlNode.parse(allocator, block, &pos, chunk) catch |err| {
+        const node = BXmlNode.parse(temp_allocator, block, &pos, chunk) catch |err| {
             std.log.warn("Failed to parse node at pos {d}: {any}", .{ pos - offset, err });
             return err;
         };
