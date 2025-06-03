@@ -47,13 +47,17 @@ pub const VariantTypeNode = struct {
         switch (variant_type) {
             0x00 => return VariantTypeNode{ .tag = .Null, .data = VariantData{ .Null = {} } },
             0x01 => {
-                // WString with known size - size is in bytes (not characters)
-                // In substitution arrays, the size is already in bytes
+                // WString with known size - `size` is expressed in bytes
+                // Convert to UTF-16 code unit count for unpackWstring
+                if (size % 2 != 0) {
+                    return BinaryXMLError.InvalidData;
+                }
                 if (pos.* + size > block.buf.len) {
-                    std.log.err("WString buffer overrun: pos={d}, size={d}, buf_len={d}", .{pos.*, size, block.buf.len});
+                    std.log.err("WString buffer overrun: pos={d}, size={d}, buf_len={d}", .{ pos.*, size, block.buf.len });
                     return BinaryXMLError.BufferOverrun;
                 }
-                const wstring = try block.unpackWstring(allocator, pos.*, size);
+                const char_count = size / 2;
+                const wstring = try block.unpackWstring(allocator, pos.*, char_count);
                 pos.* += size;
                 return VariantTypeNode{ .tag = .WString, .data = VariantData{ .WString = wstring } };
             },
@@ -198,8 +202,8 @@ pub const VariantTypeNode = struct {
     }
 
     pub fn parseWithType(allocator: Allocator, block: *Block, pos: *usize, variant_type: u8) BinaryXMLError!Self {
-        std.log.debug("parseWithType: variant type 0x{x:0>2} at pos {d}", .{variant_type, pos.*});
-        
+        std.log.debug("parseWithType: variant type 0x{x:0>2} at pos {d}", .{ variant_type, pos.* });
+
         switch (variant_type) {
             0x00 => return VariantTypeNode{ .tag = .Null, .data = VariantData{ .Null = {} } },
             0x01 => {
@@ -451,3 +455,29 @@ pub const VariantTypeNode = struct {
         }
     }
 };
+
+test "parseWithKnownSize handles WString byte length" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    // UTF-16 encoded "Hello" plus extra bytes that should not be included
+    const data = [_]u8{
+        'H',  0x00,
+        'e',  0x00,
+        'l',  0x00,
+        'l',  0x00,
+        'o',  0x00,
+        0xAA, 0xAA,
+        0xAA, 0xAA,
+    };
+
+    var block = Block.init(&data, 0);
+    var pos: usize = 0;
+    const node = try VariantTypeNode.parseWithKnownSize(allocator, &block, &pos, 0x01, 10);
+    defer allocator.free(node.data.WString);
+
+    try testing.expect(node.tag == .WString);
+    try testing.expect(std.mem.eql(u8, node.data.WString, "Hello"));
+    try testing.expect(pos == 10);
+}
