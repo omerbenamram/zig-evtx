@@ -304,8 +304,7 @@ pub const NameNode = struct {
     fn resolveString(allocator: Allocator, string_offset: u32, chunk: ?*const @import("evtx.zig").ChunkHeader) []const u8 {
         if (chunk) |c| {
             var c_mut = @constCast(c);
-            const base = c.block.getOffset();
-            if (string_offset >= base and string_offset < c.nextRecordOffset()) {
+            if (string_offset < c.nextRecordOffset()) {
                 const lookup = c_mut.getStringAtOffset(string_offset);
                 if (lookup) |maybe| {
                     if (maybe) |str| return str;
