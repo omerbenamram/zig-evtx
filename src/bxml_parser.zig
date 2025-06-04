@@ -108,7 +108,12 @@ pub const BXmlNode = union(enum) {
         }
     }
 
-    pub fn toXml(self: BXmlNode, allocator: Allocator, writer: anytype) anyerror!void {
+    pub fn toXml(
+        self: BXmlNode,
+        allocator: Allocator,
+        writer: anytype,
+        subs: ?*const @import("template_processor.zig").SubstitutionArray,
+    ) anyerror!void {
         switch (self) {
             .end_of_stream => {},
             .open_start_element => |node| try node.toXml(allocator, writer),
@@ -121,8 +126,8 @@ pub const BXmlNode = union(enum) {
             .entity_reference => |node| try node.toXml(allocator, writer),
             .char_reference => |node| try node.toXml(allocator, writer),
             .template_instance => {}, // Not rendered directly
-            .normal_substitution => |node| try node.toXml(allocator, writer),
-            .conditional_substitution => |node| try node.toXml(allocator, writer),
+            .normal_substitution => |node| try node.toXml(allocator, writer, subs),
+            .conditional_substitution => |node| try node.toXml(allocator, writer, subs),
             .start_of_stream => {}, // Not rendered
         }
     }
@@ -324,7 +329,7 @@ pub const AttributeNode = struct {
 
     pub fn toXml(self: AttributeNode, allocator: Allocator, writer: anytype) !void {
         try writer.print(" {s}=\"", .{self.name.string});
-        try self.value_node.toXml(allocator, writer);
+        try self.value_node.toXml(allocator, writer, null);
         try writer.writeAll("\"");
     }
 };
@@ -448,8 +453,26 @@ pub const SubstitutionNode = struct {
         };
     }
 
-    pub fn toXml(self: SubstitutionNode, allocator: Allocator, writer: anytype) !void {
-        _ = allocator;
+    pub fn toXml(
+        self: SubstitutionNode,
+        allocator: Allocator,
+        writer: anytype,
+        subs: ?*const @import("template_processor.zig").SubstitutionArray,
+    ) !void {
+        if (subs) |s| {
+            if (self.index < s.entries.len) {
+                const variant = &s.entries[self.index];
+                const raw = try variant.toString(allocator);
+                defer allocator.free(raw);
+                if (self.is_conditional and variant.tag == .Null) return;
+                const escaped = try @import("views.zig").escapeXmlString(allocator, raw);
+                defer allocator.free(escaped);
+                try writer.writeAll(escaped);
+                return;
+            }
+        }
+
+        // Fallback to placeholder when value not available
         if (self.is_conditional) {
             try writer.print("[Conditional Substitution(index={}, type={})]", .{ self.index, self.value_type });
         } else {
@@ -744,7 +767,7 @@ pub fn parseTemplateXml(allocator: Allocator, block: *Block, offset: u32, length
     var node_count: u32 = 0;
     var depth: u32 = 0;
 
-    try parseStream(allocator, temp_allocator, block, &pos, end_pos, chunk, writer, &element_stack, &depth, &node_count);
+    try parseStream(allocator, temp_allocator, block, &pos, end_pos, chunk, writer, &element_stack, &depth, &node_count, null);
 
     // Some templates omit explicit close element tokens. Close any
     // remaining open elements to keep the XML well-formed so further
@@ -771,6 +794,7 @@ fn parseStream(
     element_stack: *std.ArrayList([]const u8),
     depth: *u32,
     node_count: *u32,
+    subs: ?*const @import("template_processor.zig").SubstitutionArray,
 ) anyerror!void {
     while (pos.* < end_pos) {
         const node = BXmlNode.parse(temp_allocator, block, pos, chunk) catch |err| {
@@ -783,7 +807,7 @@ fn parseStream(
             .start_of_stream => {
                 std.log.debug("Parsed StartOfStream", .{});
                 depth.* += 1;
-                try parseStream(allocator, temp_allocator, block, pos, end_pos, chunk, writer, element_stack, depth, node_count);
+                try parseStream(allocator, temp_allocator, block, pos, end_pos, chunk, writer, element_stack, depth, node_count, subs);
                 depth.* -= 1;
             },
             .end_of_stream => {
@@ -823,7 +847,7 @@ fn parseStream(
                 try val.toXml(allocator, writer);
             },
             .normal_substitution, .conditional_substitution => |sub| {
-                try sub.toXml(allocator, writer);
+                try sub.toXml(allocator, writer, subs);
             },
             .entity_reference => |entity| {
                 try entity.toXml(allocator, writer);
