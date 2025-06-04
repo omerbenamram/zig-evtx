@@ -41,10 +41,11 @@ test "Open element with attribute list size" {
         0x00, 0x00,
         0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00,
+        // attribute list size prefix and attribute with UnsignedByte value
         0x07, 0x00, 0x00, 0x00,
         0x06,
         0x00, 0x00, 0x00, 0x00,
-        0x04, 0x2A,
+        0x05, 0x04, 0x2A,
         0x02,
         0x04,
         0x00,
@@ -68,7 +69,9 @@ test "Open element with attribute list size" {
 
     node = try bxml_parser.BXmlNode.parse(allocator, &block, &pos, null);
     switch (node) {
-        .attribute => {},
+        .attribute => |attr| {
+            allocator.destroy(attr.value_node);
+        },
         else => try testing.expect(false),
     }
 
@@ -98,7 +101,8 @@ test "BXmlNode value node parsing" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const fragment = [_]u8{ 0x05, 0x01, 0x41, 0x00, 0x00, 0x00 };
+    // Value token followed by variant type WString and the string "A"
+    const fragment = [_]u8{ 0x05, 0x01, 0x01, 0x00, 0x41, 0x00 };
     var block = binary_parser.Block.init(&fragment, 0);
     var pos: usize = 0;
 
@@ -136,8 +140,7 @@ test "BXmlNode open element with attribute" {
         // attribute string_offset
         0x00, 0x00, 0x00, 0x00,
         // value: UnsignedByte 0x2A
-        0x04,
-        0x2A,
+        0x05, 0x04, 0x2A,
         // CloseStartElement, CloseElement, EndOfStream
         0x02,
         0x04,
@@ -170,6 +173,7 @@ test "BXmlNode open element with attribute" {
                 },
                 else => try testing.expect(false),
             }
+            allocator.destroy(attr.value_node);
         },
         else => try testing.expect(false),
     }

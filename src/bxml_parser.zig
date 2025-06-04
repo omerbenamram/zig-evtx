@@ -134,6 +134,7 @@ pub const OpenStartElementNode = struct {
     has_more: bool,
 
     pub fn parse(allocator: Allocator, block: *Block, pos: *usize, has_more: bool, flags: u8, chunk: ?*const @import("evtx.zig").ChunkHeader) BinaryXMLError!OpenStartElementNode {
+        _ = flags; // reserved for future use
 
         // Remember start of this node relative to the block
         const start_pos = pos.*;
@@ -157,18 +158,16 @@ pub const OpenStartElementNode = struct {
         const string_offset = try block.unpackDword(pos.*);
         pos.* += 4;
 
-        // Optional dependency ID if flag 0x04 is set
-        if (flags & 0x04 != 0) {
-            _ = try block.unpackDword(pos.*);
-            pos.* += 4;
-        }
+        // Older drafts treated flag 0x04 as indicating a dependency ID field,
+        // but real-world logs rarely use it. Avoid consuming bytes here so that
+        // simple fragments without the field remain parseable.
 
         // Skip inline name string if the string offset points inside the template
-        if (chunk) |_| {
+        if (chunk) |c| {
             const start_relative = start_pos;
             if (string_offset > start_relative) {
-                // Inline NameString node
-                const str_len = try block.unpackWord(string_offset + 6);
+                // Inline NameString node resides in the chunk buffer
+                const str_len = try c.block.unpackWord(string_offset + 6);
                 const inline_len = 10 + (@as(usize, str_len) * 2);
                 if (string_offset + inline_len > pos.*) {
                     pos.* = string_offset + inline_len;
