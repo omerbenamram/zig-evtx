@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const Block = @import("binary_parser.zig").Block;
 const BinaryParserError = @import("binary_parser.zig").BinaryParserError;
 const VariantTypeNode = @import("variant_types.zig").VariantTypeNode;
+const views = @import("views.zig");
 const tokens = @import("tokens.zig");
 const BXmlToken = tokens.BXmlToken;
 const BinaryXMLError = tokens.BinaryXMLError;
@@ -247,9 +248,11 @@ pub const ValueNode = struct {
     }
 
     pub fn toXml(self: ValueNode, allocator: Allocator, writer: anytype) !void {
-        const str = try self.value_data.toString(allocator);
-        defer allocator.free(str);
-        try writer.writeAll(str);
+        const raw = try self.value_data.toString(allocator);
+        defer allocator.free(raw);
+        const escaped = try views.escapeXmlString(allocator, raw);
+        defer allocator.free(escaped);
+        try writer.writeAll(escaped);
     }
 };
 
