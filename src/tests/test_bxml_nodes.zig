@@ -39,16 +39,12 @@ test "Open element with attribute list size" {
 
     const fragment = [_]u8{
         0x0F, 0x01, 0x01, 0x00,
-        0x41,
-        0x00, 0x00,
+        0x41, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x07,
+        0x00, 0x00, 0x00, 0x06,
         0x00, 0x00, 0x00, 0x00,
-        0x07, 0x00, 0x00, 0x00,
-        0x06,
-        0x00, 0x00, 0x00, 0x00,
-        0x04, 0x2A,
-        0x02,
-        0x04,
+        0x04, 0x2A, 0x02, 0x04,
         0x00,
     };
     var block = binary_parser.Block.init(&fragment, 0);
@@ -132,11 +128,14 @@ test "BXmlNode open element with attribute" {
         // unknown0
         0x00, 0x00,
         // size
-        0x00, 0x00, 0x00, 0x00,
+        0x00,
+        0x00, 0x00, 0x00,
         // string_offset (0 -> unresolved)
-        0x00, 0x00, 0x00, 0x00,
+        0x00,
+        0x00, 0x00, 0x00,
         // dependency id when has_more flag present
-        0x00, 0x00, 0x00, 0x00,
+        0x00,
+        0x00, 0x00, 0x00,
         // Attribute token
         0x06,
         // attribute string_offset
@@ -144,8 +143,8 @@ test "BXmlNode open element with attribute" {
         // value: UnsignedByte 0x2A
         0x05, 0x04, 0x2A,
         // CloseStartElement, CloseElement, EndOfStream
-        0x02, 0x04,
-        0x00,
+        0x02,
+        0x04, 0x00,
     };
     var block = binary_parser.Block.init(&fragment, 0);
     var pos: usize = 0;
@@ -402,7 +401,7 @@ test "AttributeNode toXml output" {
     var buf = std.ArrayList(u8).init(allocator);
     defer buf.deinit();
 
-    try attr.toXml(allocator, buf.writer());
+    try attr.toXml(allocator, buf.writer(), null);
 
     try testing.expectEqualStrings(" test=\"bar\"", buf.items);
 }

@@ -121,13 +121,21 @@ pub const BXmlNode = union(enum) {
             .close_empty_element => try writer.writeAll("/>"),
             .close_element => {}, // Handled by element tracking
             .value => |node| try node.toXml(allocator, writer),
-            .attribute => |node| try node.toXml(allocator, writer),
+            .attribute => |node| try node.toXml(allocator, writer, subs),
             .cdata_section => |node| try node.toXml(allocator, writer),
             .entity_reference => |node| try node.toXml(allocator, writer),
             .char_reference => |node| try node.toXml(allocator, writer),
             .template_instance => {}, // Not rendered directly
-            .normal_substitution => |node| try node.toXml(allocator, writer, subs),
-            .conditional_substitution => |node| try node.toXml(allocator, writer, subs),
+            .normal_substitution, .conditional_substitution => |node| {
+                if (subs) |s| {
+                    node.toXml(allocator, writer, s) catch |err| switch (err) {
+                        BinaryXMLError.SuppressConditionalSubstitution => {},
+                        else => return err,
+                    };
+                } else {
+                    try node.toPlaceholderXml(allocator, writer);
+                }
+            },
             .start_of_stream => {}, // Not rendered
         }
     }
@@ -327,9 +335,14 @@ pub const AttributeNode = struct {
         };
     }
 
-    pub fn toXml(self: AttributeNode, allocator: Allocator, writer: anytype) !void {
+    pub fn toXml(
+        self: AttributeNode,
+        allocator: Allocator,
+        writer: anytype,
+        subs: ?*const @import("template_processor.zig").SubstitutionArray,
+    ) !void {
         try writer.print(" {s}=\"", .{self.name.string});
-        try self.value_node.toXml(allocator, writer, null);
+        try self.value_node.toXml(allocator, writer, subs);
         try writer.writeAll("\"");
     }
 };
@@ -453,31 +466,31 @@ pub const SubstitutionNode = struct {
         };
     }
 
-    pub fn toXml(
-        self: SubstitutionNode,
-        allocator: Allocator,
-        writer: anytype,
-        subs: ?*const @import("template_processor.zig").SubstitutionArray,
-    ) !void {
-        if (subs) |s| {
-            if (self.index < s.entries.len) {
-                const variant = &s.entries[self.index];
-                const raw = try variant.toString(allocator);
-                defer allocator.free(raw);
-                if (self.is_conditional and variant.tag == .Null) return;
-                const escaped = try @import("views.zig").escapeXmlString(allocator, raw);
-                defer allocator.free(escaped);
-                try writer.writeAll(escaped);
-                return;
-            }
-        }
-
-        // Fallback to placeholder when value not available
+    pub fn toPlaceholderXml(self: SubstitutionNode, allocator: Allocator, writer: anytype) !void {
+        _ = allocator;
         if (self.is_conditional) {
             try writer.print("[Conditional Substitution(index={}, type={})]", .{ self.index, self.value_type });
         } else {
             try writer.print("[Normal Substitution(index={}, type={})]", .{ self.index, self.value_type });
         }
+    }
+
+    pub fn toXml(
+        self: SubstitutionNode,
+        allocator: Allocator,
+        writer: anytype,
+        subs: *const @import("template_processor.zig").SubstitutionArray,
+    ) anyerror!void {
+        if (self.index >= subs.entries.len) return BinaryXMLError.InvalidData;
+        const variant = &subs.entries[self.index];
+        if (self.is_conditional and variant.tag == .Null) {
+            return BinaryXMLError.SuppressConditionalSubstitution;
+        }
+        const raw = try variant.toString(allocator);
+        defer allocator.free(raw);
+        const escaped = try @import("views.zig").escapeXmlString(allocator, raw);
+        defer allocator.free(escaped);
+        try writer.writeAll(escaped);
     }
 };
 
@@ -841,13 +854,20 @@ fn parseStream(
                 }
             },
             .attribute => |attr| {
-                try attr.toXml(allocator, writer);
+                try attr.toXml(allocator, writer, subs);
             },
             .value => |val| {
                 try val.toXml(allocator, writer);
             },
             .normal_substitution, .conditional_substitution => |sub| {
-                try sub.toXml(allocator, writer, subs);
+                if (subs) |s| {
+                    sub.toXml(allocator, writer, s) catch |err| switch (err) {
+                        BinaryXMLError.SuppressConditionalSubstitution => {},
+                        else => return err,
+                    };
+                } else {
+                    try sub.toPlaceholderXml(allocator, writer);
+                }
             },
             .entity_reference => |entity| {
                 try entity.toXml(allocator, writer);
