@@ -28,15 +28,15 @@ are listed in `.gitignore` and can be safely removed after use.
    ```bash
    uv add <package>
    ```
-3. Use `uv run` to execute Python tools or the test suite.
+3. Use `uv run` to execute Python tools.
 
 ## Running Tests
 - **Zig unit tests:** `zig test src/test_runner.zig` (INCOMPLETE - these do NOT indicate parser is currently working, we need to rely on comparison scripts.)
-- **Zig/Python comparison:** `zig run test_template_comparison.zig`
+- **Zig/Python comparison:** `uv run python diff_first_record_xml.py`
 
-For a direct XML comparison of the first record between the reference Python
-implementation and the Zig parser, run `./compare_first_record_xml.py`. This
-generates `python_first.xml` and `zig_first.xml` for inspection.
+Run `diff_first_record_xml.py` to see a unified diff of the first record XML
+between the reference Python parser and the Zig implementation. The script also
+writes `python_first.xml` and `zig_first.xml` for further inspection.
 
 Run both suites when modifying related code.
 
