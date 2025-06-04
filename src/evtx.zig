@@ -460,7 +460,7 @@ pub const ChunkHeader = struct {
         }
     }
 
-    fn parseTemplate(self: *Self, offset: u32) EvtxError!Template {
+    pub fn parseTemplate(self: *Self, offset: u32) EvtxError!Template {
         // Template structure:
         // 0x00: next_offset (4 bytes)
         // 0x04: template_id (4 bytes) - also start of GUID

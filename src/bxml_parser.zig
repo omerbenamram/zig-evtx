@@ -763,6 +763,27 @@ fn parseStream(
             .char_reference => |charref| {
                 try charref.toXml(allocator, writer);
             },
+            .template_instance => |inst| {
+                if (chunk) |c| {
+                    var c_mut = @constCast(c);
+                    var tmpl_opt = c_mut.getTemplate(inst.template_id) catch null;
+                    if (tmpl_opt == null) {
+                        if (c_mut.templates) |*map| {
+                            // try parsing template at provided offset
+                            const tmpl = c_mut.parseTemplate(inst.template_offset) catch null;
+                            if (tmpl) |t| {
+                                try map.put(t.template_id, t);
+                                tmpl_opt = map.getPtr(t.template_id);
+                            }
+                        }
+                    }
+                    if (tmpl_opt) |tmpl| {
+                        try writer.writeAll(tmpl.xml_format);
+                    } else {
+                        std.log.warn("Referenced template {d} not available", .{inst.template_id});
+                    }
+                }
+            },
             else => {
                 std.log.debug("Unhandled node type in XML generation", .{});
             },
