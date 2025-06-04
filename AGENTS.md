@@ -32,9 +32,9 @@ are listed in `.gitignore` and can be safely removed after use.
 
 ## Running Tests
 - **Zig unit tests:** `zig test src/test_runner.zig` (INCOMPLETE - these do NOT indicate parser is currently working, we need to rely on comparison scripts.)
-- **Zig/Python comparison:** `uv run python diff_first_record_xml.py`
+- **Zig/Python comparison:** `uv run python compare_first_record_xml.py`
 
-Run `diff_first_record_xml.py` to see a unified diff of the first record XML
+Run `compare_first_record_xml.py` to see a unified diff of the first record XML
 between the reference Python parser and the Zig implementation. The script also
 writes `python_first.xml` and `zig_first.xml` for further inspection.
 

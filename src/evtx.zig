@@ -448,7 +448,12 @@ pub const ChunkHeader = struct {
                 }
 
                 // Parse template at this offset
-                const template = try self.parseTemplate(ofs);
+                const template = self.parseTemplate(ofs) catch |err| {
+                    std.log.warn("Failed to parse template at offset {d}: {any}", .{ ofs, err });
+                    // Attempt to skip to the next template in the chain
+                    ofs = self.block.unpackDword(ofs) catch 0;
+                    continue;
+                };
                 std.log.info("Found template with ID: {d} at offset {d}", .{ template.template_id, ofs });
 
                 // Only store if we don't already have this template ID, or if this one is better

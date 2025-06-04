@@ -48,3 +48,5 @@ zig_errors.txt
 zig_output.txt
 python_first.xml
 zig_first.xml
+python_record_*.xml
+zig_record_*.xml
