@@ -6,7 +6,7 @@ const VariantTypeNode = @import("variant_types.zig").VariantTypeNode;
 const views = @import("views.zig");
 const tokens = @import("tokens.zig");
 const BXmlToken = tokens.BXmlToken;
-const BinaryXMLError = tokens.BinaryXMLError;
+pub const BinaryXMLError = tokens.BinaryXMLError;
 
 pub const BXmlNode = union(enum) {
     end_of_stream: void,
@@ -612,7 +612,11 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
             return BinaryXMLError.InvalidToken;
         };
         std.log.info("Parsed resident template {d} at offset {d}", .{ template_id, template_offset });
-        try map.put(tmpl.template_id, tmpl);
+
+        if (try map.fetchPut(tmpl.template_id, tmpl)) |kv| {
+            // Replace existing template and free old XML to avoid leaks
+            chunk.allocator.free(kv.value.xml_format);
+        }
     }
 
     // Check what comes next
@@ -662,7 +666,7 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
 
         if (!found_subs) {
             std.log.err("Could not find substitution array in resident template", .{});
-            return try allocator.dupe(u8, "<Event><!-- Could not find substitutions --></Event>");
+            return BinaryXMLError.InvalidData;
         }
     } else {
         // No EndOfStream - substitutions start immediately
@@ -692,7 +696,7 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
             std.log.err("Count at position would be: {d} (0x{x})", .{ count, count });
         }
 
-        return try allocator.dupe(u8, "<Event><!-- Failed to parse substitutions --></Event>");
+        return BinaryXMLError.InvalidData;
     };
     defer subs.deinit();
 
@@ -702,7 +706,7 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
     const template_opt = chunk.getTemplate(template_id) catch null;
     if (template_opt == null) {
         std.log.warn("Template {d} not found", .{template_id});
-        return try allocator.dupe(u8, "<Event><!-- Template not found --></Event>");
+        return BinaryXMLError.InvalidData;
     }
 
     const template = template_opt.?;
