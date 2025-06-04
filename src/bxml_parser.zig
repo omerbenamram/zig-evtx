@@ -143,27 +143,11 @@ pub const OpenStartElementNode = struct {
         const unknown0 = try block.unpackWord(pos.*);
         pos.* += 2;
 
-        // Check if this is a ROOT OpenStartElement marker
-        if (!has_more and unknown0 == 1) {
-            if (block.offset + pos.* < block.buf.len) {
-                const next_byte = block.buf[block.offset + pos.*];
-                const next_token = BXmlToken.fromByte(next_byte);
-
-                if (next_token != null and (next_byte == 0x41 or next_byte == 0x01)) {
-                    std.log.debug("  Detected ROOT OpenStartElement marker (unknown0=1, next byte=0x{x:02})", .{next_byte});
-
-                    return OpenStartElementNode{
-                        .dependency_id = null,
-                        .data_size = 0,
-                        .name = NameNode{
-                            .string_offset = 0,
-                            .string = "ROOT",
-                        },
-                        .has_more = false,
-                    };
-                }
-            }
-        }
+        // Older revisions attempted to detect a special ROOT marker here and
+        // hard-code the element name. This caused subtle misalignment issues
+        // when additional attributes were present. The real EVTX format simply
+        // encodes the element name in the normal string table, so parse it
+        // generically instead of injecting a placeholder.
 
         // Read size (4 bytes)
         const size = try block.unpackDword(pos.*);
@@ -422,12 +406,11 @@ pub const CDataSectionNode = struct {
     text: []const u8,
 
     pub fn parse(allocator: Allocator, block: *Block, pos: *usize) BinaryXMLError!CDataSectionNode {
-        _ = allocator;
         // CDataSection is followed by a string
         const string_len = try block.unpackWord(pos.*);
         pos.* += 2;
 
-        const text_data = try block.unpackBinary(pos.*, string_len * 2); // UTF-16
+        const utf8_text = try block.unpackWstring(allocator, pos.*, string_len);
         pos.* += string_len * 2;
 
         // Align to 4-byte boundary (padding after CDATA)
@@ -437,19 +420,15 @@ pub const CDataSectionNode = struct {
             pos.* += padding;
         }
 
-        // For now, return the raw UTF-16 data
-        // TODO: Convert UTF-16 to UTF-8
         return CDataSectionNode{
-            .text = text_data,
+            .text = utf8_text,
         };
     }
 
     pub fn toXml(self: CDataSectionNode, allocator: Allocator, writer: anytype) !void {
         _ = allocator;
-        _ = self;
-        // For now, just write placeholder
-        // TODO: Properly escape CDATA content
         try writer.writeAll("<![CDATA[");
+        try writer.writeAll(self.text);
         try writer.writeAll("]]>");
     }
 };
