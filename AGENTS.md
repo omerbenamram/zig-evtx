@@ -59,6 +59,10 @@ zig build
 - Apply template substitutions via `TemplateProcessor` (or `parseRecordXml`) and
   avoid returning hard coded placeholder XML when record parsing fails.
 - When debugging template issues, avoid inserting guessed values or partial XML. Investigate the root cause instead.
+- Prefer rendering templates with actual substitution values. The Python
+  `evtx_template_readable_view` is helpful for exploration but does **not**
+  represent the real XML, so tests comparing output should rely on the fully
+  substituted XML strings.
 
 ## Template Caching
 - Each `ChunkHeader` maintains an `AutoHashMap(u32, Template)` storing parsed
