@@ -70,7 +70,9 @@ test "Open element with attribute list size" {
 
     node = try bxml_parser.BXmlNode.parse(allocator, &block, &pos, null);
     switch (node) {
-        .attribute => {},
+        .attribute => |attr| {
+            allocator.destroy(attr.value_node);
+        },
         else => try testing.expect(false),
     }
 

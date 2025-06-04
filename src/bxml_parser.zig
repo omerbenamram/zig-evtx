@@ -262,11 +262,59 @@ pub const AttributeNode = struct {
 
     pub fn parse(allocator: Allocator, block: *Block, pos: *usize, chunk: ?*const @import("evtx.zig").ChunkHeader) BinaryXMLError!AttributeNode {
         const name = try NameNode.parse(allocator, block, pos, chunk);
-        // Attribute values are encoded as their own BXML node
-        // (typically a Value node or substitution). Parse the next
-        // node to obtain the attribute's value.
+
+        // The attribute value may either be encoded as a standard BXML node
+        // (Value/Substitution/etc) or directly as a variant type without a
+        // preceding token. Peek at the next byte to determine how to decode it.
+        const start_byte = try block.unpackByte(pos.*);
+        var value_node: BXmlNode = undefined;
+
+        if (BXmlToken.fromByte(start_byte)) |tok| {
+            switch (tok) {
+                .Value => {
+                    pos.* += 1;
+                    const val = try ValueNode.parse(allocator, block, pos);
+                    value_node = .{ .value = val };
+                },
+                .NormalSubstitution => {
+                    pos.* += 1;
+                    const sub = try SubstitutionNode.parse(allocator, block, pos, false);
+                    value_node = .{ .normal_substitution = sub };
+                },
+                .ConditionalSubstitution => {
+                    pos.* += 1;
+                    const sub = try SubstitutionNode.parse(allocator, block, pos, true);
+                    value_node = .{ .conditional_substitution = sub };
+                },
+                .CharRef => {
+                    pos.* += 1;
+                    const cref = try CharRefNode.parse(allocator, block, pos);
+                    value_node = .{ .char_reference = cref };
+                },
+                .EntityReference => {
+                    pos.* += 1;
+                    const eref = try EntityReferenceNode.parse(allocator, block, pos, chunk);
+                    value_node = .{ .entity_reference = eref };
+                },
+                else => {
+                    // Not a recognised attribute value token - treat the byte as
+                    // a variant type.
+                    const variant_type = start_byte;
+                    pos.* += 1;
+                    const variant = try VariantTypeNode.parseWithType(allocator, block, pos, variant_type);
+                    value_node = .{ .value = .{ .value_type = variant_type, .value_data = variant } };
+                },
+            }
+        } else {
+            // Direct variant type without a token
+            const variant_type = start_byte;
+            pos.* += 1;
+            const variant = try VariantTypeNode.parseWithType(allocator, block, pos, variant_type);
+            value_node = .{ .value = .{ .value_type = variant_type, .value_data = variant } };
+        }
+
         const node_ptr = try allocator.create(BXmlNode);
-        node_ptr.* = try BXmlNode.parse(allocator, block, pos, chunk);
+        node_ptr.* = value_node;
 
         return AttributeNode{
             .name = name,
@@ -459,7 +507,7 @@ pub const CharRefNode = struct {
     pub fn toXml(self: CharRefNode, allocator: Allocator, writer: anytype) BinaryXMLError!void {
         _ = allocator;
         var buf: [12]u8 = undefined;
-        const slice = std.fmt.bufPrint(&buf, "&#x{X};", .{self.value}) catch {
+        const slice = std.fmt.bufPrint(&buf, "&#x{X:0>4};", .{self.value}) catch {
             return BinaryXMLError.OutOfMemory;
         };
         try writer.writeAll(slice);
@@ -550,6 +598,22 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
     pos += 4;
 
     std.log.info("TemplateInstance: unknown=0x{x:0>2}, id={d}, offset={d}", .{ ti_unknown, template_id, template_offset });
+
+    // Ensure the referenced template is available. If it's missing, attempt to
+    // parse it from the provided offset (used for resident templates).
+    if (chunk.templates == null) {
+        chunk.loadTemplates() catch |err| {
+            std.log.warn("Failed to load templates: {any}", .{err});
+        };
+    }
+    if (chunk.templates) |*map| {
+        const tmpl = chunk.parseTemplate(template_offset) catch |err| {
+            std.log.warn("Failed to parse resident template {d}: {any}", .{ template_id, err });
+            return BinaryXMLError.InvalidToken;
+        };
+        std.log.info("Parsed resident template {d} at offset {d}", .{ template_id, template_offset });
+        try map.put(tmpl.template_id, tmpl);
+    }
 
     // Check what comes next
     const next_byte = try block.unpackByte(pos);
