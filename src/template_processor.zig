@@ -14,18 +14,6 @@ const evtx = @import("evtx.zig");
 pub const ChunkHeader = evtx.ChunkHeader;
 pub const TemplateNode = evtx.Template;
 
-pub const BXmlNode = struct {
-    block: Block,
-    allocator: Allocator,
-
-    pub fn init(allocator: Allocator, buf: []const u8, start_offset: usize) BXmlNode {
-        return BXmlNode{
-            .block = Block.init(buf, start_offset),
-            .allocator = allocator,
-        };
-    }
-};
-
 pub const TemplateProcessorError = error{
     TemplateNotFound,
     InvalidSubstitution,
@@ -112,10 +100,10 @@ pub const SubstitutionArray = struct {
         var pos: usize = start_pos;
         const data_end = block.getSize();
 
-        std.log.debug("parseWithDeclarations: start_pos={d}, data_end={d}, block_size={d}", .{start_pos, data_end, block.buf.len});
+        std.log.debug("parseWithDeclarations: start_pos={d}, data_end={d}, block_size={d}", .{ start_pos, data_end, block.buf.len });
 
         if (pos + 4 > data_end) {
-            std.log.err("Not enough data for count: pos={d}, data_end={d}", .{pos, data_end});
+            std.log.err("Not enough data for count: pos={d}, data_end={d}", .{ pos, data_end });
             return TemplateProcessorError.ParseError;
         }
 
@@ -293,62 +281,6 @@ pub const TemplateProcessor = struct {
     }
 };
 
-// Root node implementation with substitution parsing
-pub const RootNode = struct {
-    base: BXmlNode,
-    substitution_array: ?SubstitutionArray,
-
-    const Self = @This();
-
-    pub fn init(allocator: Allocator, buf: []const u8, start_offset: usize, chunk: *ChunkHeader, parent: ?*BXmlNode) TemplateProcessorError!Self {
-        _ = chunk;
-        _ = parent;
-        return Self{
-            .base = BXmlNode.init(allocator, buf, start_offset),
-            .substitution_array = null,
-        };
-    }
-
-    pub fn deinit(self: *Self) void {
-        if (self.substitution_array) |*subs| {
-            subs.deinit();
-        }
-    }
-
-    pub fn substitutions(self: *Self) TemplateProcessorError!*const SubstitutionArray {
-        if (self.substitution_array == null) {
-            // Parse substitutions from the record data
-            // In EVTX, substitutions typically start after the initial record header
-            // We need to skip past any initial binary XML structure tokens
-            var parse_offset: usize = 0;
-
-            // Look for substitution data - typically starts after template instance
-            // This is a simplified approach - real implementation would parse the binary XML structure
-            while (parse_offset < self.base.block.getSize()) {
-                const byte_val = self.base.block.unpackByte(parse_offset) catch break;
-
-                // Look for variant type markers (substitution data)
-                if ((byte_val >= 0x00 and byte_val <= 0x15) or byte_val == 0x21 or byte_val == 0x81) {
-                    break;
-                }
-                parse_offset += 1;
-            }
-
-            self.substitution_array = try SubstitutionArray.parse(self.base.allocator, &self.base.block, parse_offset);
-        }
-        return &self.substitution_array.?;
-    }
-
-    pub fn length(self: *const Self) usize {
-        _ = self;
-        return 0; // Root node has no direct length
-    }
-
-    pub fn xml(self: *const Self) TemplateProcessorError![]u8 {
-        return try self.base.allocator.dupe(u8, "");
-    }
-};
-
 // Substitution processor - applies substitution values to template format strings
 pub const SubstitutionProcessor = struct {
     allocator: Allocator,
@@ -503,13 +435,7 @@ test "Basic substitution parsing" {
     const allocator = gpa.allocator();
 
     // Test parsing of simple substitution data
-    const test_data = [_]u8{ 0x01, 0x05, 0x00,
-        'H', 0x00,
-        'e', 0x00,
-        'l', 0x00,
-        'l', 0x00,
-        'o', 0x00
-    }; // WString "Hello" with length prefix
+    const test_data = [_]u8{ 0x01, 0x05, 0x00, 'H', 0x00, 'e', 0x00, 'l', 0x00, 'l', 0x00, 'o', 0x00 }; // WString "Hello" with length prefix
     var block = Block.init(&test_data, 0);
 
     var substitutions = try SubstitutionArray.parse(allocator, &block, 0);
