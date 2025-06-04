@@ -18,8 +18,8 @@ def python_xml(path: str) -> str:
 
 
 def zig_xml(path: str) -> str:
-    result = subprocess.run(['./zig-out/bin/evtx_dump', path], capture_output=True, text=True)
-    out = result.stdout
+    result = subprocess.run(['./zig-out/bin/evtx_dump', path], capture_output=True)
+    out = result.stdout.decode('utf-8', errors='ignore')
     start = out.find('<Event')
     end = out.find('</Event>', start)
     if start != -1 and end != -1:

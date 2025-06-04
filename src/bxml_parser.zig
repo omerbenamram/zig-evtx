@@ -107,7 +107,7 @@ pub const BXmlNode = union(enum) {
         }
     }
 
-    pub fn toXml(self: BXmlNode, allocator: Allocator, writer: anytype) !void {
+    pub fn toXml(self: BXmlNode, allocator: Allocator, writer: anytype) anyerror!void {
         switch (self) {
             .end_of_stream => {},
             .open_start_element => |node| try node.toXml(allocator, writer),
@@ -117,6 +117,7 @@ pub const BXmlNode = union(enum) {
             .value => |node| try node.toXml(allocator, writer),
             .attribute => |node| try node.toXml(allocator, writer),
             .cdata_section => |node| try node.toXml(allocator, writer),
+            .entity_reference => |node| try node.toXml(allocator, writer),
             .char_reference => |node| try node.toXml(allocator, writer),
             .template_instance => {}, // Not rendered directly
             .normal_substitution => |node| try node.toXml(allocator, writer),
@@ -265,22 +266,26 @@ pub const ValueNode = struct {
 
 pub const AttributeNode = struct {
     name: NameNode,
-    value_data: VariantTypeNode,
+    value_node: *BXmlNode,
 
     pub fn parse(allocator: Allocator, block: *Block, pos: *usize, chunk: ?*const @import("evtx.zig").ChunkHeader) BinaryXMLError!AttributeNode {
         const name = try NameNode.parse(allocator, block, pos, chunk);
-        const value_data = try VariantTypeNode.fromBinary(allocator, block, pos);
+        // Attribute values are encoded as their own BXML node
+        // (typically a Value node or substitution). Parse the next
+        // node to obtain the attribute's value.
+        const node_ptr = try allocator.create(BXmlNode);
+        node_ptr.* = try BXmlNode.parse(allocator, block, pos, chunk);
 
         return AttributeNode{
             .name = name,
-            .value_data = value_data,
+            .value_node = node_ptr,
         };
     }
 
     pub fn toXml(self: AttributeNode, allocator: Allocator, writer: anytype) !void {
-        const value_str = try self.value_data.toString(allocator);
-        defer allocator.free(value_str);
-        try writer.print(" {s}=\"{s}\"", .{ self.name.string, value_str });
+        try writer.print(" {s}=\"", .{ self.name.string });
+        try self.value_node.toXml(allocator, writer);
+        try writer.writeAll("\"");
     }
 };
 
@@ -658,7 +663,7 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
 }
 
 // Parse a complete binary XML template and return XML string with substitution placeholders
-pub fn parseTemplateXml(allocator: Allocator, block: *Block, offset: u32, length: u32, chunk: ?*const @import("evtx.zig").ChunkHeader) BinaryXMLError![]u8 {
+pub fn parseTemplateXml(allocator: Allocator, block: *Block, offset: u32, length: u32, chunk: ?*const @import("evtx.zig").ChunkHeader) anyerror![]u8 {
     // Note: offset is block-relative (e.g., 574 for template data at chunk offset 0x1000 + 574)
     std.log.info("Parsing template XML at block-relative offset {d} with length {d}", .{ offset, length });
     var output = std.ArrayList(u8).init(allocator);
@@ -706,7 +711,7 @@ fn parseStream(
     element_stack: *std.ArrayList([]const u8),
     depth: *u32,
     node_count: *u32,
-) BinaryXMLError!void {
+) anyerror!void {
     while (pos.* < end_pos) {
         const node = BXmlNode.parse(temp_allocator, block, pos, chunk) catch |err| {
             std.log.warn("Failed to parse node at pos {d}: {any}", .{ pos.*, err });

@@ -100,8 +100,13 @@ test "BXmlNode open element with attribute" {
     node = try bxml_parser.BXmlNode.parse(allocator, &block, &pos, null);
     switch (node) {
         .attribute => |attr| {
-            try testing.expect(attr.value_data.tag == .UnsignedByte);
-            try testing.expect(attr.value_data.data.UnsignedByte == 0x2A);
+            switch (attr.value_node.*) {
+                .value => |val| {
+                    try testing.expect(val.value_type == 0x04);
+                    try testing.expect(val.value_data.data.UnsignedByte == 0x2A);
+                },
+                else => try testing.expect(false),
+            }
         },
         else => try testing.expect(false),
     }
