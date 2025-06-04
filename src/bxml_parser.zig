@@ -594,7 +594,6 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
     std.log.info("Parsing record XML at offset {d} with length {d}", .{ offset, length });
 
     var pos: usize = offset;
-    const end_pos = offset + length;
 
     // Parse StartOfStream (token + 3 bytes of data)
     const start_token = try block.unpackByte(pos);
@@ -644,59 +643,39 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
         }
     }
 
-    // Check what comes next
+    // Check what comes next to determine if the record embeds an updated template
     const next_byte = try block.unpackByte(pos);
 
-    if (next_byte == 0x00) {
-        // EndOfStream - this record contains the resident template
-        std.log.debug("Found EndOfStream at pos {d}, resident template follows", .{pos - offset});
-        pos += 1;
+    if ((next_byte & 0x0f) == 0x00) {
+        // EndOfStream token indicates a resident template immediately follows
+        std.log.debug(
+            "Found EndOfStream token 0x{x} at pos {d}, resident template follows",
+            .{ next_byte, pos - offset },
+        );
+        pos += 4; // skip token and padding
 
-        // Parse through the resident template to find where substitutions start
-        // For now, use a simple heuristic: look for valid substitution count
-        var found_subs = false;
-        var subs_pos = pos;
+        // Resident template header layout:
+        //   dword template_id
+        //   guid  template_guid
+        //   dword data_length
+        _ = try block.unpackDword(pos); // next_offset (unused)
+        pos += 4;
+        const res_template_id = try block.unpackDword(pos);
+        pos += 4;
+        // The GUID overlaps with the template_id. We've already read the first
+        // 4 bytes as the ID, so skip the remaining 12 bytes here.
+        _ = try block.unpackBinary(pos, 12);
+        pos += 12;
+        const data_length = try block.unpackDword(pos);
+        pos += 4;
 
-        while (subs_pos + 4 <= end_pos and !found_subs) {
-            const potential_count = try block.unpackDword(subs_pos);
+        std.log.debug("Resident template id={d} data_length={d}", .{ res_template_id, data_length });
 
-            // Check if this could be a valid substitution count
-            if (potential_count > 0 and potential_count < 100) {
-                // Verify it looks like valid declarations
-                var looks_valid = true;
-                if (subs_pos + 4 + (potential_count * 4) <= end_pos) {
-                    var i: u32 = 0;
-                    while (i < potential_count and i < 5) : (i += 1) {
-                        const decl_pos = subs_pos + 4 + (i * 4);
-                        const size = try block.unpackWord(decl_pos);
-                        const typ = try block.unpackByte(decl_pos + 2);
-
-                        // Basic validation
-                        if (size > 1000 or typ > 0x30) {
-                            looks_valid = false;
-                            break;
-                        }
-                    }
-
-                    if (looks_valid) {
-                        std.log.info("Found likely substitution count {d} at pos {d}", .{ potential_count, subs_pos - offset });
-                        pos = subs_pos;
-                        found_subs = true;
-                    }
-                }
-            }
-
-            subs_pos += 1;
-        }
-
-        if (!found_subs) {
-            std.log.err("Could not find substitution array in resident template", .{});
-            return BinaryXMLError.InvalidData;
-        }
+        // Skip over the resident template data
+        pos += data_length;
     } else {
-        // No EndOfStream - substitutions start immediately
+        // No resident template - substitutions start immediately
         std.log.debug("No EndOfStream, substitutions start at pos {d}", .{pos - offset});
-        // pos is already at the right place
     }
 
     // Parse substitution array

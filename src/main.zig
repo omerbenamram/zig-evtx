@@ -84,10 +84,16 @@ pub fn main() !void {
     // Process all chunks to ensure templates are loaded
     var chunk_iter = evtx_parser.chunks();
     var chunks = std.ArrayList(evtx.ChunkHeader).init(allocator);
-    defer chunks.deinit();
+    defer {
+        for (chunks.items) |*c| {
+            c.deinit();
+        }
+        chunks.deinit();
+    }
 
     while (chunk_iter.next()) |chunk| {
         var chunk_copy = chunk;
+        errdefer chunk_copy.deinit();
         try chunk_copy.loadTemplates();
         try chunks.append(chunk_copy);
     }
@@ -113,10 +119,7 @@ pub fn main() !void {
         }
     }
 
-    // Free allocated templates and strings for each chunk
-    for (chunks.items) |*chunk| {
-        chunk.deinit();
-    }
+    // Chunks and associated resources freed by deferred block above
 
     try stdout.print("</Events>\n", .{});
 

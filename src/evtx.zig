@@ -258,6 +258,7 @@ pub const Template = struct {
     data_length: u32,
     data: []const u8,
     structure: TemplateStructure,  // The parsed template structure
+    arena: std.heap.ArenaAllocator,
 
     pub fn templateId(self: *const Template) u32 {
         return self.template_id;
@@ -266,6 +267,7 @@ pub const Template = struct {
     pub fn deinit(self: *Template, allocator: Allocator) void {
         _ = allocator;
         self.structure.deinit();
+        self.arena.deinit();
     }
 };
 
@@ -487,8 +489,10 @@ pub const ChunkHeader = struct {
         @memcpy(&guid, guid_data);
 
         // Parse the binary XML template into a structure
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer arena.deinit();
         const structure = bxml_parser.parseTemplateStructure(
-            self.allocator,
+            arena.allocator(),
             &self.block,
             offset + 0x18,
             data_length,
@@ -505,6 +509,7 @@ pub const ChunkHeader = struct {
             .data_length = data_length,
             .data = template_data,
             .structure = structure,
+            .arena = arena,
         };
     }
 
