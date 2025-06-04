@@ -52,4 +52,9 @@ zig build
 - Follow the standardized token and error definitions in `tokens.zig`
 - Avoid hard‑coded shortcuts; parse data directly from the binary and deinit allocated memory
 - Consult `zig_014.md` for Zig 0.14 syntax changes if needed
+- Use `Block.unpackWstring` (and related helpers in `src/binary_parser.zig`) for
+  all UTF‑16 string parsing instead of ad‑hoc conversions. Keep UTF‑16 logic in
+  that file so other modules remain focused on higher level parsing.
+- Apply template substitutions via `TemplateProcessor` (or `parseRecordXml`) and
+  avoid returning hard coded placeholder XML when record parsing fails.
 

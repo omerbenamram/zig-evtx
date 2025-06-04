@@ -412,20 +412,17 @@ pub const SubstitutionProcessor = struct {
 };
 
 pub fn processRecord(allocator: Allocator, record_data: []const u8, chunk: *ChunkHeader, template_id: u32) ![]u8 {
-    _ = record_data; // TODO: Use for substitution processing
-    // Get template from chunk
-    const template = chunk.getTemplate(template_id) catch |err| {
-        std.log.warn("Error getting template {d}: {any}", .{ template_id, err });
-        return try allocator.dupe(u8, "<Event><!-- Template parsing error --></Event>");
-    } orelse {
-        std.log.warn("Template {d} not found", .{template_id});
-        return try allocator.dupe(u8, "<Event><!-- Template not found --></Event>");
-    };
+    _ = template_id; // Template ID is embedded in the binary XML
 
-    // For now, just return the template's pre-parsed XML
-    // TODO: Implement actual substitution processing
-    std.log.info("Successfully got template {d}, XML length: {d}", .{ template_id, template.xml_format.len });
-    return try allocator.dupe(u8, template.xml_format);
+    const bxml_offset = 0x18;
+    if (record_data.len <= bxml_offset)
+        return try allocator.dupe(u8, "<Event><!-- Record too small --></Event>");
+
+    var block = binary_parser.Block.init(record_data[bxml_offset..], 0);
+    return bxml_parser.parseRecordXml(allocator, &block, 0, @intCast(record_data.len - bxml_offset), chunk) catch |err| {
+        std.log.warn("Failed to parse record XML: {any}", .{err});
+        return try allocator.dupe(u8, "<Event><!-- XML parsing error --></Event>");
+    };
 }
 
 // Tests
