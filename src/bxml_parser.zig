@@ -612,7 +612,11 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
             return BinaryXMLError.InvalidToken;
         };
         std.log.info("Parsed resident template {d} at offset {d}", .{ template_id, template_offset });
-        try map.put(tmpl.template_id, tmpl);
+
+        if (try map.fetchPut(tmpl.template_id, tmpl)) |kv| {
+            // Replace existing template and free old XML to avoid leaks
+            chunk.allocator.free(kv.value.xml_format);
+        }
     }
 
     // Check what comes next

@@ -60,6 +60,21 @@ zig build
   avoid returning hard coded placeholder XML when record parsing fails.
 - When debugging template issues, avoid inserting guessed values or partial XML. Investigate the root cause instead.
 
+## Template Caching
+- Each `ChunkHeader` maintains an `AutoHashMap(u32, Template)` storing parsed
+  templates. `loadTemplates` populates this cache once per chunk and `getTemplate`
+  retrieves entries by ID. Record parsing should first consult this map before
+  attempting to parse a resident template.
+- When a record provides an updated resident template, use
+  `fetchPut` on the map and free the previous template's `xml_format` to avoid
+  leaks.
+
+## Memory Leaks
+- The comparison test (`zig run test_template_comparison.zig`) must report no
+  leaked addresses when using `GeneralPurposeAllocator`.
+- Always deinitialize `ChunkHeader` and free template XML strings when they are
+  no longer needed.
+
 ## Pull Request Guidelines
 - When drafting the PR description, include a brief example or explanation of
   how the changes move the Zig parser closer to feature parity with the
