@@ -7,7 +7,6 @@ const tokens = @import("tokens.zig");
 const BXmlToken = tokens.BXmlToken;
 const BinaryXMLError = tokens.BinaryXMLError;
 
-
 pub const BXmlNode = union(enum) {
     end_of_stream: void,
     open_start_element: OpenStartElementNode,
@@ -334,12 +333,12 @@ pub const NameNode = struct {
                 if (readInlineString(allocator, c, string_offset)) |str| {
                     return str;
                 }
-                std.log.debug("String offset {d} unresolved in chunk", .{ string_offset });
+                std.log.debug("String offset {d} unresolved in chunk", .{string_offset});
             } else {
-                std.log.debug("String offset {d} out of bounds", .{ string_offset });
+                std.log.debug("String offset {d} out of bounds", .{string_offset});
             }
         } else {
-            std.log.debug("resolveString called with null chunk for offset {d}", .{ string_offset });
+            std.log.debug("resolveString called with null chunk for offset {d}", .{string_offset});
         }
         return "UnknownElement";
     }
@@ -681,6 +680,16 @@ pub fn parseTemplateXml(allocator: Allocator, block: *Block, offset: u32, length
     var depth: u32 = 0;
 
     try parseStream(allocator, temp_allocator, block, &pos, end_pos, chunk, writer, &element_stack, &depth, &node_count);
+
+    // Some templates omit explicit close element tokens. Close any
+    // remaining open elements to keep the XML well-formed so further
+    // processing matches the Python output.
+    while (true) {
+        const maybe = element_stack.pop();
+        if (maybe) |name| {
+            try writer.print("</{s}>", .{name});
+        } else break;
+    }
 
     std.log.info("Parsed {d} nodes, output length: {d}, final depth: {d}", .{ node_count, output.items.len, depth });
     return output.toOwnedSlice();

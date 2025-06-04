@@ -46,3 +46,5 @@ testing-evtxs/*
 zig-linux-*
 zig_errors.txt
 zig_output.txt
+python_first.xml
+zig_first.xml
