@@ -54,3 +54,9 @@ zig build
 - Avoid hard‑coded shortcuts; parse data directly from the binary and deinit allocated memory
 - Consult `zig_014.md` for Zig 0.14 syntax changes if needed
 
+## Pull Request Guidelines
+- When drafting the PR description, include a brief example or explanation of
+  how the changes move the Zig parser closer to feature parity with the
+  reference Python implementation. This helps reviewers track progress toward
+  Python compatibility.
+

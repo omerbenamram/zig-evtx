@@ -30,6 +30,69 @@ test "BXmlNode simple fragment parsing" {
     try testing.expect(pos == fragment.len);
 }
 
+test "Open element with attribute list size" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const fragment = [_]u8{
+        0x0F, 0x01, 0x01, 0x00,
+        0x41,
+        0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x07, 0x00, 0x00, 0x00,
+        0x06,
+        0x00, 0x00, 0x00, 0x00,
+        0x04, 0x2A,
+        0x02,
+        0x04,
+        0x00,
+    };
+    var block = binary_parser.Block.init(&fragment, 0);
+    var pos: usize = 0;
+
+    var node = try bxml_parser.BXmlNode.parse(allocator, &block, &pos, null);
+    switch (node) {
+        .start_of_stream => {},
+        else => try testing.expect(false),
+    }
+
+    node = try bxml_parser.BXmlNode.parse(allocator, &block, &pos, null);
+    switch (node) {
+        .open_start_element => |ose| {
+            try testing.expect(ose.has_more);
+        },
+        else => try testing.expect(false),
+    }
+
+    node = try bxml_parser.BXmlNode.parse(allocator, &block, &pos, null);
+    switch (node) {
+        .attribute => {},
+        else => try testing.expect(false),
+    }
+
+    node = try bxml_parser.BXmlNode.parse(allocator, &block, &pos, null);
+    switch (node) {
+        .close_start_element => {},
+        else => try testing.expect(false),
+    }
+
+    node = try bxml_parser.BXmlNode.parse(allocator, &block, &pos, null);
+    switch (node) {
+        .close_element => {},
+        else => try testing.expect(false),
+    }
+
+    node = try bxml_parser.BXmlNode.parse(allocator, &block, &pos, null);
+    switch (node) {
+        .end_of_stream => {},
+        else => try testing.expect(false),
+    }
+
+    try testing.expect(pos == fragment.len);
+}
+
 test "BXmlNode value node parsing" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

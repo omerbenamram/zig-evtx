@@ -207,11 +207,16 @@ pub const OpenStartElementNode = struct {
         // - 4 bytes: Data size (not including these 4 bytes)
         // - Variable: Array of attributes
         if (has_more) {
-            // Some logs include a 4-byte attribute list size field, while others
-            // omit it and start with an Attribute token directly. Peek at the
-            // next byte to decide.
+            // When "has_more" is set, an attribute list follows this element
+            // header.  Some producers insert a 4-byte size for that list, while
+            // others omit it and immediately start with an Attribute token. To
+            // detect which form we're dealing with, peek at the next byte and
+            // decode it as a token. If it represents an Attribute, no size field
+            // is present and we continue parsing attributes directly. Otherwise
+            // treat those bytes as the attribute list size.
             const peek = try block.unpackByte(pos.*);
-            if (peek == 0x06) {
+            const peek_token = BXmlToken.fromByte(peek);
+            if (peek_token != null and peek_token.? == .Attribute) {
                 std.log.debug("  Attribute list size not present", .{});
             } else {
                 const attr_list_size = try block.unpackDword(pos.*);
@@ -283,7 +288,7 @@ pub const AttributeNode = struct {
     }
 
     pub fn toXml(self: AttributeNode, allocator: Allocator, writer: anytype) !void {
-        try writer.print(" {s}=\"", .{ self.name.string });
+        try writer.print(" {s}=\"", .{self.name.string});
         try self.value_node.toXml(allocator, writer);
         try writer.writeAll("\"");
     }
