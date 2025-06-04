@@ -12,7 +12,8 @@ collection of debug scripts.
 - `debug_*.py` and `.zig` – Various debugging helpers (avoid creating duplicates)
 - `.justfile` – Convenience tasks for linting and running tests
 
-## Key Structs
+generates `python_first.xml` and `zig_first.xml` for inspection. These artifacts
+are listed in `.gitignore` and can be safely removed after use.
 - `Evtx`, `ChunkHeader`, `Record` and `Template` are defined in `src/evtx.zig` and manage file parsing.
 - `BXmlNode` and its node variants live in `src/bxml_parser.zig` and form the active binary XML parser.
 - `SubstitutionArray` and `TemplateProcessor` in `src/template_processor.zig` handle variant values and apply template substitutions.
