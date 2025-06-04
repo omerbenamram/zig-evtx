@@ -2,7 +2,6 @@ const std = @import("std");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const binary_parser = @import("binary_parser.zig");
-const nodes = @import("nodes.zig");
 const Block = binary_parser.Block;
 const BinaryParserError = binary_parser.BinaryParserError;
 const FileTime = binary_parser.FileTime;
@@ -474,8 +473,8 @@ pub const ChunkHeader = struct {
         const guid_data = try self.block.unpackBinary(offset + 0x04, 16); // GUID starts at same offset as template_id
         const data_length = try self.block.unpackDword(offset + 0x14);
         const template_data = try self.block.unpackBinary(offset + 0x18, data_length);
-        
-        std.log.info("parseTemplate: offset={d}, template_id={d}, data_length={d}", .{offset, template_id, data_length});
+
+        std.log.info("parseTemplate: offset={d}, template_id={d}, data_length={d}", .{ offset, template_id, data_length });
 
         var guid: [16]u8 = undefined;
         @memcpy(&guid, guid_data);
