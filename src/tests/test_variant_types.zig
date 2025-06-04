@@ -37,7 +37,7 @@ test "VariantTypeNode WString parsing" {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const fragment = [_]u8{ 0x41, 0x00, 0x00, 0x00 };
+    const fragment = [_]u8{ 0x01, 0x00, 0x41, 0x00 };
     var block = binary_parser.Block.init(&fragment, 0);
     var pos: usize = 0;
 
