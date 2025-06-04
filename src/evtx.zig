@@ -451,6 +451,8 @@ pub const ChunkHeader = struct {
                     std.log.info("Stored template {d} from offset {d}", .{ template.template_id, ofs });
                 } else {
                     std.log.info("Template {d} already exists, skipping duplicate at offset {d}", .{ template.template_id, ofs });
+                    // Free the XML string since we are discarding this duplicate template
+                    self.allocator.free(template.xml_format);
                 }
 
                 // Move to next template in chain (templates are linked)
