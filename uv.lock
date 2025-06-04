@@ -412,6 +412,7 @@ version = "0.8.1"
 source = { editable = "." }
 dependencies = [
     { name = "hexdump" },
+    { name = "lxml" },
 ]
 
 [package.optional-dependencies]
@@ -434,6 +435,7 @@ requires-dist = [
     { name = "black", marker = "extra == 'test'", specifier = ">=24.4.2" },
     { name = "hexdump", specifier = ">=3.3" },
     { name = "isort", marker = "extra == 'test'", specifier = ">=5.13.2" },
+    { name = "lxml", specifier = ">=5.2.2" },
     { name = "lxml", marker = "extra == 'test'", specifier = ">=5.2.2" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.2.2" },
     { name = "pytest-cov", marker = "extra == 'test'", specifier = ">=5.0.0" },
