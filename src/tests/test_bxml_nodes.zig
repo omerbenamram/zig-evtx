@@ -354,6 +354,97 @@ test "NameNode resolves table and inline strings" {
     }
 }
 
+test "OpenStartElement with inline name parses attributes" {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var chunk_buf = [_]u8{0} ** 0x400;
+    const magic = "ElfChnk\x00";
+    @memcpy(chunk_buf[0..8], magic);
+    std.mem.writeInt(u32, chunk_buf[0x28..0x2C], 0x80, .little);
+    std.mem.writeInt(u32, chunk_buf[0x2C..0x30], 0x350, .little);
+    std.mem.writeInt(u32, chunk_buf[0x30..0x34], 0x350, .little);
+
+    const inline_offset: u32 = 0x300;
+    const inline_str = "Elem";
+    std.mem.writeInt(u32, chunk_buf[inline_offset .. inline_offset + 4], 0, .little);
+    std.mem.writeInt(u16, chunk_buf[inline_offset + 4 .. inline_offset + 6], 0, .little);
+    std.mem.writeInt(u16, chunk_buf[inline_offset + 6 .. inline_offset + 8], inline_str.len, .little);
+    for (inline_str, 0..) |ch, i| {
+        const slice = chunk_buf[inline_offset + 8 + i * 2 .. inline_offset + 8 + i * 2 + 2];
+        std.mem.writeInt(u16, @as(*[2]u8, @ptrCast(slice.ptr)), ch, .little);
+    }
+
+    const frag_ofs: usize = 0x200;
+    var i: usize = frag_ofs;
+    chunk_buf[i] = 0x0F; i += 1;
+    chunk_buf[i] = 0x01; i += 1;
+    chunk_buf[i] = 0x01; i += 1;
+    chunk_buf[i] = 0x00; i += 1;
+    chunk_buf[i] = 0x41; i += 1;
+    chunk_buf[i] = 0x00; chunk_buf[i + 1] = 0x00; i += 2;
+    std.mem.writeInt(u32, @as(*[4]u8, @ptrCast(chunk_buf[i .. i + 4].ptr)), 0, .little); i += 4;
+    std.mem.writeInt(u32, @as(*[4]u8, @ptrCast(chunk_buf[i .. i + 4].ptr)), inline_offset, .little); i += 4;
+    std.mem.writeInt(u32, @as(*[4]u8, @ptrCast(chunk_buf[i .. i + 4].ptr)), 0, .little); i += 4; // dependency id
+    chunk_buf[i] = 0x06; i += 1;
+    std.mem.writeInt(u32, @as(*[4]u8, @ptrCast(chunk_buf[i .. i + 4].ptr)), 0, .little); i += 4;
+    chunk_buf[i] = 0x05; chunk_buf[i + 1] = 0x04; chunk_buf[i + 2] = 0x2A; i += 3;
+    chunk_buf[i] = 0x02; i += 1;
+    chunk_buf[i] = 0x04; i += 1;
+    chunk_buf[i] = 0x00; i += 1;
+
+    const end_ofs = i;
+
+    var block = binary_parser.Block.init(&chunk_buf, 0);
+    var chunk = try evtx.ChunkHeader.init(allocator, &chunk_buf, 0);
+    defer chunk.deinit();
+
+    var pos: usize = frag_ofs;
+    var node = try bxml_parser.BXmlNode.parse(allocator, &block, &pos, &chunk);
+    switch (node) {
+        .start_of_stream => {},
+        else => try testing.expect(false),
+    }
+
+    node = try bxml_parser.BXmlNode.parse(allocator, &block, &pos, &chunk);
+    switch (node) {
+        .open_start_element => |ose| {
+            try testing.expect(std.mem.eql(u8, ose.name.string, inline_str));
+            allocator.free(ose.name.string);
+        },
+        else => try testing.expect(false),
+    }
+
+    node = try bxml_parser.BXmlNode.parse(allocator, &block, &pos, &chunk);
+    switch (node) {
+        .attribute => |attr| {
+            allocator.destroy(attr.value_node);
+        },
+        else => try testing.expect(false),
+    }
+
+    node = try bxml_parser.BXmlNode.parse(allocator, &block, &pos, &chunk);
+    switch (node) {
+        .close_start_element => {},
+        else => try testing.expect(false),
+    }
+
+    node = try bxml_parser.BXmlNode.parse(allocator, &block, &pos, &chunk);
+    switch (node) {
+        .close_element => {},
+        else => try testing.expect(false),
+    }
+
+    node = try bxml_parser.BXmlNode.parse(allocator, &block, &pos, &chunk);
+    switch (node) {
+        .end_of_stream => {},
+        else => try testing.expect(false),
+    }
+
+    try testing.expect(pos == end_ofs);
+}
+
 test "ValueNode toXml escaping" {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();

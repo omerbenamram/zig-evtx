@@ -174,12 +174,14 @@ pub const OpenStartElementNode = struct {
             pos.* += 4;
         }
 
-        // Skip inline name string if the string offset points inside the template
+        // Some producers store the element name as an inline NameString node
+        // immediately after the header. When the string_offset points inside
+        // the current template, skip over the inline string to keep parsing
+        // aligned with the Python implementation.
         if (chunk) |_| {
             const start_relative = start_pos;
-            if (string_offset > start_relative) {
-                // Inline NameString node
-                const str_len = try block.unpackWord(string_offset + 6);
+            if (string_offset > start_relative and string_offset < start_relative + size and string_offset + 8 <= block.getSize()) {
+                const str_len = block.unpackWord(string_offset + 6) catch 0;
                 const inline_len = 10 + (@as(usize, str_len) * 2);
                 if (string_offset + inline_len > pos.*) {
                     pos.* = string_offset + inline_len;
@@ -220,9 +222,7 @@ pub const OpenStartElementNode = struct {
             }
         }
 
-        // Previous implementations attempted to skip inline name strings here,
-        // but that caused misalignment when attribute lists were present.
-        // Allow the parser to naturally consume any inline string tokens.
+
 
         return OpenStartElementNode{
             .dependency_id = null, // Simplified for now
