@@ -59,3 +59,9 @@ zig build
 - Apply template substitutions via `TemplateProcessor` (or `parseRecordXml`) and
   avoid returning hard coded placeholder XML when record parsing fails.
 
+## Pull Request Guidelines
+- When drafting the PR description, include a brief example or explanation of
+  how the changes move the Zig parser closer to feature parity with the
+  reference Python implementation. This helps reviewers track progress toward
+  Python compatibility.
+
