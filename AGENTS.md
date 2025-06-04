@@ -58,6 +58,7 @@ zig build
   that file so other modules remain focused on higher level parsing.
 - Apply template substitutions via `TemplateProcessor` (or `parseRecordXml`) and
   avoid returning hard coded placeholder XML when record parsing fails.
+- When debugging template issues, avoid inserting guessed values or partial XML. Investigate the root cause instead.
 
 ## Pull Request Guidelines
 - When drafting the PR description, include a brief example or explanation of

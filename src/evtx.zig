@@ -480,27 +480,15 @@ pub const ChunkHeader = struct {
         @memcpy(&guid, guid_data);
 
         // Parse the binary XML template
-        const xml_format = bxml_parser.parseTemplateXml(self.allocator, &self.block, offset + 0x18, data_length, self) catch |err| {
+        const xml_format = bxml_parser.parseTemplateXml(
+            self.allocator,
+            &self.block,
+            offset + 0x18,
+            data_length,
+            self,
+        ) catch |err| {
             std.log.warn("Failed to parse template XML for ID {d}: {any}", .{ template_id, err });
-            // Create a working template that shows the system works
-            const basic_template = try std.fmt.allocPrint(self.allocator, "<Event xmlns=\"http://schemas.microsoft.com/win/2004/08/events/event\">\n" ++
-                "  <System>\n" ++
-                "    <Provider Name=\"[NormalSubstitution]\" />\n" ++
-                "    <EventID>[NormalSubstitution]</EventID>\n" ++
-                "    <TimeCreated SystemTime=\"[NormalSubstitution]\" />\n" ++
-                "    <Computer>[NormalSubstitution]</Computer>\n" ++
-                "  </System>\n" ++
-                "  <EventData>\n" ++
-                "    <Data>[NormalSubstitution]</Data>\n" ++
-                "  </EventData>\n" ++
-                "</Event>", .{});
-            return Template{
-                .template_id = template_id,
-                .guid = guid,
-                .data_length = data_length,
-                .data = template_data,
-                .xml_format = basic_template,
-            };
+            return EvtxError.InvalidRecord;
         };
 
         std.log.info("Template {d} XML: '{s}'", .{ template_id, xml_format });

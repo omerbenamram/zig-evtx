@@ -439,19 +439,24 @@ pub const CDataSectionNode = struct {
 };
 
 pub const CharRefNode = struct {
-    value: u16,
+    /// Unicode code point referenced by the char ref. According to the
+    /// EVTX specification this is stored as a 32-bit value.
+    value: u32,
 
     pub fn parse(allocator: Allocator, block: *Block, pos: *usize) BinaryXMLError!CharRefNode {
         _ = allocator;
-        const val = try block.unpackWord(pos.*);
-        pos.* += 2;
+        // CharRef uses a 4-byte little endian code point. The previous
+        // implementation only consumed a 16-bit value which caused
+        // misalignment and truncated templates.
+        const val = try block.unpackDword(pos.*);
+        pos.* += 4;
         return CharRefNode{ .value = val };
     }
 
     pub fn toXml(self: CharRefNode, allocator: Allocator, writer: anytype) BinaryXMLError!void {
         _ = allocator;
-        var buf: [10]u8 = undefined;
-        const slice = std.fmt.bufPrint(&buf, "&#x{X:0>4};", .{self.value}) catch {
+        var buf: [12]u8 = undefined;
+        const slice = std.fmt.bufPrint(&buf, "&#x{X};", .{self.value}) catch {
             return BinaryXMLError.OutOfMemory;
         };
         try writer.writeAll(slice);
