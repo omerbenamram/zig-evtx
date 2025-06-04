@@ -1,6 +1,5 @@
 const std = @import("std");
 const evtx = @import("../evtx.zig");
-const nodes = @import("../nodes.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};

@@ -12,6 +12,12 @@ collection of debug scripts.
 - `debug_*.py` and `.zig` – Various debugging helpers (avoid creating duplicates)
 - `.justfile` – Convenience tasks for linting and running tests
 
+## Key Structs
+- `Evtx`, `ChunkHeader`, `Record` and `Template` are defined in `src/evtx.zig` and manage file parsing.
+- `BXmlNode` and its node variants live in `src/bxml_parser.zig` and form the active binary XML parser.
+- `SubstitutionArray` and `TemplateProcessor` in `src/template_processor.zig` handle variant values and apply template substitutions.
+- Older node implementations from `nodes.zig` and the removed `RootNode` type are no longer used.
+
 ## Environment Setup
 1. Activate the virtual environment:
    ```bash
