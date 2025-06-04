@@ -151,133 +151,23 @@ pub const SubstitutionArray = struct {
     }
 };
 
-// Processed template with XML format string and substitution placeholders
-pub const ProcessedTemplate = struct {
-    xml_format: []u8,
-    substitution_count: usize,
-    allocator: Allocator,
-
-    const Self = @This();
-
-    pub fn fromTemplate(allocator: Allocator, template: *const TemplateNode) TemplateProcessorError!Self {
-        // Get the template's XML format
-        const template_xml = template.xml();
-
-        // Count substitution placeholders
-        var count: usize = 0;
-        var i: usize = 0;
-        while (i < template_xml.len) {
-            if (template_xml[i] == '{' and i + 1 < template_xml.len and template_xml[i + 1] == '}') {
-                count += 1;
-                i += 2;
-            } else {
-                i += 1;
-            }
-        }
-
-        return Self{
-            .xml_format = try allocator.dupe(u8, template_xml),
-            .substitution_count = count,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.allocator.free(self.xml_format);
-    }
-};
-
 // Template processing core functionality
 pub const TemplateProcessor = struct {
     allocator: Allocator,
-    template_cache: std.AutoHashMap(u32, *ProcessedTemplate),
 
     const Self = @This();
 
     pub fn init(allocator: Allocator) Self {
-        return Self{
-            .allocator = allocator,
-            .template_cache = std.AutoHashMap(u32, *ProcessedTemplate).init(allocator),
-        };
+        return Self{ .allocator = allocator };
     }
 
     pub fn deinit(self: *Self) void {
-        var iterator = self.template_cache.iterator();
-        while (iterator.next()) |entry| {
-            entry.value_ptr.*.deinit();
-            self.allocator.destroy(entry.value_ptr.*);
-        }
-        self.template_cache.deinit();
+        _ = self;
     }
 
     pub fn processTemplate(self: *Self, template: *const TemplateNode, substitutions: *const SubstitutionArray) TemplateProcessorError![]u8 {
-        // Get or create processed template
-        const template_id = template.templateId();
-        const processed = self.getOrCreateProcessedTemplate(template_id, template) catch |err| {
-            std.log.err("Failed to process template {d}: {any}", .{ template_id, err });
-            return err;
-        };
-
-        // Apply substitutions to generate XML
-        return try self.applySubstitutions(processed, substitutions);
-    }
-
-    fn getOrCreateProcessedTemplate(self: *Self, template_id: u32, template: *const TemplateNode) TemplateProcessorError!*ProcessedTemplate {
-        if (self.template_cache.get(template_id)) |cached| {
-            return cached;
-        }
-
-        // Create new processed template
-        const processed = try self.allocator.create(ProcessedTemplate);
-        processed.* = try ProcessedTemplate.fromTemplate(self.allocator, template);
-        try self.template_cache.put(template_id, processed);
-        return processed;
-    }
-
-    fn applySubstitutions(self: *Self, processed: *const ProcessedTemplate, substitutions: *const SubstitutionArray) TemplateProcessorError![]u8 {
-        var result = std.ArrayList(u8).init(self.allocator);
-        defer result.deinit();
-
-        // Simple substitution processing - replace placeholders in format string
-        var format_iter = std.mem.splitSequence(u8, processed.xml_format, "{}");
-        var substitution_index: usize = 0;
-
-        // Add first part (before any substitutions)
-        if (format_iter.next()) |part| {
-            try result.appendSlice(part);
-        }
-
-        // Process each substitution placeholder
-        while (format_iter.next()) |part_after| {
-            // Insert substitution value
-            if (substitution_index < substitutions.entries.len) {
-                const value_str = try substitutions.getValueString(substitution_index);
-                defer self.allocator.free(value_str);
-
-                // Escape XML characters
-                try self.appendXmlEscaped(&result, value_str);
-            }
-            substitution_index += 1;
-
-            // Add the part after this substitution
-            try result.appendSlice(part_after);
-        }
-
-        return try result.toOwnedSlice();
-    }
-
-    fn appendXmlEscaped(self: *Self, result: *std.ArrayList(u8), text: []const u8) !void {
-        _ = self;
-        for (text) |char| {
-            switch (char) {
-                '<' => try result.appendSlice("&lt;"),
-                '>' => try result.appendSlice("&gt;"),
-                '&' => try result.appendSlice("&amp;"),
-                '"' => try result.appendSlice("&quot;"),
-                '\'' => try result.appendSlice("&apos;"),
-                else => try result.append(char),
-            }
-        }
+        var processor = SubstitutionProcessor.init(self.allocator, template.xml(), substitutions);
+        return processor.process();
     }
 };
 

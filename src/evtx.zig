@@ -29,7 +29,7 @@ pub const EvtxError = error{
     NotOpenForReading,
     SocketNotConnected,
     Canceled,
-} || BinaryParserError;
+} || BinaryParserError || bxml_parser.BinaryXMLError;
 
 pub const Evtx = struct {
     allocator: Allocator,
