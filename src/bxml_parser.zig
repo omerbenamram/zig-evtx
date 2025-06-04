@@ -127,14 +127,11 @@ pub const BXmlNode = union(enum) {
             .char_reference => |node| try node.toXml(allocator, writer),
             .template_instance => {}, // Not rendered directly
             .normal_substitution, .conditional_substitution => |node| {
-                if (subs) |s| {
-                    node.toXml(allocator, writer, s) catch |err| switch (err) {
-                        BinaryXMLError.SuppressConditionalSubstitution => {},
-                        else => return err,
-                    };
-                } else {
-                    try node.toPlaceholderXml(allocator, writer);
-                }
+                const s = subs orelse return BinaryXMLError.InvalidData;
+                node.toXml(allocator, writer, s) catch |err| switch (err) {
+                    BinaryXMLError.SuppressConditionalSubstitution => {},
+                    else => return err,
+                };
             },
             .start_of_stream => {}, // Not rendered
         }
@@ -464,15 +461,6 @@ pub const SubstitutionNode = struct {
             .value_type = value_type,
             .is_conditional = is_conditional,
         };
-    }
-
-    pub fn toPlaceholderXml(self: SubstitutionNode, allocator: Allocator, writer: anytype) !void {
-        _ = allocator;
-        if (self.is_conditional) {
-            try writer.print("[Conditional Substitution(index={}, type={})]", .{ self.index, self.value_type });
-        } else {
-            try writer.print("[Normal Substitution(index={}, type={})]", .{ self.index, self.value_type });
-        }
     }
 
     pub fn toXml(
@@ -860,14 +848,11 @@ fn parseStream(
                 try val.toXml(allocator, writer);
             },
             .normal_substitution, .conditional_substitution => |sub| {
-                if (subs) |s| {
-                    sub.toXml(allocator, writer, s) catch |err| switch (err) {
-                        BinaryXMLError.SuppressConditionalSubstitution => {},
-                        else => return err,
-                    };
-                } else {
-                    try sub.toPlaceholderXml(allocator, writer);
-                }
+                const s = subs orelse return BinaryXMLError.InvalidData;
+                sub.toXml(allocator, writer, s) catch |err| switch (err) {
+                    BinaryXMLError.SuppressConditionalSubstitution => {},
+                    else => return err,
+                };
             },
             .entity_reference => |entity| {
                 try entity.toXml(allocator, writer);
