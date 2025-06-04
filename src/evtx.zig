@@ -248,20 +248,24 @@ pub const FileHeader = struct {
     }
 };
 
+// Import template structure
+const TemplateStructure = @import("template_processor.zig").TemplateStructure;
+
 // Forward declare template types
 pub const Template = struct {
     template_id: u32,
     guid: [16]u8,
     data_length: u32,
     data: []const u8,
-    xml_format: []const u8,
+    structure: TemplateStructure,  // The parsed template structure
 
     pub fn templateId(self: *const Template) u32 {
         return self.template_id;
     }
-
-    pub fn xml(self: *const Template) []const u8 {
-        return self.xml_format;
+    
+    pub fn deinit(self: *Template, allocator: Allocator) void {
+        _ = allocator;
+        self.structure.deinit();
     }
 };
 
@@ -403,8 +407,8 @@ pub const ChunkHeader = struct {
         if (self.templates) |*templates_map| {
             var iter = templates_map.iterator();
             while (iter.next()) |entry| {
-                // Free template XML strings allocated during parsing
-                self.allocator.free(entry.value_ptr.*.xml_format);
+                // Free template resources
+                entry.value_ptr.*.deinit(self.allocator);
             }
             templates_map.deinit();
         }
@@ -451,8 +455,9 @@ pub const ChunkHeader = struct {
                     std.log.info("Stored template {d} from offset {d}", .{ template.template_id, ofs });
                 } else {
                     std.log.info("Template {d} already exists, skipping duplicate at offset {d}", .{ template.template_id, ofs });
-                    // Free the XML string since we are discarding this duplicate template
-                    self.allocator.free(template.xml_format);
+                    // Free the template resources since we are discarding this duplicate
+                    var temp_template = template;
+                    temp_template.deinit(self.allocator);
                 }
 
                 // Move to next template in chain (templates are linked)
@@ -481,25 +486,25 @@ pub const ChunkHeader = struct {
         var guid: [16]u8 = undefined;
         @memcpy(&guid, guid_data);
 
-        // Parse the binary XML template
-        const xml_format = bxml_parser.parseTemplateXml(
+        // Parse the binary XML template into a structure
+        const structure = bxml_parser.parseTemplateStructure(
             self.allocator,
             &self.block,
             offset + 0x18,
             data_length,
             self,
         ) catch |err| {
-            std.log.warn("Failed to parse template XML for ID {d}: {any}", .{ template_id, err });
+            std.log.warn("Failed to parse template structure for ID {d}: {any}", .{ template_id, err });
             return EvtxError.InvalidRecord;
         };
 
-        std.log.info("Template {d} XML: '{s}'", .{ template_id, xml_format });
+        std.log.info("Template {d} parsed successfully", .{ template_id });
         return Template{
             .template_id = template_id,
             .guid = guid,
             .data_length = data_length,
             .data = template_data,
-            .xml_format = xml_format,
+            .structure = structure,
         };
     }
 
@@ -578,7 +583,7 @@ pub const ChunkHeader = struct {
 
         // Check if template exists
         const template_exists = self.templates.?.contains(template_id);
-        std.log.info("Looking for template {d}, exists: {}", .{ template_id, template_exists });
+        std.log.info("Looking for template {d}, exists: {any}", .{ template_id, template_exists });
 
         if (self.templates.?.getPtr(template_id)) |template| {
             std.log.info("Found template {d}!", .{template_id});

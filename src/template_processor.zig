@@ -8,6 +8,7 @@ const variant_types = @import("variant_types.zig");
 const VariantTypeNode = variant_types.VariantTypeNode;
 const BinaryXMLError = @import("tokens.zig").BinaryXMLError;
 const bxml_parser = @import("bxml_parser.zig");
+const BXmlNode = bxml_parser.BXmlNode;
 
 // Import actual EVTX types
 const evtx = @import("evtx.zig");
@@ -137,7 +138,7 @@ pub const SubstitutionArray = struct {
 
             // Use the new parseWithKnownSize function that handles pre-declared sizes
             const variant_node = VariantTypeNode.parseWithKnownSize(allocator, block, &pos, typ, size) catch |err| {
-                std.log.warn("Variant parse error (type={}, size={}): {any}", .{ typ, size, err });
+                std.log.warn("Variant parse error (type={d}, size={d}): {any}", .{ typ, size, err });
                 return TemplateProcessorError.ParseError;
             };
 
@@ -148,6 +149,92 @@ pub const SubstitutionArray = struct {
             .entries = try entries.toOwnedSlice(),
             .allocator = allocator,
         };
+    }
+};
+
+/// A template representation that stores the BXML node tree
+/// and can be materialized with substitution values later
+pub const TemplateStructure = struct {
+    /// Root nodes of the template
+    nodes: []BXmlNode,
+    /// Allocator used for this structure
+    allocator: Allocator,
+    
+    const Self = @This();
+    
+    pub fn init(allocator: Allocator, nodes: []const BXmlNode) !Self {
+        // Deep copy the nodes to ensure ownership
+        const owned_nodes = try allocator.alloc(BXmlNode, nodes.len);
+        @memcpy(owned_nodes, nodes);
+        
+        return Self{
+            .nodes = owned_nodes,
+            .allocator = allocator,
+        };
+    }
+    
+    pub fn deinit(self: *Self) void {
+        // NOTE: Currently we're just shallow copying nodes from parseTemplateNodes
+        // The strings and other data are owned by the chunk/block allocators
+        // So we only free the nodes array itself, not the contents
+        self.allocator.free(self.nodes);
+    }
+    
+    /// Materialize the template with actual substitution values
+    pub fn toXml(self: *const Self, allocator: Allocator, subs: *const SubstitutionArray) ![]u8 {
+        var output = std.ArrayList(u8).init(allocator);
+        errdefer output.deinit();
+        
+        const writer = output.writer();
+        var element_stack = std.ArrayList([]const u8).init(allocator);
+        defer element_stack.deinit();
+        
+        try self.renderNodes(allocator, writer, &element_stack, self.nodes, subs);
+        
+        // Close any remaining open elements
+        while (element_stack.items.len > 0) {
+            // Safe to use unreachable: we check items.len > 0 before popping
+            const name = element_stack.pop() orelse unreachable;
+            try writer.print("</{s}>", .{name});
+        }
+        
+        return output.toOwnedSlice();
+    }
+    
+    fn renderNodes(
+        self: *const Self,
+        allocator: Allocator,
+        writer: anytype,
+        element_stack: *std.ArrayList([]const u8),
+        nodes: []const BXmlNode,
+        subs: *const SubstitutionArray,
+    ) !void {
+        _ = self;
+        
+        for (nodes) |node| {
+            // Use BXmlNode's toXml method which handles dispatching correctly
+            try node.toXml(allocator, writer, subs);
+            
+            // Handle element stack tracking separately
+            switch (node) {
+                .open_start_element => |elem| {
+                    try element_stack.append(elem.name.string);
+                },
+                .close_empty_element => {
+                    if (element_stack.items.len > 0) {
+                        _ = element_stack.pop();
+                    }
+                },
+                .close_element => {
+                    if (element_stack.items.len > 0) {
+                        // Safe to use unreachable: we check items.len > 0 before popping
+                        const name = element_stack.pop() orelse unreachable;
+                        try writer.print("</{s}>", .{name});
+                    }
+                },
+                else => {},
+            }
+        }
     }
 };
 
@@ -166,140 +253,13 @@ pub const TemplateProcessor = struct {
     }
 
     pub fn processTemplate(self: *Self, template: *const TemplateNode, substitutions: *const SubstitutionArray) TemplateProcessorError![]u8 {
-        var processor = SubstitutionProcessor.init(self.allocator, template.xml(), substitutions);
-        return processor.process();
+        return template.structure.toXml(self.allocator, substitutions) catch |err| {
+            std.log.err("Failed to process template: {any}", .{err});
+            return TemplateProcessorError.ParseError;
+        };
     }
 };
 
-// Substitution processor - applies substitution values to template format strings
-pub const SubstitutionProcessor = struct {
-    allocator: Allocator,
-    template_xml: []const u8,
-    substitutions: *const SubstitutionArray,
-
-    const Self = @This();
-
-    pub fn init(allocator: Allocator, template_xml: []const u8, substitutions: *const SubstitutionArray) Self {
-        return Self{
-            .allocator = allocator,
-            .template_xml = template_xml,
-            .substitutions = substitutions,
-        };
-    }
-
-    pub fn process(self: *Self) ![]u8 {
-        var result = std.ArrayList(u8).init(self.allocator);
-        defer result.deinit();
-
-        var i: usize = 0;
-        while (i < self.template_xml.len) {
-            // Look for substitution markers
-            if (self.findSubstitutionMarker(i)) |marker| {
-                // Add any text before the marker
-                try result.appendSlice(self.template_xml[i..marker.start]);
-
-                // Process the substitution
-                if (marker.index < self.substitutions.entries.len) {
-                    const value = try self.substitutions.getValueString(marker.index);
-                    defer self.allocator.free(value);
-
-                    // For conditional substitutions, check if we should include it
-                    if (marker.is_conditional) {
-                        // Check if this is a null/empty value
-                        const variant_node = &self.substitutions.entries[marker.index];
-                        if (variant_node.tag != .Null and value.len > 0) {
-                            // Escape XML special characters
-                            try self.appendXmlEscaped(&result, value);
-                        }
-                        // Otherwise suppress the value (and potentially the parent element)
-                    } else {
-                        // Normal substitution - always include
-                        try self.appendXmlEscaped(&result, value);
-                    }
-                } else {
-                    // Index out of bounds - log warning and keep marker
-                    std.log.warn("Substitution index {} out of bounds (max {})", .{ marker.index, self.substitutions.entries.len });
-                    try result.appendSlice(self.template_xml[marker.start..marker.end]);
-                }
-
-                i = marker.end;
-            } else {
-                // No more markers, copy the rest
-                try result.appendSlice(self.template_xml[i..]);
-                break;
-            }
-        }
-
-        return try result.toOwnedSlice();
-    }
-
-    const SubstitutionMarker = struct {
-        start: usize,
-        end: usize,
-        index: usize,
-        is_conditional: bool,
-    };
-
-    fn findSubstitutionMarker(self: *const Self, start_pos: usize) ?SubstitutionMarker {
-        const normal_prefix = "[Normal Substitution(index=";
-        const conditional_prefix = "[Conditional Substitution(index=";
-
-        // Find the next substitution marker
-        var pos = start_pos;
-        while (pos < self.template_xml.len) {
-            if (std.mem.startsWith(u8, self.template_xml[pos..], normal_prefix)) {
-                return self.parseMarker(pos, normal_prefix.len, false);
-            } else if (std.mem.startsWith(u8, self.template_xml[pos..], conditional_prefix)) {
-                return self.parseMarker(pos, conditional_prefix.len, true);
-            }
-            pos += 1;
-        }
-
-        return null;
-    }
-
-    fn parseMarker(self: *const Self, start: usize, prefix_len: usize, is_conditional: bool) ?SubstitutionMarker {
-        const index_start = start + prefix_len;
-        var index_end = index_start;
-
-        // Find the comma after the index
-        while (index_end < self.template_xml.len and self.template_xml[index_end] != ',') : (index_end += 1) {}
-
-        if (index_end >= self.template_xml.len) return null;
-
-        // Parse the index
-        const index_str = self.template_xml[index_start..index_end];
-        const index = std.fmt.parseInt(usize, index_str, 10) catch return null;
-
-        // Find the closing bracket
-        var marker_end = index_end;
-        while (marker_end < self.template_xml.len and self.template_xml[marker_end] != ']') : (marker_end += 1) {}
-
-        if (marker_end >= self.template_xml.len) return null;
-        marker_end += 1; // Include the closing bracket
-
-        return SubstitutionMarker{
-            .start = start,
-            .end = marker_end,
-            .index = index,
-            .is_conditional = is_conditional,
-        };
-    }
-
-    fn appendXmlEscaped(self: *const Self, list: *std.ArrayList(u8), text: []const u8) !void {
-        _ = self;
-        for (text) |char| {
-            switch (char) {
-                '<' => try list.appendSlice("&lt;"),
-                '>' => try list.appendSlice("&gt;"),
-                '&' => try list.appendSlice("&amp;"),
-                '"' => try list.appendSlice("&quot;"),
-                '\'' => try list.appendSlice("&apos;"),
-                else => try list.append(char),
-            }
-        }
-    }
-};
 
 pub fn processRecord(allocator: Allocator, record_data: []const u8, chunk: *ChunkHeader, template_id: u32) ![]u8 {
     _ = template_id; // Template ID is embedded in the binary XML

@@ -197,7 +197,10 @@ pub const VariantTypeNode = struct {
                 pos.* += size;
                 return VariantTypeNode{ .tag = .WStringArray, .data = VariantData{ .WStringArray = string_data } };
             },
-            else => return BinaryXMLError.InvalidVariantType,
+            else => {
+                std.log.err("Invalid variant type: 0x{x:0>2} at parseWithType", .{variant_type});
+                return BinaryXMLError.InvalidVariantType;
+            },
         }
     }
 
@@ -343,7 +346,10 @@ pub const VariantTypeNode = struct {
                 pos.* += size * 2;
                 return VariantTypeNode{ .tag = .WStringArray, .data = VariantData{ .WStringArray = string_data } };
             },
-            else => return BinaryXMLError.InvalidVariantType,
+            else => {
+                std.log.err("Invalid variant type: 0x{x:0>2} at parseWithType", .{variant_type});
+                return BinaryXMLError.InvalidVariantType;
+            },
         }
     }
 

@@ -76,6 +76,7 @@ pub const BinaryXMLError = error{
     InvalidGuid,
     InvalidFiletime,
     InvalidSID,
+    SubstitutionWithoutValues,
 } || @import("binary_parser.zig").BinaryParserError;
 
 /// Token names for debugging and logging

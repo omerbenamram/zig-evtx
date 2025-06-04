@@ -70,9 +70,9 @@ pub fn main() !void {
         std.debug.print("  Next Record Number: {d}\n", .{header.nextRecordNumber()});
 
         const verified = try header.verify();
-        std.debug.print("  File Verified: {}\n", .{verified});
-        std.debug.print("  Is Dirty: {}\n", .{header.isDirty()});
-        std.debug.print("  Is Full: {}\n", .{header.isFull()});
+        std.debug.print("  File Verified: {any}\n", .{verified});
+        std.debug.print("  Is Dirty: {any}\n", .{header.isDirty()});
+        std.debug.print("  Is Full: {any}\n", .{header.isFull()});
     }
 
     const stdout = std.io.getStdOut().writer();
@@ -104,7 +104,7 @@ pub fn main() !void {
             // Generate XML for this record
             const xml = record.xml(allocator) catch |err| {
                 error_count += 1;
-                std.debug.print("<!-- Error processing record {d}: {} -->\n", .{ record.record_num_val, err });
+                std.debug.print("<!-- Error processing record {d}: {any} -->\n", .{ record.record_num_val, err });
                 continue;
             };
             defer allocator.free(xml);

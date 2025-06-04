@@ -36,7 +36,7 @@ pub const BXmlNode = union(enum) {
         };
         const has_more = BXmlToken.hasMoreFlag(token_byte);
 
-        std.log.debug("Token: {s}, has_more: {}", .{ tokens.getTokenName(token_byte), has_more });
+        std.log.debug("Token: {s}, has_more: {any}", .{ tokens.getTokenName(token_byte), has_more });
         pos.* += 1;
 
         switch (token) {
@@ -127,7 +127,7 @@ pub const BXmlNode = union(enum) {
             .char_reference => |node| try node.toXml(allocator, writer),
             .template_instance => {}, // Not rendered directly
             .normal_substitution, .conditional_substitution => |node| {
-                const s = subs orelse return BinaryXMLError.InvalidData;
+                const s = subs orelse return error.SubstitutionWithoutValues;
                 node.toXml(allocator, writer, s) catch |err| switch (err) {
                     BinaryXMLError.SuppressConditionalSubstitution => {},
                     else => return err,
@@ -148,7 +148,7 @@ pub const OpenStartElementNode = struct {
 
         // Remember start of this node relative to the block
         const start_pos = pos.*;
-        std.log.debug("OpenStartElementNode.parse: starting at pos {d}, has_more={}", .{ start_pos, has_more });
+        std.log.debug("OpenStartElementNode.parse: starting at pos {d}, has_more={any}", .{ start_pos, has_more });
 
         // Read unknown0 (2 bytes)
         const unknown0 = try block.unpackWord(pos.*);
@@ -638,8 +638,9 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
         std.log.info("Parsed resident template {d} at offset {d}", .{ template_id, template_offset });
 
         if (try map.fetchPut(tmpl.template_id, tmpl)) |kv| {
-            // Replace existing template and free old XML to avoid leaks
-            chunk.allocator.free(kv.value.xml_format);
+            // Replace existing template and free old resources to avoid leaks
+            var old_template = kv.value;
+            old_template.deinit(chunk.allocator);
         }
     }
 
@@ -708,7 +709,7 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
         for (0..16) |i| {
             preview[i] = try block.unpackByte(pos + i);
         }
-        std.log.debug("First 16 bytes: {x}", .{preview});
+        std.log.debug("First 16 bytes: {any}", .{preview});
     }
 
     var subs = template_processor.SubstitutionArray.parseWithDeclarations(allocator, block, pos) catch |err| {
@@ -735,53 +736,93 @@ pub fn parseRecordXml(allocator: Allocator, block: *Block, offset: u32, length: 
 
     const template = template_opt.?;
 
-    std.log.info("Template XML format length: {d}", .{template.xml_format.len});
-    std.log.debug("Template XML: {s}", .{template.xml_format});
-
-    // Apply substitutions
-    var processor = template_processor.SubstitutionProcessor.init(allocator, template.xml_format, &subs);
-    const result = try processor.process();
-
+    // Apply substitutions using the template structure
+    const result = template.structure.toXml(allocator, &subs) catch |err| {
+        std.log.err("Failed to apply substitutions: {any}", .{err});
+        return BinaryXMLError.InvalidData;
+    };
     std.log.info("Result after substitution: {s}", .{result});
     return result;
 }
 
-// Parse a complete binary XML template and return XML string with substitution placeholders
-pub fn parseTemplateXml(allocator: Allocator, block: *Block, offset: u32, length: u32, chunk: ?*const @import("evtx.zig").ChunkHeader) anyerror![]u8 {
+// Import template processor types
+const TemplateStructure = @import("template_processor.zig").TemplateStructure;
+
+// Parse a complete binary XML template and return a structured representation
+pub fn parseTemplateStructure(allocator: Allocator, block: *Block, offset: u32, length: u32, chunk: ?*const @import("evtx.zig").ChunkHeader) anyerror!TemplateStructure {
     // Note: offset is block-relative (e.g., 574 for template data at chunk offset 0x1000 + 574)
-    std.log.info("Parsing template XML at block-relative offset {d} with length {d}", .{ offset, length });
-    var output = std.ArrayList(u8).init(allocator);
-    errdefer output.deinit();
-
-    // Use a temporary arena for node allocations so they don't leak
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const temp_allocator = arena.allocator();
-
-    const writer = output.writer();
-    var pos: usize = offset; // pos is block-relative throughout parsing
+    std.log.info("Parsing template structure at block-relative offset {d} with length {d}", .{ offset, length });
+    
+    var nodes = std.ArrayList(BXmlNode).init(allocator);
+    errdefer nodes.deinit();
+    
+    var pos: usize = offset;
     const end_pos: usize = offset + length;
+    
+    // Parse all nodes into the array
+    try parseTemplateNodes(allocator, block, &pos, end_pos, chunk, &nodes);
+    
+    std.log.info("Parsed {d} nodes into template structure", .{nodes.items.len});
+    
+    // Create the template structure
+    return TemplateStructure.init(allocator, nodes.items);
+}
 
-    var element_stack = std.ArrayList([]const u8).init(allocator);
-    defer element_stack.deinit();
-
-    var node_count: u32 = 0;
+// Helper function to parse nodes into an array
+fn parseTemplateNodes(
+    allocator: Allocator,
+    block: *Block,
+    pos: *usize,
+    end_pos: usize,
+    chunk: ?*const @import("evtx.zig").ChunkHeader,
+    nodes: *std.ArrayList(BXmlNode),
+) anyerror!void {
     var depth: u32 = 0;
-
-    try parseStream(allocator, temp_allocator, block, &pos, end_pos, chunk, writer, &element_stack, &depth, &node_count, null);
-
-    // Some templates omit explicit close element tokens. Close any
-    // remaining open elements to keep the XML well-formed so further
-    // processing matches the Python output.
-    while (true) {
-        const maybe = element_stack.pop();
-        if (maybe) |name| {
-            try writer.print("</{s}>", .{name});
-        } else break;
+    
+    while (pos.* < end_pos) {
+        const node = BXmlNode.parse(allocator, block, pos, chunk) catch |err| {
+            std.log.warn("Failed to parse node at pos {d}: {any}", .{ pos.*, err });
+            return err;
+        };
+        
+        switch (node) {
+            .start_of_stream => {
+                depth += 1;
+                try nodes.append(node);
+                // Continue parsing the stream
+                try parseTemplateNodes(allocator, block, pos, end_pos, chunk, nodes);
+                depth -= 1;
+            },
+            .end_of_stream => {
+                try nodes.append(node);
+                return;
+            },
+            .template_instance => |inst| {
+                // For nested templates, we need to handle them specially
+                // For now, just add the node
+                _ = inst;
+                try nodes.append(node);
+            },
+            else => {
+                try nodes.append(node);
+            },
+        }
+        
+        if (nodes.items.len > 10000) {
+            std.log.warn("Parsed too many nodes, stopping", .{});
+            return;
+        }
     }
+}
 
-    std.log.info("Parsed {d} nodes, output length: {d}, final depth: {d}", .{ node_count, output.items.len, depth });
-    return output.toOwnedSlice();
+// Parse template XML - this now returns an error since we don't support placeholder rendering
+pub fn parseTemplateXml(allocator: Allocator, block: *Block, offset: u32, length: u32, chunk: ?*const @import("evtx.zig").ChunkHeader) anyerror![]u8 {
+    _ = allocator;
+    _ = block;
+    _ = offset;
+    _ = length;
+    _ = chunk;
+    return error.NotImplemented;  // Use parseTemplateStructure instead
 }
 
 fn parseStream(
@@ -848,7 +889,7 @@ fn parseStream(
                 try val.toXml(allocator, writer);
             },
             .normal_substitution, .conditional_substitution => |sub| {
-                const s = subs orelse return BinaryXMLError.InvalidData;
+                const s = subs orelse return error.SubstitutionWithoutValues;
                 sub.toXml(allocator, writer, s) catch |err| switch (err) {
                     BinaryXMLError.SuppressConditionalSubstitution => {},
                     else => return err,
@@ -875,7 +916,18 @@ fn parseStream(
                         }
                     }
                     if (tmpl_opt) |tmpl| {
-                        try writer.writeAll(tmpl.xml_format);
+                        // We can't render templates without substitutions
+                        if (subs) |s| {
+                            // Apply the template structure with current substitutions
+                            const result = tmpl.structure.toXml(allocator, s) catch |err| {
+                                std.log.warn("Failed to render template {d}: {any}", .{ inst.template_id, err });
+                                return;
+                            };
+                            defer allocator.free(result);
+                            try writer.writeAll(result);
+                        } else {
+                            std.log.warn("Cannot render template {d} without substitutions", .{inst.template_id});
+                        }
                     } else {
                         std.log.warn("Referenced template {d} not available", .{inst.template_id});
                     }
