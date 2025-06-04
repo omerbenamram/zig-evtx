@@ -7,6 +7,8 @@ const views_tests = @import("views.zig");
 const evtx_parsing_tests = @import("tests/test_evtx_parsing.zig");
 const variant_type_tests = @import("tests/test_variant_types.zig");
 const bxml_node_tests = @import("tests/test_bxml_nodes.zig");
+const failure_case = @import("tests/test_failure_case.zig");
+const first_record_xml = @import("tests/test_first_record_xml.zig");
 
 test {
     // Reference all test modules to include their tests
@@ -16,4 +18,6 @@ test {
     std.testing.refAllDecls(evtx_parsing_tests);
     std.testing.refAllDecls(variant_type_tests);
     std.testing.refAllDecls(bxml_node_tests);
+    std.testing.refAllDecls(failure_case);
+    std.testing.refAllDecls(first_record_xml);
 }

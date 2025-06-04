@@ -199,30 +199,32 @@ pub const OpenStartElementNode = struct {
         };
         std.log.debug("  name resolved to: '{s}'", .{name.string});
 
-        // According to EVTX documentation and our analysis:
-        // When has_more flag is set, there's an attribute list structure:
-        // - 4 bytes: Data size (not including these 4 bytes)
-        // - Variable: Array of attributes
+        // According to the EVTX spec (see lines 418–432 of
+        // `Windows XML Event Log (EVTX).asciidoc`), a start element
+        // with the "has more" flag set is followed by an attribute list
+        // structure.  The documentation states this list begins with a
+        // 4‑byte size field, then an array of Attribute tokens.  The
+        // reference Python parser (see `Evtx/Nodes.py` in
+        // `OpenStartElementNode.__init__`) does **not** read such a
+        // size; it simply starts parsing the next tokens and relies on
+        // them to delineate the attributes.  Real-world logs show both
+        // behaviours, so we peek at the next dword and only treat it as
+        // a size when it doesn't look like an Attribute token.
         if (has_more) {
-            // When "has_more" is set, an attribute list follows this element
-            // header.  Some producers insert a 4-byte size for that list, while
-            // others omit it and immediately start with an Attribute token. To
-            // detect which form we're dealing with, peek at the next byte and
-            // decode it as a token. If it represents an Attribute, no size field
-            // is present and we continue parsing attributes directly. Otherwise
-            // treat those bytes as the attribute list size.
-            const peek = try block.unpackByte(pos.*);
-            const peek_token = BXmlToken.fromByte(peek);
-            if (peek_token != null and peek_token.? == .Attribute) {
+            // Some logs include a 4-byte attribute list size while others omit it.
+            // Read the next dword but only consume it when the high three bytes
+            // are non-zero (indicating a real size rather than the start of an
+            // Attribute token).
+            const maybe_size = try block.unpackDword(pos.*);
+            const first_byte: u8 = @as(u8, @truncate(maybe_size));
+            const as_token = BXmlToken.fromByte(first_byte);
+            if ((maybe_size & 0xFFFFFF00) == 0 and as_token != null and as_token.? == .Attribute) {
                 std.log.debug("  Attribute list size not present", .{});
             } else {
-                const attr_list_size = try block.unpackDword(pos.*);
                 pos.* += 4;
-                std.log.debug("  Attribute list size: {d} bytes", .{attr_list_size});
+                std.log.debug("  Attribute list size: {d} bytes", .{maybe_size});
             }
         }
-
-
 
         return OpenStartElementNode{
             .dependency_id = null, // Simplified for now
@@ -731,18 +733,18 @@ const TemplateStructure = @import("template_processor.zig").TemplateStructure;
 pub fn parseTemplateStructure(allocator: Allocator, block: *Block, offset: u32, length: u32, chunk: ?*const @import("evtx.zig").ChunkHeader) anyerror!TemplateStructure {
     // Note: offset is block-relative (e.g., 574 for template data at chunk offset 0x1000 + 574)
     std.log.info("Parsing template structure at block-relative offset {d} with length {d}", .{ offset, length });
-    
+
     var nodes = std.ArrayList(BXmlNode).init(allocator);
     errdefer nodes.deinit();
-    
+
     var pos: usize = offset;
     const end_pos: usize = offset + length;
-    
+
     // Parse all nodes into the array
-    try parseTemplateNodes(allocator, block, &pos, end_pos, chunk, &nodes);
-    
+    try parseTemplateNodes(allocator, block, &pos, end_pos, chunk, &nodes, false);
+
     std.log.info("Parsed {d} nodes into template structure", .{nodes.items.len});
-    
+
     // Create the template structure
     return TemplateStructure.init(allocator, nodes.items);
 }
@@ -755,26 +757,27 @@ fn parseTemplateNodes(
     end_pos: usize,
     chunk: ?*const @import("evtx.zig").ChunkHeader,
     nodes: *std.ArrayList(BXmlNode),
+    in_stream: bool,
 ) anyerror!void {
-    var depth: u32 = 0;
-    
     while (pos.* < end_pos) {
         const node = BXmlNode.parse(allocator, block, pos, chunk) catch |err| {
             std.log.warn("Failed to parse node at pos {d}: {any}", .{ pos.*, err });
             return err;
         };
-        
+
         switch (node) {
             .start_of_stream => {
-                depth += 1;
                 try nodes.append(node);
                 // Continue parsing the stream
-                try parseTemplateNodes(allocator, block, pos, end_pos, chunk, nodes);
-                depth -= 1;
+                try parseTemplateNodes(allocator, block, pos, end_pos, chunk, nodes, true);
             },
             .end_of_stream => {
                 try nodes.append(node);
-                return;
+                if (in_stream) {
+                    return;
+                } else {
+                    continue;
+                }
             },
             .template_instance => |inst| {
                 // For nested templates, we need to handle them specially
@@ -786,7 +789,7 @@ fn parseTemplateNodes(
                 try nodes.append(node);
             },
         }
-        
+
         if (nodes.items.len > 10000) {
             std.log.warn("Parsed too many nodes, stopping", .{});
             return;
@@ -801,7 +804,7 @@ pub fn parseTemplateXml(allocator: Allocator, block: *Block, offset: u32, length
     _ = offset;
     _ = length;
     _ = chunk;
-    return error.NotImplemented;  // Use parseTemplateStructure instead
+    return error.NotImplemented; // Use parseTemplateStructure instead
 }
 
 fn parseStream(
