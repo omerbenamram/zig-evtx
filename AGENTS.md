@@ -27,6 +27,10 @@ collection of debug scripts.
 - **Zig unit tests:** `zig test src/test_runner.zig` (INCOMPLETE - these do NOT indicate parser is currently working, we need to rely on comparison scripts.)
 - **Zig/Python comparison:** `zig run test_template_comparison.zig`
 
+For a direct XML comparison of the first record between the reference Python
+implementation and the Zig parser, run `./compare_first_record_xml.py`. This
+generates `python_first.xml` and `zig_first.xml` for inspection.
+
 Run both suites when modifying related code.
 
 ## Building and Running

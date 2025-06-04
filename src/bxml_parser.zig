@@ -45,7 +45,8 @@ pub const BXmlNode = union(enum) {
                 return BXmlNode{ .end_of_stream = {} };
             },
             .OpenStartElement => {
-                const node = try OpenStartElementNode.parse(allocator, block, pos, has_more, chunk);
+                const flags = BXmlToken.getFlags(token_byte);
+                const node = try OpenStartElementNode.parse(allocator, block, pos, has_more, flags, chunk);
                 return BXmlNode{ .open_start_element = node };
             },
             .CloseStartElement => return BXmlNode{ .close_start_element = {} },
@@ -132,7 +133,7 @@ pub const OpenStartElementNode = struct {
     name: NameNode,
     has_more: bool,
 
-    pub fn parse(allocator: Allocator, block: *Block, pos: *usize, has_more: bool, chunk: ?*const @import("evtx.zig").ChunkHeader) BinaryXMLError!OpenStartElementNode {
+    pub fn parse(allocator: Allocator, block: *Block, pos: *usize, has_more: bool, flags: u8, chunk: ?*const @import("evtx.zig").ChunkHeader) BinaryXMLError!OpenStartElementNode {
 
         // Remember start of this node relative to the block
         const start_pos = pos.*;
@@ -171,6 +172,25 @@ pub const OpenStartElementNode = struct {
         // Read string_offset (4 bytes)
         const string_offset = try block.unpackDword(pos.*);
         pos.* += 4;
+
+        // Optional dependency ID if flag 0x04 is set
+        if (flags & 0x04 != 0) {
+            _ = try block.unpackDword(pos.*);
+            pos.* += 4;
+        }
+
+        // Skip inline name string if the string offset points inside the template
+        if (chunk) |_| {
+            const start_relative = start_pos;
+            if (string_offset > start_relative) {
+                // Inline NameString node
+                const str_len = try block.unpackWord(string_offset + 6);
+                const inline_len = 10 + (@as(usize, str_len) * 2);
+                if (string_offset + inline_len > pos.*) {
+                    pos.* = string_offset + inline_len;
+                }
+            }
+        }
 
         std.log.debug("  unknown0: 0x{x:0>4}, size: {d}, string_offset: {d} (0x{x:0>8})", .{ unknown0, size, string_offset, string_offset });
 
@@ -440,11 +460,13 @@ pub const CharRefNode = struct {
         return CharRefNode{ .value = val };
     }
 
-    pub fn toXml(self: CharRefNode, allocator: Allocator, writer: anytype) !void {
+    pub fn toXml(self: CharRefNode, allocator: Allocator, writer: anytype) BinaryXMLError!void {
         _ = allocator;
         var buf: [10]u8 = undefined;
-        const len = try std.fmt.bufPrint(&buf, "&#x{X:0>4};", .{self.value});
-        try writer.writeAll(buf[0..len]);
+        const slice = std.fmt.bufPrint(&buf, "&#x{X:0>4};", .{self.value}) catch {
+            return BinaryXMLError.OutOfMemory;
+        };
+        try writer.writeAll(slice);
     }
 };
 
@@ -731,6 +753,9 @@ fn parseStream(
             },
             .entity_reference => |entity| {
                 try entity.toXml(allocator, writer);
+            },
+            .char_reference => |charref| {
+                try charref.toXml(allocator, writer);
             },
             else => {
                 std.log.debug("Unhandled node type in XML generation", .{});

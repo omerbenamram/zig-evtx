@@ -503,7 +503,13 @@ test "Basic substitution parsing" {
     const allocator = gpa.allocator();
 
     // Test parsing of simple substitution data
-    const test_data = [_]u8{ 0x01, 0x48, 0x00, 0x65, 0x00, 0x6C, 0x00, 0x6C, 0x00, 0x6F, 0x00, 0x00, 0x00 }; // WString "Hello"
+    const test_data = [_]u8{ 0x01, 0x05, 0x00,
+        'H', 0x00,
+        'e', 0x00,
+        'l', 0x00,
+        'l', 0x00,
+        'o', 0x00
+    }; // WString "Hello" with length prefix
     var block = Block.init(&test_data, 0);
 
     var substitutions = try SubstitutionArray.parse(allocator, &block, 0);
