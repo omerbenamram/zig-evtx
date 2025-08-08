@@ -532,28 +532,15 @@ fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w: an
         }
         log.debug("tmpl def_off=0x{x} def_size={d}", .{ def_data_off, def_size });
 
-        // According to the spec, def_data_off points directly to the template definition DATA
-        // (FragmentHeader + Element + EOF) within the chunk, without a header prefix.
-        // Parse from that offset and let element-encoded sizes bound the reader.
+        // Chunk template header layout: [4 unknown][16 GUID][4 data_size][data...]
         const def_off_usize: usize = @intCast(def_data_off);
-        if (def_off_usize >= chunk.len) return BinXmlError.OutOfBounds;
-        log.trace("using chunk def data at 0x{x}..0x{x}", .{ def_off_usize, chunk.len });
-        var def_r = Reader.init(chunk[def_off_usize..]);
-        if (ctx.verbose and def_r.rem() > 0) {
-            const n: usize = if (def_r.rem() >= 32) 32 else def_r.rem();
-            var i: usize = 0;
-            while (i < n) : (i += 8) {
-                const a0: u8 = def_r.buf[i + 0];
-                const a1: u8 = if (i + 1 < n) def_r.buf[i + 1] else 0;
-                const a2: u8 = if (i + 2 < n) def_r.buf[i + 2] else 0;
-                const a3: u8 = if (i + 3 < n) def_r.buf[i + 3] else 0;
-                const a4: u8 = if (i + 4 < n) def_r.buf[i + 4] else 0;
-                const a5: u8 = if (i + 5 < n) def_r.buf[i + 5] else 0;
-                const a6: u8 = if (i + 6 < n) def_r.buf[i + 6] else 0;
-                const a7: u8 = if (i + 7 < n) def_r.buf[i + 7] else 0;
-                log.trace("def@chunk+{d:0>2}: {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{ i, a0, a1, a2, a3, a4, a5, a6, a7 });
-            }
-        }
+        if (def_off_usize + 24 > chunk.len) return BinXmlError.OutOfBounds;
+        const td_data_size = std.mem.readInt(u32, chunk[def_off_usize + 20 .. def_off_usize + 24][0..4], .little);
+        const data_start = def_off_usize + 24;
+        const data_end = data_start + @as(usize, td_data_size);
+        if (data_end > chunk.len or data_start >= chunk.len) return BinXmlError.OutOfBounds;
+        log.trace("using chunk def data at 0x{x}..0x{x}", .{ data_start, data_end });
+        var def_r = Reader.init(chunk[data_start..data_end]);
         // Optional fragment header inside definition
         if (def_r.rem() >= 4 and def_r.buf[def_r.pos] == TOK_FRAGMENT_HEADER) {
             _ = try def_r.readU8();
@@ -562,14 +549,31 @@ fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w: an
             _ = try def_r.readU8();
         }
 
-        // Skip inline copy of template definition data in the record if present.
-        // The embedded definition immediately follows and is def_size bytes long.
-        if (def_size != 0 and r.rem() >= def_size and (r.buf[r.pos] == TOK_FRAGMENT_HEADER or isToken(r.buf[r.pos], TOK_OPEN_START))) {
-            const start = r.pos;
-            const end = start + @as(usize, def_size);
-            if (end <= r.buf.len) {
-                r.pos = end;
-                log.trace("skipped inline def at rec+0x{x}..0x{x}", .{ start, end });
+        // Skip inline copy of template definition data in the record if present by parsing it.
+        if (r.rem() > 0 and (r.buf[r.pos] == TOK_FRAGMENT_HEADER or isToken(r.buf[r.pos], TOK_OPEN_START))) {
+            const save_pos = r.pos;
+            var inl = Reader.init(r.buf[r.pos..]);
+            // Optional fragment header
+            if (inl.rem() >= 4 and inl.buf[inl.pos] == TOK_FRAGMENT_HEADER) {
+                _ = inl.readU8() catch {};
+                _ = inl.readU8() catch {};
+                _ = inl.readU8() catch {};
+                _ = inl.readU8() catch {};
+            }
+            var tmp_gpa = std.heap.GeneralPurposeAllocator(.{}){};
+            defer _ = tmp_gpa.deinit();
+            const tmp_alloc = tmp_gpa.allocator();
+            // Parse definition element to learn its exact length
+            if (parseElementIR(chunk, &inl, tmp_alloc, .def)) |_| {
+                // Optional EOF
+                if (inl.rem() > 0 and inl.buf[inl.pos] == TOK_EOF) {
+                    _ = inl.readU8() catch {};
+                }
+                const consumed = inl.pos;
+                r.pos = save_pos + consumed;
+                log.trace("skipped inline def by parse size={d}", .{consumed});
+            } else |_| {
+                // If parsing failed, don't advance; fall back to current position
             }
         }
 
