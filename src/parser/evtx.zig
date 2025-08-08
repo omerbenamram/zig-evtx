@@ -65,12 +65,15 @@ pub const EvtxParser = struct {
 
         var chunk_index: usize = 0;
         var emitted: usize = 0;
+        var ctx = try binxml.Context.init(self.allocator);
+        defer ctx.deinit();
         while (chunk_index < hdr.num_chunks) : (chunk_index += 1) {
             var chunk = try Chunk.read(reader);
             if (self.opts.verbose) {
                 try std.io.getStdErr().writer().print("[evtx] chunk {d}: free_off=0x{x}, last_rec_off=0x{x}\n", .{ chunk_index, chunk.header.free_space_offset, chunk.header.last_event_record_offset });
             }
             if (self.opts.validate_checksums) try chunk.validateChecksums();
+            ctx.resetPerChunk();
             var rec_iter = chunk.records();
             while (try rec_iter.next()) |rec| {
                 if (self.opts.verbose) {
@@ -199,7 +202,7 @@ const RecordIterator = struct {
         if (size < 32 or self.offset + size > self.chunk.buf.len) return error.CorruptRecord;
         const identifier = std.mem.readInt(u64, slice[8..16], .little);
         const written = std.mem.readInt(u64, slice[16..24], .little);
-        const end_slice: *const [4]u8 = slice[size - 4 .. size][0..4];
+        const end_slice = slice[size - 4 .. size][0..4];
         const end_copy = std.mem.readInt(u32, end_slice, .little);
         if (end_copy != size) return error.SizeMismatch;
         const event_data = slice[24 .. size - 4];
@@ -223,7 +226,9 @@ pub const EventRecordView = struct {
     chunk_buf: *const [65536]u8,
 
     fn writeXml(self: *const EventRecordView, w: anytype) !void {
-        try binxml.render(self.chunk_buf, self.raw_xml, .xml, w);
+        var ctx = try binxml.Context.init(std.heap.page_allocator);
+        defer ctx.deinit();
+        try binxml.renderWithContext(&ctx, self.chunk_buf, self.raw_xml, .xml, w);
         try w.writeByte('\n');
     }
 
@@ -235,7 +240,9 @@ pub const EventRecordView = struct {
         };
         try w.writeAll("{");
         try w.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ self.id, self.timestamp_filetime });
-        try binxml.render(self.chunk_buf, self.raw_xml, body_mode, w);
+        var ctx = try binxml.Context.init(std.heap.page_allocator);
+        defer ctx.deinit();
+        try binxml.renderWithContext(&ctx, self.chunk_buf, self.raw_xml, body_mode, w);
         try w.writeAll("}\n");
     }
 };
