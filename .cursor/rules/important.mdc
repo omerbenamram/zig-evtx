@@ -1,0 +1,8 @@
+---
+alwaysApply: true
+---
+
+# Usage of the Makefile
+- You must use the @Makefile to run build commands.
+- DO dynamically control logging verbosity per module.
+- DO store useful comparison commands in the Makefile.

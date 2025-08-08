@@ -65,6 +65,7 @@ pub const EvtxParser = struct {
 
         var chunk_index: usize = 0;
         var emitted: usize = 0;
+        var failed: usize = 0;
         var ctx = try binxml.Context.init(self.allocator);
         defer ctx.deinit();
         while (chunk_index < hdr.num_chunks) : (chunk_index += 1) {
@@ -80,12 +81,21 @@ pub const EvtxParser = struct {
                     try std.io.getStdErr().writer().print("[evtx] record id={d} time={d}\n", .{ rec.identifier, rec.written_time });
                 }
                 const view = EventRecordView{ .id = rec.identifier, .timestamp_filetime = rec.written_time, .raw_xml = rec.binxml, .chunk_buf = rec.chunk_buf };
-                try out.writeRecord(view);
+                out.writeRecord(view) catch |e| {
+                    failed += 1;
+                    if (self.opts.verbose) {
+                        try std.io.getStdErr().writer().print("[evtx] record id={d} parse error: {s}\n", .{ rec.identifier, @errorName(e) });
+                    }
+                    continue;
+                };
                 emitted += 1;
                 if (self.opts.max_records != 0 and emitted >= self.opts.max_records) {
                     return;
                 }
             }
+        }
+        if (self.opts.verbose) {
+            try std.io.getStdErr().writer().print("[evtx] done. emitted={d} failed={d}\n", .{ emitted, failed });
         }
     }
 };
