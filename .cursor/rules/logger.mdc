@@ -1,0 +1,48 @@
+---
+alwaysApply: true
+description: Concise guide for the project logger with levels and environment controls
+---
+### Logger usage (Zig)
+
+- **Module**: [src/logger.zig](mdc:src/logger.zig)
+- **Import**:
+
+  ```zig
+  // From files under src/ (e.g., src/main.zig)
+  const logger = @import("logger.zig");
+  // From files under src/parser/ (e.g., src/parser/binxml.zig)
+  const logger = @import("../logger.zig");
+  ```
+
+- **Create a scoped logger**:
+
+  ```zig
+  const log = logger.scoped("my_module");
+  ```
+
+- **Log methods (printf-style)**:
+  - `log.err("message {d}", .{ arg })`
+  - `log.warn("...", .{ })`
+  - `log.info("...", .{ })`
+  - `log.debug("...", .{ })`
+  - `log.trace("...", .{ })`
+
+- **Levels enum**: `.err, .warn, .info, .debug, .trace`
+
+- **Programmatic control**:
+
+  ```zig
+  logger.setGlobalLevel(.info);
+  logger.setModuleLevel("binxml", .trace);
+  ```
+
+- **Environment variables** (override at runtime):
+  - Global: `EVTX_LOG_LEVEL` or `EVTX_LOG` → one of: `error|warn|info|debug|trace` or `1..5`
+  - Per-module: `EVTX_LOG_<UPPERCASED_MODULE>` (non-alnum becomes `_`), e.g. `EVTX_LOG_BINXML=trace`
+  - Default global level: `.warn`
+
+- **Guidelines**:
+  - Prefer the logger over direct `stderr` prints in all code.
+  - Use `trace`/`debug` inside parsing/tokenization; gate high-volume logs behind env or `-v`.
+  - `binxml` may enable trace dynamically when `ctx.verbose` is set; `evtx` raises levels when `-v` is passed.
+

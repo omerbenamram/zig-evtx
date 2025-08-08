@@ -1,6 +1,8 @@
 const std = @import("std");
 const crc32 = std.hash.crc;
 const binxml = @import("binxml.zig");
+const logger = @import("../logger.zig");
+const log = logger.scoped("evtx");
 
 pub const ParserOptions = struct {
     validate_checksums: bool = true,
@@ -58,7 +60,9 @@ pub const EvtxParser = struct {
 
     pub fn parse(self: *EvtxParser, reader: anytype, out: anytype) !void {
         if (self.opts.verbose) {
-            try std.io.getStdErr().writer().print("[evtx] reading file header...\n", .{});
+            logger.setModuleLevel("evtx", .info);
+            logger.setModuleLevel("binxml", .warn);
+            log.info("reading file header...", .{});
         }
         var hdr: FileHeader = try FileHeader.read(reader);
         if (self.opts.validate_checksums) try hdr.validateChecksum();
@@ -70,24 +74,18 @@ pub const EvtxParser = struct {
         defer ctx.deinit();
         while (chunk_index < hdr.num_chunks) : (chunk_index += 1) {
             var chunk = try Chunk.read(reader);
-            if (self.opts.verbose) {
-                try std.io.getStdErr().writer().print("[evtx] chunk {d}: free_off=0x{x}, last_rec_off=0x{x}\n", .{ chunk_index, chunk.header.free_space_offset, chunk.header.last_event_record_offset });
-            }
+            if (self.opts.verbose) log.info("chunk {d}: free_off=0x{x}, last_rec_off=0x{x}", .{ chunk_index, chunk.header.free_space_offset, chunk.header.last_event_record_offset });
             if (self.opts.validate_checksums) try chunk.validateChecksums();
             ctx.resetPerChunk();
             // propagate verbosity into binxml module for this chunk
             ctx.verbose = self.opts.verbose;
             var rec_iter = chunk.records();
             while (try rec_iter.next()) |rec| {
-                if (self.opts.verbose) {
-                    try std.io.getStdErr().writer().print("[evtx] record id={d} time={d}\n", .{ rec.identifier, rec.written_time });
-                }
+                if (self.opts.verbose) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
                 const view = EventRecordView{ .id = rec.identifier, .timestamp_filetime = rec.written_time, .raw_xml = rec.binxml, .chunk_buf = rec.chunk_buf };
                 out.writeRecord(view) catch |e| {
                     failed += 1;
-                    if (self.opts.verbose) {
-                        try std.io.getStdErr().writer().print("[evtx] record id={d} parse error: {s}\n", .{ rec.identifier, @errorName(e) });
-                    }
+                    log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
                     continue;
                 };
                 emitted += 1;
@@ -96,9 +94,7 @@ pub const EvtxParser = struct {
                 }
             }
         }
-        if (self.opts.verbose) {
-            try std.io.getStdErr().writer().print("[evtx] done. emitted={d} failed={d}\n", .{ emitted, failed });
-        }
+        if (self.opts.verbose) log.info("done. emitted={d} failed={d}", .{ emitted, failed });
     }
 };
 
@@ -238,10 +234,17 @@ pub const EventRecordView = struct {
     chunk_buf: *const [65536]u8,
 
     fn writeXml(self: *const EventRecordView, w: anytype) !void {
+        // Buffer per-record output to avoid leaking partial garbage on failures
         var ctx = try binxml.Context.init(std.heap.page_allocator);
+        // Enable verbose token logs to aid triage (propagate outer verbosity later)
+        ctx.verbose = true;
         defer ctx.deinit();
-        try binxml.renderWithContext(&ctx, self.chunk_buf, self.raw_xml, .xml, w);
-        try w.writeByte('\n');
+        var buf = std.ArrayList(u8).init(std.heap.page_allocator);
+        defer buf.deinit();
+        var bw = buf.writer();
+        try binxml.renderWithContext(&ctx, self.chunk_buf, self.raw_xml, .xml, bw);
+        try bw.writeByte('\n');
+        try w.writeAll(buf.items);
     }
 
     const JsonOutMode = enum { single, lines };
@@ -250,11 +253,16 @@ pub const EventRecordView = struct {
             .lines => .jsonl,
             .single => .json,
         };
-        try w.writeAll("{");
-        try w.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ self.id, self.timestamp_filetime });
+        // Buffer full JSON object per record to avoid corrupting stream on errors
+        var buf = std.ArrayList(u8).init(std.heap.page_allocator);
+        defer buf.deinit();
+        var bw = buf.writer();
+        try bw.writeAll("{");
+        try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ self.id, self.timestamp_filetime });
         var ctx = try binxml.Context.init(std.heap.page_allocator);
         defer ctx.deinit();
-        try binxml.renderWithContext(&ctx, self.chunk_buf, self.raw_xml, body_mode, w);
-        try w.writeAll("}\n");
+        try binxml.renderWithContext(&ctx, self.chunk_buf, self.raw_xml, body_mode, bw);
+        try bw.writeAll("}\n");
+        try w.writeAll(buf.items);
     }
 };

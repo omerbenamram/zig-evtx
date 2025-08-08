@@ -1,13 +1,17 @@
 const std = @import("std");
+const logger = @import("../logger.zig");
+const log = logger.scoped("binxml");
 const util = @import("util.zig");
 const writeXmlEscaped = util.writeXmlEscaped;
 const writeUtf16LeXmlEscaped = util.writeUtf16LeXmlEscaped;
+const writeUtf16LeRawToUtf8 = util.writeUtf16LeRawToUtf8;
 const utf16EqualsAscii = util.utf16EqualsAscii;
 const normalizeAndWriteSystemTimeAscii = util.normalizeAndWriteSystemTimeAscii;
 const writePaddedInt = util.writePaddedInt;
 const writeUnicodeStringArrayCommaSeparated = util.writeUnicodeStringArrayCommaSeparated;
 const formatIso8601UtcFromUnixMs = util.formatIso8601UtcFromUnixMs;
 const formatIso8601UtcFromFiletimeMicros = util.formatIso8601UtcFromFiletimeMicros;
+const writeAnsiCp1252Escaped = util.writeAnsiCp1252Escaped;
 
 pub const RenderMode = enum { xml, json, jsonl };
 
@@ -32,6 +36,8 @@ const TOK_EOF: u8 = 0x00;
 const TOK_CDATA: u8 = 0x07; // or 0x47 with has-more flag
 const TOK_CHARREF: u8 = 0x08; // or 0x48 with has-more flag
 const TOK_ENTITYREF: u8 = 0x09; // or 0x49 with has-more flag
+const TOK_PITARGET: u8 = 0x0a;
+const TOK_PIDATA: u8 = 0x0b;
 
 fn hasMore(flagged: u8, base: u8) bool {
     return (flagged & 0x1f) == base and (flagged & 0x40) != 0;
@@ -130,6 +136,12 @@ fn readFixedBytes(r: *Reader, n: usize) ![]const u8 {
 
 fn valueTypeFixedSize(vtype: u8) ?usize {
     return switch (vtype) {
+        0x03, // Int8
+        0x04, // UInt8
+        => 1,
+        0x05, // Int16
+        0x06, // UInt16
+        => 2,
         0x07, // Int32
         0x08, // UInt32
         0x0d, // Bool (DWORD)
@@ -137,6 +149,8 @@ fn valueTypeFixedSize(vtype: u8) ?usize {
         => 4, // HexInt32
         0x09, // Int64
         0x0a, // UInt64
+        0x0b, // Real32
+        0x0c, // Real64
         0x11,
         => 8, // FILETIME
         0x15 => 8, // HexInt64
@@ -163,8 +177,6 @@ fn writeNameFromUtf16(w: anytype, utf16le: []const u8, num_chars: usize) !void {
     try writeUtf16LeXmlEscaped(w, utf16le, num_chars);
 }
 
-// moved to util.utf16EqualsAscii
-
 fn isNameSystemTimeFromOffset(chunk: []const u8, name_offset: u32) bool {
     const off = @as(usize, name_offset);
     if (off + 8 > chunk.len) return false;
@@ -173,31 +185,6 @@ fn isNameSystemTimeFromOffset(chunk: []const u8, name_offset: u32) bool {
     const byte_len = @as(usize, num_chars) * 2;
     if (str_start + byte_len > chunk.len) return false;
     return utf16EqualsAscii(chunk[str_start .. str_start + byte_len], num_chars, "SystemTime");
-}
-
-// moved to util.normalizeAndWriteSystemTimeAscii
-
-// Collect attribute value tokens (including substitutions) into a buffer writer.
-// Mirrors the logic used for generic attribute values, so special cases are centralized.
-fn collectAttributeValue(_: []const u8, _: *Reader, _: anytype, _: []const TemplateValue) !void {}
-
-fn writeSystemTimeAttributeValue(chunk: []const u8, r: *Reader, w: anytype, values: []const TemplateValue) !void {
-    var buf: [256]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    const aw = fbs.writer();
-    try collectAttributeValue(chunk, r, aw, values);
-    const written = fbs.getWritten();
-    // Drop '+' sentinels
-    var tmp: [256]u8 = undefined;
-    var idx: usize = 0;
-    var j: usize = 0;
-    while (idx < written.len and j < tmp.len) : (idx += 1) {
-        const ch = written[idx];
-        if (ch == '+') continue;
-        tmp[j] = ch;
-        j += 1;
-    }
-    try normalizeAndWriteSystemTimeAscii(w, tmp[0..j]);
 }
 
 fn readInlineName(r: *Reader) !struct { utf16: []const u8, num_chars: usize } {
@@ -212,6 +199,19 @@ fn readInlineName(r: *Reader) !struct { utf16: []const u8, num_chars: usize } {
 }
 
 fn readInlineNameDefFlexible(r: *Reader) !struct { utf16: []const u8, num_chars: usize } {
+    // Try variant A first: u16 hash + u16 num + UTF16
+    if (r.rem() >= 4) {
+        const saveA = r.pos;
+        _ = try r.readU16le(); // hash
+        const numA = try r.readU16le();
+        const bytesA = @as(usize, numA) * 2;
+        if (r.rem() >= bytesA and r.pos + bytesA <= r.buf.len) {
+            const sliceA = r.buf[r.pos .. r.pos + bytesA];
+            r.pos += bytesA;
+            return .{ .utf16 = sliceA, .num_chars = numA };
+        }
+        r.pos = saveA;
+    }
     // Variant C: u32 unknown + u32 zero/unknown + u16 hash + u16 num + UTF16 (+ optional EOS)
     if (r.rem() >= 12) {
         const saveC = r.pos;
@@ -223,7 +223,6 @@ fn readInlineNameDefFlexible(r: *Reader) !struct { utf16: []const u8, num_chars:
         if (r.rem() >= bytesC and r.pos + bytesC <= r.buf.len) {
             const sliceC = r.buf[r.pos .. r.pos + bytesC];
             r.pos += bytesC;
-            // Optional EOS (u16 0)
             if (r.rem() >= 2) {
                 const eos = std.mem.readInt(u16, r.buf[r.pos .. r.pos + 2][0..2], .little);
                 if (eos == 0) r.pos += 2;
@@ -232,115 +231,36 @@ fn readInlineNameDefFlexible(r: *Reader) !struct { utf16: []const u8, num_chars:
         }
         r.pos = saveC;
     }
-    // Try variant A: u16 hash + u16 num + UTF16
-    if (r.rem() >= 4) {
-        const save = r.pos;
-        _ = try r.readU16le(); // hash
-        const numA = try r.readU16le();
-        const bytesA = @as(usize, numA) * 2;
-        if (r.rem() >= bytesA and r.pos + bytesA <= r.buf.len) {
-            const slice = r.buf[r.pos .. r.pos + bytesA];
-            r.pos += bytesA;
-            return .{ .utf16 = slice, .num_chars = numA };
-        }
-        r.pos = save;
-    }
     // Variant B: u16 num + UTF16
     if (r.rem() >= 2) {
+        const saveB = r.pos;
         const numB = try r.readU16le();
         const bytesB = @as(usize, numB) * 2;
         if (r.rem() >= bytesB and r.pos + bytesB <= r.buf.len) {
-            const slice = r.buf[r.pos .. r.pos + bytesB];
+            const sliceB = r.buf[r.pos .. r.pos + bytesB];
             r.pos += bytesB;
-            return .{ .utf16 = slice, .num_chars = numB };
+            return .{ .utf16 = sliceB, .num_chars = numB };
         }
+        r.pos = saveB;
     }
     // Fallback to full variant with unknown+hash
-    _ = try r.readU32le(); // unknown
-    _ = try r.readU16le(); // hash
-    const num = try r.readU16le();
-    const bytes = @as(usize, num) * 2;
-    if (r.pos + bytes > r.buf.len) return BinXmlError.UnexpectedEof;
-    const slice = r.buf[r.pos .. r.pos + bytes];
-    r.pos += bytes;
-    return .{ .utf16 = slice, .num_chars = num };
+    if (r.rem() >= 8) {
+        const saveF = r.pos;
+        _ = try r.readU32le(); // unknown
+        _ = try r.readU16le(); // hash
+        const numF = try r.readU16le();
+        const bytesF = @as(usize, numF) * 2;
+        if (r.rem() >= bytesF and r.pos + bytesF <= r.buf.len) {
+            const sliceF = r.buf[r.pos .. r.pos + bytesF];
+            r.pos += bytesF;
+            return .{ .utf16 = sliceF, .num_chars = numF };
+        }
+        r.pos = saveF;
+    }
+    return BinXmlError.UnexpectedEof;
 }
 
-fn writeAttributeListXml(chunk: []const u8, r: *Reader, w: anytype, src: Source, values: []const TemplateValue) !void {
-    // Attribute list: u32 size (excludes the 4 size bytes), then attributes
-    const list_size = try r.readU32le();
-    {
-        var stderr = std.io.getStdErr().writer();
-        _ = try stderr.print("[binxml] attr list_size={d} rem={d}\n", .{ list_size, r.rem() });
-    }
-    const list_start = r.pos;
-    const list_end = list_start + list_size;
-    if (list_end > r.buf.len) return BinXmlError.UnexpectedEof;
-
-    while (r.pos < list_end) {
-        if (r.rem() == 0) break;
-        const tok_peek = r.buf[r.pos];
-        if (!isToken(tok_peek, TOK_ATTRIBUTE)) break;
-        _ = try r.readU8();
-        var name_off: u32 = 0;
-        var have_name_off: bool = false;
-        var def_attr_utf16: []const u8 = &[_]u8{};
-        var def_attr_num_chars: usize = 0;
-        var have_inline_name: bool = false;
-        switch (src) {
-            .rec => {
-                // Attribute name offset (chunk-relative)
-                name_off = try r.readU32le();
-                have_name_off = true;
-            },
-            .def => {
-                const nm = try readInlineNameDefFlexible(r);
-                def_attr_utf16 = nm.utf16;
-                def_attr_num_chars = nm.num_chars;
-                have_inline_name = true;
-            },
-        }
-        // Collect attribute value into a temporary buffer first
-        var final_attr_buf: [2048]u8 = undefined;
-        var fbs_final = std.io.fixedBufferStream(&final_attr_buf);
-        var final_writer = fbs_final.writer();
-
-        // Special-case TimeCreated SystemTime to render with normalized padding into temp buffer
-        if ((have_name_off and isNameSystemTimeFromOffset(chunk, name_off)) or (have_inline_name and utf16EqualsAscii(def_attr_utf16, def_attr_num_chars, "SystemTime"))) {
-            try writeSystemTimeAttributeValue(chunk, r, fbs_final.writer(), values);
-        } else {
-            var attr_buf: [2048]u8 = undefined;
-            var fbs = std.io.fixedBufferStream(&attr_buf);
-            const aw = fbs.writer();
-            try collectAttributeValue(chunk, r, aw, values);
-            const written = fbs.getWritten();
-            // Drop '+' sentinels and write via writer safely
-            var i_norm: usize = 0;
-            while (i_norm < written.len) : (i_norm += 1) {
-                const ch = written[i_norm];
-                if (ch == '+') continue;
-                try final_writer.writeByte(ch);
-            }
-        }
-        const final_written = fbs_final.getWritten();
-        if (final_written.len == 0) {
-            // Skip emitting this attribute entirely (e.g., optional NULL substitution)
-            continue;
-        }
-        // Emit attribute header and value now
-        try w.writeByte(' ');
-        if (have_name_off) try writeNameFromOffset(chunk, name_off, w) else try writeNameFromUtf16(w, def_attr_utf16, def_attr_num_chars);
-        try w.writeAll("=\"");
-        try w.writeAll(final_written);
-        try w.writeByte('"');
-
-        // If attribute token had has-more flag, continue; else if we're at end, loop ends naturally
-        // Note: More attributes are indicated by 0x46, but we already consumed current token; loop proceeds to next
-    }
-
-    // Attribute list may include padding; ensure we align to list_end
-    if (r.pos != list_end) r.pos = list_end;
-}
+// (removed) legacy streaming attribute writer `writeAttributeListXml`
 
 // Move TemplateValue up so IR can reference it
 const TemplateValue = struct {
@@ -382,6 +302,11 @@ fn parseTemplateInstanceValues(r: *Reader, allocator: std.mem.Allocator) ![]Temp
 
 fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
     switch (t) {
+        0x03 => { // Int8
+            if (data.len < 1) return;
+            const v: i8 = @bitCast(data[0]);
+            try w.print("{d}", .{v});
+        },
         0x04 => { // UInt8
             if (data.len < 1) return;
             const v: u8 = data[0];
@@ -413,8 +338,25 @@ fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
                 try writeUtf16LeXmlEscaped(w, data[2 .. 2 + byte_len], num_chars);
             }
         },
-        0x02 => { // AnsiStringType (codepage) - treat as bytes, escape
-            try writeXmlEscaped(w, data);
+        0x02 => { // AnsiStringType (codepage) - decode CP-1252 best-effort
+            try writeAnsiCp1252Escaped(w, data);
+        },
+        0x0b => { // Real32Type
+            if (data.len < 4) return;
+            const bits = std.mem.readInt(u32, data[0..4], .little);
+            const f: f32 = @bitCast(bits);
+            if (std.math.isNan(f)) return try w.writeAll("-1.#IND");
+            if (std.math.isInf(f)) return try w.writeAll(if (f > 0) "1.#INF" else "-1.#INF");
+            // Format with 6 fractional digits when needed
+            try w.print("{d}", .{f});
+        },
+        0x0c => { // Real64Type
+            if (data.len < 8) return;
+            const bits = std.mem.readInt(u64, data[0..8], .little);
+            const f: f64 = @bitCast(bits);
+            if (std.math.isNan(f)) return try w.writeAll("-1.#IND");
+            if (std.math.isInf(f)) return try w.writeAll(if (f > 0) "1.#INF" else "-1.#INF");
+            try w.print("{d}", .{f});
         },
         0x07 => { // Int32Type
             if (data.len < 4) return;
@@ -502,6 +444,15 @@ fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
                 try w.print("{x:0>2}", .{data[i]});
             }
         },
+        0x10 => { // SizeTType — represent as hex (size depends on platform; we cannot know, prefer 32-bit if length==4 else 64)
+            if (data.len >= 8) {
+                const v = std.mem.readInt(u64, data[0..8], .little);
+                try w.print("0x{X}", .{v});
+            } else if (data.len >= 4) {
+                const v = std.mem.readInt(u32, data[0..4], .little);
+                try w.print("0x{X}", .{v});
+            }
+        },
         0x14 => { // HexInt32Type
             if (data.len < 4) return BinXmlError.UnexpectedEof;
             const v = std.mem.readInt(u32, data[0..4], .little);
@@ -512,6 +463,21 @@ fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
             const v = std.mem.readInt(u64, data[0..8], .little);
             try w.print("0x{X}", .{v});
         },
+        0x20 => { // EvtHandle – render as integer value length-based
+            if (data.len >= 8) {
+                const v = std.mem.readInt(u64, data[0..8], .little);
+                try w.print("{d}", .{v});
+            } else if (data.len >= 4) {
+                const v = std.mem.readInt(u32, data[0..4], .little);
+                try w.print("{d}", .{v});
+            }
+        },
+        0x23 => { // EvtXml (opaque) – provide a sane fallback as hex string
+            var i: usize = 0;
+            while (i < data.len) : (i += 1) {
+                try w.print("{x:0>2}", .{data[i]});
+            }
+        },
         // 0x21 => EvtXml (nested binary XML) is not handled here to avoid re-entrant parsing in value writer
         else => {
             // TODO: implement other types; for now, no-op for unsupported
@@ -519,346 +485,13 @@ fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
     }
 }
 
-// Render an array of Unicode strings (UTF-16LE, NUL-terminated per item, packed back-to-back)
-// as a comma-separated list, trimming trailing empty items but preserving empty items in between.
-// moved to util.writeUnicodeStringArrayCommaSeparated
+// (removed) legacy streaming substitution renderer `renderSubstitutionXml`
 
-// moved to util.formatIso8601UtcFromUnixMs
-
-// moved to util.formatIso8601UtcFromFiletimeMicros
-
-// moved to util.writePaddedInt
-
-fn renderSubstitutionXml(_chunk: []const u8, w: anytype, is_optional: bool, r: *Reader, values: []const TemplateValue, pad_width: usize) anyerror!void {
-    _ = _chunk;
-    const id = try r.readU16le();
-    const vtype = try r.readU8();
-    if (id >= values.len) return BinXmlError.OutOfBounds;
-    const v = values[id];
-    // debug
-    {
-        var stderr = std.io.getStdErr().writer();
-        _ = stderr.print("[binxml] subst id={d} vtype=0x{x} store.t=0x{x} len={d} opt={d} pad={d}\n", .{ id, vtype, v.t, v.data.len, @intFromBool(is_optional), pad_width }) catch {};
-    }
-    if (is_optional and (v.t == 0x00 or v.data.len == 0)) {
-        // Skip emitting anything for NULL optional
-        return;
-    }
-    // Array handling: if MSB set, repeat for each element
-    if ((vtype & 0x80) != 0) {
-        const base = vtype & 0x7F;
-        switch (base) {
-            0x01 => { // array of Unicode strings: emit comma-separated; trim trailing empty items
-                // First pass: identify item ranges and last non-empty index
-                var ranges = std.ArrayList(struct { start: usize, end: usize }).init(std.heap.page_allocator);
-                defer ranges.deinit();
-                var i: usize = 0;
-                while (i <= v.data.len) {
-                    const start = i;
-                    var end = i;
-                    while (end + 1 < v.data.len) : (end += 2) {
-                        const u = std.mem.readInt(u16, v.data[end .. end + 2][0..2], .little);
-                        if (u == 0) break;
-                    }
-                    try ranges.append(.{ .start = start, .end = end });
-                    if (end + 1 < v.data.len) {
-                        i = end + 2;
-                        continue;
-                    } else break;
-                }
-                var last_non_empty: isize = -1;
-                var idx_scan: usize = 0;
-                while (idx_scan < ranges.items.len) : (idx_scan += 1) {
-                    const rr = ranges.items[idx_scan];
-                    if (rr.end > rr.start) last_non_empty = @as(isize, @intCast(idx_scan));
-                }
-                if (last_non_empty >= 0) {
-                    var out_idx: usize = 0;
-                    while (out_idx <= @as(usize, @intCast(last_non_empty))) : (out_idx += 1) {
-                        if (out_idx > 0) try w.writeByte(',');
-                        const rr2 = ranges.items[out_idx];
-                        if (rr2.end > rr2.start) {
-                            const num_chars = (rr2.end - rr2.start) / 2;
-                            try writeUtf16LeXmlEscaped(w, v.data[rr2.start..rr2.end], num_chars);
-                        }
-                    }
-                }
-            },
-            else => {
-                // TODO: implement arrays for other base types
-            },
-        }
-        return;
-    }
-    // Queue nested EvtXml (0x21) from substitutions
-    if ((v.t & 0x7F) == 0x21 and v.data.len > 0) {
-        // If a child element just closed, this substitution arrives in the parent
-        // content. Queue onto the current frame so it flushes on the parent’s close.
-        r.queueEvtXml(v.data);
-        return;
-    }
-
-    // If padding requested and base type is integer, pad
-    const base = vtype & 0x7F;
-    if (pad_width > 0) {
-        switch (base) {
-            0x07 => { // Int32
-                if (v.data.len < 4) return BinXmlError.UnexpectedEof;
-                const num = std.mem.readInt(i32, v.data[0..4], .little);
-                try writePaddedInt(w, i32, num, pad_width);
-                return;
-            },
-            0x08 => { // UInt32
-                if (v.data.len < 4) return BinXmlError.UnexpectedEof;
-                const num = std.mem.readInt(u32, v.data[0..4], .little);
-                try writePaddedInt(w, u32, num, pad_width);
-                return;
-            },
-            0x09 => { // Int64
-                if (v.data.len < 8) return BinXmlError.UnexpectedEof;
-                const num = std.mem.readInt(i64, v.data[0..8], .little);
-                try writePaddedInt(w, i64, num, pad_width);
-                return;
-            },
-            0x0a => { // UInt64
-                if (v.data.len < 8) return BinXmlError.UnexpectedEof;
-                const num = std.mem.readInt(u64, v.data[0..8], .little);
-                try writePaddedInt(w, u64, num, pad_width);
-                return;
-            },
-            else => {},
-        }
-    }
-    try writeValueXml(w, v.t, v.data);
-}
-
-fn renderElementXml(chunk: []const u8, r: *Reader, w: anytype, values: []const TemplateValue, src: Source) anyerror!void {
-    {
-        var stderr = std.io.getStdErr().writer();
-        const show = @min(r.rem(), 12);
-        _ = try stderr.print("[binxml] elem start peek src={s} bytes:", .{if (src == .rec) "rec" else "def"});
-        var i: usize = 0;
-        while (i < show) : (i += 1) {
-            _ = try stderr.print(" {x:0>2}", .{r.buf[r.pos + i]});
-        }
-        _ = try stderr.print("\n", .{});
-    }
-    const element_start_pos = r.pos;
-    const start_tok = try r.readU8();
-    {
-        var stderr = std.io.getStdErr().writer();
-        _ = try stderr.print("[binxml] elem start_tok=0x{x} src={s}\n", .{ start_tok, if (src == .rec) "rec" else "def" });
-    }
-    if (!isToken(start_tok, TOK_OPEN_START)) return BinXmlError.BadToken;
-    // dependency id
-    if (r.rem() < 2) return BinXmlError.UnexpectedEof;
-    const dep_id = try r.readU16le();
-    {
-        var stderr = std.io.getStdErr().writer();
-        _ = try stderr.print("[binxml] dep_id=0x{x}\n", .{dep_id});
-    }
-    const data_size = try r.readU32le();
-    const element_end_pos = element_start_pos + 7 + @as(usize, data_size);
-    var name_off: u32 = 0;
-    var def_name: []const u8 = &[_]u8{};
-    var def_name_chars: usize = 0;
-    var use_name_offset: bool = (src == .rec);
-    switch (src) {
-        .rec => {
-            name_off = try r.readU32le();
-            use_name_offset = true;
-        },
-        .def => {
-            {
-                var stderr = std.io.getStdErr().writer();
-                const show = @min(r.rem(), 24);
-                _ = try stderr.print("[binxml] def name bytes:", .{});
-                var i: usize = 0;
-                while (i < show) : (i += 1) {
-                    _ = try stderr.print(" {x:0>2}", .{r.buf[r.pos + i]});
-                }
-                _ = try stderr.print("\n", .{});
-            }
-            const nm = try readInlineNameDefFlexible(r);
-            def_name = nm.utf16;
-            def_name_chars = nm.num_chars;
-            use_name_offset = false;
-        },
-    }
-    // New element scope
-    r.pushFrame();
-    try w.writeByte('<');
-    if (use_name_offset) try writeNameFromOffset(chunk, name_off, w) else try writeNameFromUtf16(w, def_name, def_name_chars);
-    const has_attrs = hasMore(start_tok, TOK_OPEN_START);
-    var pad: usize = 0;
-    if (has_attrs) {
-        try writeAttributeListXml(chunk, r, w, src, values);
-        if (r.pos > element_end_pos) r.pos = element_end_pos;
-        // Some definitions include padding (up to 4 zero bytes) after attribute list
-        while (pad < 4 and r.rem() > 0 and r.buf[r.pos] == 0) : (pad += 1) {
-            r.pos += 1;
-        }
-    }
-    if (r.pos >= element_end_pos) return BinXmlError.UnexpectedEof;
-    const nxt = try r.readU8();
-    {
-        var stderr = std.io.getStdErr().writer();
-        _ = try stderr.print("[binxml] after attrs nxt=0x{x} pad={d}\n", .{ nxt, pad });
-    }
-    if (isToken(nxt, TOK_CLOSE_EMPTY)) {
-        // Determine if evtx_dump would emit a self-closing or expanded form.
-        // Based on observed output: Provider and TimeCreated are expanded, others may be self-closing.
-        const expand = if (use_name_offset)
-            isNameSystemTimeFromOffset(chunk, name_off)
-        else
-            utf16EqualsAscii(def_name, def_name_chars, "Provider") or utf16EqualsAscii(def_name, def_name_chars, "TimeCreated");
-        if (expand) {
-            try w.writeByte('>');
-            // streaming queued nested payloads no longer used
-            try w.writeAll("</");
-            if (use_name_offset) try writeNameFromOffset(chunk, name_off, w) else try writeNameFromUtf16(w, def_name, def_name_chars);
-            try w.writeByte('>');
-            if (r.depth > 0) r.depth -= 1;
-        } else {
-            try w.writeAll("/>");
-        }
-        return;
-    }
-    if (!isToken(nxt, TOK_CLOSE_START)) return BinXmlError.BadToken;
-    try w.writeByte('>');
-
-    // content
-    var content_pad2: bool = false;
-    while (true) {
-        const t = try r.peekU8();
-        {
-            var stderr = std.io.getStdErr().writer();
-            _ = try stderr.print("[binxml] content tok=0x{x} rem={d}\n", .{ t, r.rem() });
-        }
-        if (isToken(t, TOK_END_ELEMENT)) {
-            _ = try r.readU8();
-            // streaming queued nested payloads no longer used; IR path appends children
-            try w.writeAll("</");
-            if (use_name_offset) try writeNameFromOffset(chunk, name_off, w) else try writeNameFromUtf16(w, def_name, def_name_chars);
-            try w.writeByte('>');
-            // Pop scope after closing tag
-            if (r.depth > 0) r.depth -= 1;
-            return;
-        } else if (isToken(t, TOK_OPEN_START)) {
-            // legacy streaming recursion removed; this path should not be taken
-            return BinXmlError.BadToken;
-        } else if (isToken(t, TOK_VALUE)) {
-            // Concatenate value tokens sequence
-            while (true) {
-                _ = try r.readU8();
-                const vtype = try r.readU8();
-                {
-                    var stderr = std.io.getStdErr().writer();
-                    _ = try stderr.print("[binxml] value vtype=0x{x}\n", .{vtype});
-                }
-                if ((vtype & 0x7f) == 0x21) {
-                    // Nested EvtXml payload embedded directly in content
-                    const payload = try r.readLenPrefixedBytes16();
-                    r.queueEvtXml(payload);
-                } else if (vtype == 0x01) {
-                    var text = try readUnicodeTextString(r);
-                    // Handle '+' formatting sentinel like in attributes: a standalone '+' (UTF-16LE) requests zero-padding for the next number
-                    if (text.len >= 2 and text[0] == 0x2B and text[1] == 0x00) {
-                        if (text.len == 2) {
-                            content_pad2 = true;
-                            // Do not emit this sentinel
-                            // fallthrough to next token
-                        } else {
-                            // Strip leading '+' and emit the rest
-                            text = text[2..];
-                            try writeUtf16LeXmlEscaped(w, text, text.len / 2);
-                        }
-                    } else {
-                        try writeUtf16LeXmlEscaped(w, text, text.len / 2);
-                    }
-                } else if (valueTypeFixedSize(vtype)) |sz| {
-                    const payload = try readFixedBytes(r, sz);
-                    if (content_pad2 and (vtype == 0x07 or vtype == 0x08 or vtype == 0x09 or vtype == 0x0a)) {
-                        switch (vtype) {
-                            0x07 => {
-                                const num = std.mem.readInt(i32, payload[0..4], .little);
-                                try writePaddedInt(w, i32, num, 2);
-                            },
-                            0x08 => {
-                                const num = std.mem.readInt(u32, payload[0..4], .little);
-                                try writePaddedInt(w, u32, num, 2);
-                            },
-                            0x09 => {
-                                const num = std.mem.readInt(i64, payload[0..8], .little);
-                                try writePaddedInt(w, i64, num, 2);
-                            },
-                            0x0a => {
-                                const num = std.mem.readInt(u64, payload[0..8], .little);
-                                try writePaddedInt(w, u64, num, 2);
-                            },
-                            else => unreachable,
-                        }
-                        content_pad2 = false;
-                    } else {
-                        try writeValueXml(w, vtype, payload);
-                    }
-                } else if (vtype == 0x0e) {
-                    const payload = try r.readLenPrefixedBytes16();
-                    try writeValueXml(w, vtype, payload);
-                } else if (vtype == 0x13) {
-                    const payload = try r.readSidBytes();
-                    try writeValueXml(w, vtype, payload);
-                } else {
-                    return BinXmlError.BadToken;
-                }
-                if (r.rem() == 0) break;
-                const pk = try r.peekU8();
-                if (!isToken(pk, TOK_VALUE)) break;
-            }
-            if (r.depth > 0) r.frames[r.depth - 1].had_text_content = true;
-        } else if (isToken(t, TOK_CDATA)) {
-            _ = try r.readU8();
-            const data = try readUnicodeTextString(r);
-            try w.writeAll("<![CDATA[");
-            // Emit raw UTF-8; CDATA must not be escaped; here we best-effort convert to UTF-8
-            try writeUtf16LeXmlEscaped(w, data, data.len / 2);
-            try w.writeAll("]]>");
-            if (r.depth > 0) r.frames[r.depth - 1].had_text_content = true;
-        } else if (isToken(t, TOK_CHARREF)) {
-            _ = try r.readU8();
-            // 16-bit value
-            const v = try r.readU16le();
-            try w.print("&#{d};", .{v});
-            if (r.depth > 0) r.frames[r.depth - 1].had_text_content = true;
-        } else if (isToken(t, TOK_ENTITYREF)) {
-            _ = try r.readU8();
-            // Name offset variant for entity. Read name-offset like a Name and output &name;
-            const ent_name_off = try r.readU32le();
-            try w.writeByte('&');
-            try writeNameFromOffset(chunk, ent_name_off, w);
-            try w.writeByte(';');
-            if (r.depth > 0) r.frames[r.depth - 1].had_text_content = true;
-        } else if (isToken(t, TOK_NORMAL_SUBST)) {
-            _ = try r.readU8();
-            const padw: usize = if (content_pad2) 2 else 0;
-            try renderSubstitutionXml(chunk, w, false, r, values, padw);
-            content_pad2 = false;
-            if (r.depth > 0) r.frames[r.depth - 1].had_text_content = true;
-        } else if (isToken(t, TOK_OPTIONAL_SUBST)) {
-            _ = try r.readU8();
-            const padw: usize = if (content_pad2) 2 else 0;
-            try renderSubstitutionXml(chunk, w, true, r, values, padw);
-            content_pad2 = false;
-            if (r.depth > 0) r.frames[r.depth - 1].had_text_content = true;
-        } else if (t == TOK_EOF) {
-            return BinXmlError.UnexpectedEof;
-        } else {
-            return BinXmlError.BadToken;
-        }
-    }
-}
+// (removed) legacy streaming element renderer `renderElementXml`
 
 fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w: anytype) anyerror!void {
+    // Honor per-record verbosity by bumping module level to trace for this call
+    if (ctx.verbose) logger.setModuleLevel("binxml", .trace);
     var r = Reader.init(bin);
 
     // Optional fragment header
@@ -875,10 +508,7 @@ fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w: an
     }
 
     const first = try r.peekU8();
-    if (ctx.verbose) {
-        var stderr = std.io.getStdErr().writer();
-        _ = try stderr.print("[binxml] first=0x{x} len={d}\n", .{ first, bin.len });
-    }
+    log.debug("first=0x{x} len={d}", .{ first, bin.len });
     if (first == TOK_TEMPLATE_INSTANCE) {
         _ = try r.readU8(); // consume
         // Template definition (header within the record, data in chunk at def_data_off)
@@ -889,24 +519,41 @@ fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w: an
         _ = try r.readU32le(); // next def off (unused)
         // GUID
         const guid = try r.readGuid();
-        const def_size = try r.readU32le();
-        if (ctx.verbose) {
-            var stderr = std.io.getStdErr().writer();
-            _ = try stderr.print("[binxml] tmpl def_off=0x{x} def_size={d}\n", .{ def_data_off, def_size });
+        var def_size: u32 = 0;
+        if (r.rem() >= 5) {
+            const size_peek = std.mem.readInt(u32, r.buf[r.pos .. r.pos + 4][0..4], .little);
+            const tok_after = r.buf[r.pos + 4];
+            if (tok_after == TOK_FRAGMENT_HEADER or isToken(tok_after, TOK_OPEN_START)) {
+                def_size = size_peek;
+                _ = try r.readU32le();
+            } else {
+                def_size = 0;
+            }
         }
+        log.debug("tmpl def_off=0x{x} def_size={d}", .{ def_data_off, def_size });
 
-        // Use alternative TemplateDefinition header layout: [4 bytes unknown][16 bytes GUID][4 bytes data_size][data...]
+        // According to the spec, def_data_off points directly to the template definition DATA
+        // (FragmentHeader + Element + EOF) within the chunk, without a header prefix.
+        // Parse from that offset and let element-encoded sizes bound the reader.
         const def_off_usize: usize = @intCast(def_data_off);
-        if (def_off_usize + 24 > chunk.len) return BinXmlError.OutOfBounds;
-        const td_data_size = std.mem.readInt(u32, chunk[def_off_usize + 20 .. def_off_usize + 24][0..4], .little);
-        const data_start = def_off_usize + 24;
-        const data_end = data_start + @as(usize, td_data_size);
-        if (data_end > chunk.len or data_start >= chunk.len) return BinXmlError.OutOfBounds;
-        if (ctx.verbose) {
-            var stderr = std.io.getStdErr().writer();
-            _ = try stderr.print("[binxml] using chunk def data at 0x{x}..0x{x}\n", .{ data_start, data_end });
+        if (def_off_usize >= chunk.len) return BinXmlError.OutOfBounds;
+        log.trace("using chunk def data at 0x{x}..0x{x}", .{ def_off_usize, chunk.len });
+        var def_r = Reader.init(chunk[def_off_usize..]);
+        if (ctx.verbose and def_r.rem() > 0) {
+            const n: usize = if (def_r.rem() >= 32) 32 else def_r.rem();
+            var i: usize = 0;
+            while (i < n) : (i += 8) {
+                const a0: u8 = def_r.buf[i + 0];
+                const a1: u8 = if (i + 1 < n) def_r.buf[i + 1] else 0;
+                const a2: u8 = if (i + 2 < n) def_r.buf[i + 2] else 0;
+                const a3: u8 = if (i + 3 < n) def_r.buf[i + 3] else 0;
+                const a4: u8 = if (i + 4 < n) def_r.buf[i + 4] else 0;
+                const a5: u8 = if (i + 5 < n) def_r.buf[i + 5] else 0;
+                const a6: u8 = if (i + 6 < n) def_r.buf[i + 6] else 0;
+                const a7: u8 = if (i + 7 < n) def_r.buf[i + 7] else 0;
+                log.trace("def@chunk+{d:0>2}: {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{ i, a0, a1, a2, a3, a4, a5, a6, a7 });
+            }
         }
-        var def_r = Reader.init(chunk[data_start..data_end]);
         // Optional fragment header inside definition
         if (def_r.rem() >= 4 and def_r.buf[def_r.pos] == TOK_FRAGMENT_HEADER) {
             _ = try def_r.readU8();
@@ -915,14 +562,14 @@ fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w: an
             _ = try def_r.readU8();
         }
 
-        // Skip inline copy of template definition data in the record if present
-        if (r.rem() >= def_size and (r.buf[r.pos] == TOK_FRAGMENT_HEADER or r.buf[r.pos] == TOK_OPEN_START)) {
+        // Skip inline copy of template definition data in the record if present.
+        // The embedded definition immediately follows and is def_size bytes long.
+        if (def_size != 0 and r.rem() >= def_size and (r.buf[r.pos] == TOK_FRAGMENT_HEADER or isToken(r.buf[r.pos], TOK_OPEN_START))) {
             const start = r.pos;
             const end = start + @as(usize, def_size);
-            r.pos = end;
-            if (ctx.verbose) {
-                var stderr = std.io.getStdErr().writer();
-                _ = try stderr.print("[binxml] skipped inline def at rec+0x{x}..0x{x}\n", .{ start, end });
+            if (end <= r.buf.len) {
+                r.pos = end;
+                log.trace("skipped inline def at rec+0x{x}..0x{x}", .{ start, end });
             }
         }
 
@@ -930,6 +577,13 @@ fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w: an
         var gpa = std.heap.GeneralPurposeAllocator(.{}){};
         defer _ = gpa.deinit();
         const alloc = gpa.allocator();
+        log.trace("values start at rec+0x{x}; rem={d}", .{ r.pos, r.rem() });
+        if (ctx.verbose and r.rem() >= 8) {
+            log.trace("values first8: {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{
+                r.buf[r.pos + 0], r.buf[r.pos + 1], r.buf[r.pos + 2], r.buf[r.pos + 3],
+                r.buf[r.pos + 4], r.buf[r.pos + 5], r.buf[r.pos + 6], r.buf[r.pos + 7],
+            });
+        }
         const values = try parseTemplateInstanceValues(&r, alloc);
         // Copy value descriptors into context arena to ensure stable lifetime in Release builds
         const vals_copy = try ctx.arena.allocator().alloc(TemplateValue, values.len);
@@ -944,6 +598,7 @@ fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w: an
         }
         const cloned = try cloneElementTree(got.value_ptr.*, ctx.arena.allocator());
         cloned.local_values = vals_copy;
+        if (!nameEqualsAscii(chunk, cloned.name, "Event")) return BinXmlError.BadToken;
         try renderElementIRXml(chunk, cloned, vals_copy, w, 0);
         return;
     } else {
@@ -952,6 +607,8 @@ fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w: an
         defer _ = gpa.deinit();
         const alloc = gpa.allocator();
         const root = try parseElementIR(chunk, &r, alloc, .rec);
+        // Sanity: top-level element must be Event
+        if (!nameEqualsAscii(chunk, root.name, "Event")) return BinXmlError.BadToken;
         try renderElementIRXml(chunk, root, &[_]TemplateValue{}, w, 0);
         return;
     }
@@ -1062,7 +719,7 @@ const IR = struct {
         InlineUtf16: struct { bytes: []const u8, num_chars: usize },
     };
 
-    const NodeTag = enum { Element, Text, Value, Subst, CharRef, EntityRef, CData, Pad };
+    const NodeTag = enum { Element, Text, Value, Subst, CharRef, EntityRef, CData, Pad, PITarget, PIData };
 
     const Node = struct {
         tag: NodeTag,
@@ -1075,8 +732,10 @@ const IR = struct {
         subst_vtype: u8 = 0,
         subst_optional: bool = false,
         charref_value: u16 = 0,
-        entity_name_off: u32 = 0,
+        entity_name: Name = Name{ .NameOffset = 0 },
         pad_width: usize = 0,
+        // PI
+        pi_target: Name = Name{ .NameOffset = 0 },
     };
 
     const Attr = struct {
@@ -1100,6 +759,21 @@ const IR = struct {
     };
 };
 
+fn nameEqualsAscii(chunk: []const u8, name: IR.Name, ascii: []const u8) bool {
+    switch (name) {
+        .NameOffset => |off| {
+            const o: usize = @intCast(off);
+            if (o + 8 > chunk.len) return false;
+            const num_chars = std.mem.readInt(u16, chunk[o + 6 .. o + 8][0..2], .little);
+            const str_start = o + 8;
+            const byte_len = @as(usize, num_chars) * 2;
+            if (str_start + byte_len > chunk.len) return false;
+            return utf16EqualsAscii(chunk[str_start .. str_start + byte_len], num_chars, ascii);
+        },
+        .InlineUtf16 => |inl| return utf16EqualsAscii(inl.bytes, inl.num_chars, ascii),
+    }
+}
+
 fn irNewElement(allocator: std.mem.Allocator, name: IR.Name) !*IR.Element {
     const el = try allocator.create(IR.Element);
     el.* = .{ .name = name, .attrs = std.ArrayList(IR.Attr).init(allocator), .children = std.ArrayList(IR.Node).init(allocator), .local_values = &[_]TemplateValue{} };
@@ -1120,7 +794,6 @@ fn parseInlineNameFlexibleIR(r: *Reader) !IR.Name {
 }
 
 fn parseAttributeListIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source) !std.ArrayList(IR.Attr) {
-    _ = chunk;
     const list_size = try r.readU32le();
     const list_start = r.pos;
     const list_end = list_start + list_size;
@@ -1139,14 +812,14 @@ fn parseAttributeListIR(chunk: []const u8, r: *Reader, allocator: std.mem.Alloca
         }
         // Collect attribute value tokens into IR
         var tokens = std.ArrayList(IR.Node).init(allocator);
-        try collectValueTokensIR(r, &tokens);
+        try collectValueTokensIRWithCtx(chunk, r, &tokens, src);
         try out.append(.{ .name = name, .value = tokens });
     }
     if (r.pos != list_end) r.pos = list_end;
     return out;
 }
 
-fn collectValueTokensIR(r: *Reader, out: *std.ArrayList(IR.Node)) !void {
+fn collectValueTokensIRWithCtx(_: []const u8, r: *Reader, out: *std.ArrayList(IR.Node), src: Source) !void {
     var want_pad2: bool = false;
     while (true) {
         if (r.rem() == 0) break;
@@ -1169,6 +842,10 @@ fn collectValueTokensIR(r: *Reader, out: *std.ArrayList(IR.Node)) !void {
                     continue;
                 }
                 try out.append(.{ .tag = .Text, .text_utf16 = text, .text_num_chars = text.len / 2 });
+            } else if (vtype == 0x02) {
+                // AnsiString value text in value token: treat as bytes until EOS? Here the BinXML value type 0x02 appears only in substitution/data
+                // For consistency, read as len-prefixed bytes16 as with 0x0e? Spec indicates 0x02 in substitutions, not value text; skip here
+                return BinXmlError.BadToken;
             } else if (valueTypeFixedSize(vtype)) |sz| {
                 const payload = try readFixedBytes(r, sz);
                 try out.append(.{ .tag = .Value, .vtype = vtype, .vbytes = payload, .pad_width = if (want_pad2) 2 else 0 });
@@ -1197,13 +874,36 @@ fn collectValueTokensIR(r: *Reader, out: *std.ArrayList(IR.Node)) !void {
             continue;
         } else if (isToken(pk, TOK_ENTITYREF)) {
             _ = try r.readU8();
-            const ent_name_off = try r.readU32le();
-            try out.append(.{ .tag = .EntityRef, .entity_name_off = ent_name_off });
+            var nm: IR.Name = undefined;
+            switch (src) {
+                .rec => {
+                    const ent_name_off = try r.readU32le();
+                    nm = IR.Name{ .NameOffset = ent_name_off };
+                },
+                .def => {
+                    nm = try parseInlineNameFlexibleIR(r);
+                },
+            }
+            try out.append(.{ .tag = .EntityRef, .entity_name = nm });
             continue;
         } else if (isToken(pk, TOK_CDATA)) {
             _ = try r.readU8();
             const data = try readUnicodeTextString(r);
             try out.append(.{ .tag = .CData, .text_utf16 = data, .text_num_chars = data.len / 2 });
+            continue;
+        } else if (isToken(pk, TOK_PITARGET)) {
+            _ = try r.readU8();
+            var nm: IR.Name = undefined;
+            switch (src) {
+                .rec => nm = IR.Name{ .NameOffset = try r.readU32le() },
+                .def => nm = try parseInlineNameFlexibleIR(r),
+            }
+            try out.append(.{ .tag = .PITarget, .pi_target = nm });
+            continue;
+        } else if (isToken(pk, TOK_PIDATA)) {
+            _ = try r.readU8();
+            const data = try readUnicodeTextString(r);
+            try out.append(.{ .tag = .PIData, .text_utf16 = data, .text_num_chars = data.len / 2 });
             continue;
         } else break;
     }
@@ -1231,15 +931,48 @@ fn parseElementIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, s
     const element_start = r.pos;
     const start = try r.readU8();
     if (!isToken(start, TOK_OPEN_START)) return BinXmlError.BadToken;
-    _ = try r.readU16le(); // dep_id
-    const data_size = try r.readU32le();
-    const header_len: usize = 1 + 2 + 4;
+    var data_size: u32 = 0;
+    var header_len: usize = 0;
+    var name: IR.Name = undefined;
+    switch (src) {
+        .rec => {
+            _ = try r.readU16le(); // dep_id required
+            data_size = try r.readU32le();
+            header_len = 1 + 2 + 4;
+            name = IR.Name{ .NameOffset = try r.readU32le() };
+        },
+        .def => {
+            const save0 = r.pos;
+            var parsed_with_dep = false;
+            if (r.rem() >= 2 + 4) {
+                const save1 = r.pos;
+                if (r.readU16le()) |_| {
+                    if (r.readU32le()) |dsz| {
+                        if (parseInlineNameFlexibleIR(r)) |nm| {
+                            data_size = dsz;
+                            header_len = 1 + 2 + 4;
+                            name = nm;
+                            parsed_with_dep = true;
+                        } else |_| {
+                            r.pos = save1;
+                        }
+                    } else |_| {
+                        r.pos = save1;
+                    }
+                } else |_| {
+                    r.pos = save1;
+                }
+            }
+            if (!parsed_with_dep) {
+                r.pos = save0;
+                data_size = try r.readU32le();
+                header_len = 1 + 4;
+                name = try parseInlineNameFlexibleIR(r);
+            }
+        },
+    }
     var element_end = element_start + header_len + @as(usize, data_size);
     if (element_end > r.buf.len) element_end = r.buf.len;
-    const name: IR.Name = switch (src) {
-        .rec => IR.Name{ .NameOffset = try r.readU32le() },
-        .def => try parseInlineNameFlexibleIR(r),
-    };
     const el = try irNewElement(allocator, name);
     if (hasMore(start, TOK_OPEN_START)) {
         el.attrs = try parseAttributeListIR(chunk, r, allocator, src);
@@ -1266,12 +999,13 @@ fn parseElementIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, s
             _ = try r.readU8();
             break;
         } else if (isToken(t, TOK_OPEN_START)) {
+            // Optional dependency id handling for nested 0x21 payload elements (spec: dep-id may be omitted)
             const child = try parseElementIR(chunk, r, allocator, src);
             try el.children.append(.{ .tag = .Element, .elem = child });
             el.has_element_child = true;
-        } else if (isToken(t, TOK_VALUE) or isToken(t, TOK_NORMAL_SUBST) or isToken(t, TOK_OPTIONAL_SUBST) or isToken(t, TOK_CDATA) or isToken(t, TOK_CHARREF) or isToken(t, TOK_ENTITYREF)) {
+        } else if (isToken(t, TOK_VALUE) or isToken(t, TOK_NORMAL_SUBST) or isToken(t, TOK_OPTIONAL_SUBST) or isToken(t, TOK_CDATA) or isToken(t, TOK_CHARREF) or isToken(t, TOK_ENTITYREF) or isToken(t, TOK_PITARGET) or isToken(t, TOK_PIDATA)) {
             var seq = std.ArrayList(IR.Node).init(allocator);
-            try collectValueTokensIR(r, &seq);
+            try collectValueTokensIRWithCtx(chunk, r, &seq, src);
             // append tokens into children list as individual nodes
             for (seq.items) |nd| try el.children.append(nd);
             // update hints from these tokens
@@ -1323,16 +1057,81 @@ fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, values: []co
             const vv = values[nd.subst_id];
             if (nd.subst_optional and (vv.t == 0x00 or vv.data.len == 0)) continue;
             if ((vv.t & 0x7f) == 0x21) {
-                // Nested EvtXml: parse and render inline into attribute buffer by flattening text
-                // For now, ignore nested EvtXml inside attributes for parity; rarely used
+                // Nested EvtXml in attribute: flatten textual content
+                var tmp: [1024]u8 = undefined;
+                var tbs = std.io.fixedBufferStream(&tmp);
+                try renderEvtXmlPayloadAsChildren(chunk, vv.data, std.heap.page_allocator, values, tbs.writer(), 0);
+                try aw.writeAll(tbs.getWritten());
                 continue;
             }
             // Array handling driven by declared substitution vtype
             if ((nd.subst_vtype & 0x80) != 0) {
                 const base = nd.subst_vtype & 0x7f;
-                if (base == 0x01) {
-                    try writeUnicodeStringArrayCommaSeparated(aw, vv.data);
-                    continue;
+                var first = true;
+                switch (base) {
+                    0x01 => {
+                        var i: usize = 0;
+                        while (i <= vv.data.len) {
+                            const start = i;
+                            var end = i;
+                            while (end + 1 < vv.data.len) : (end += 2) {
+                                const u = std.mem.readInt(u16, vv.data[end .. end + 2][0..2], .little);
+                                if (u == 0) break;
+                            }
+                            if (!first) try aw.writeByte(' ') else first = false;
+                            if (end > start) try writeUtf16LeXmlEscaped(aw, vv.data[start..end], (end - start) / 2);
+                            if (end + 1 < vv.data.len) i = end + 2 else break;
+                        }
+                        continue;
+                    },
+                    0x02 => {
+                        // ANSI string array (NUL-terminated per item)
+                        var i: usize = 0;
+                        while (i <= vv.data.len) {
+                            const start = i;
+                            var end = i;
+                            while (end < vv.data.len and vv.data[end] != 0) : (end += 1) {}
+                            if (!first) try aw.writeByte(' ') else first = false;
+                            if (end > start) try writeAnsiCp1252Escaped(aw, vv.data[start..end]);
+                            if (end < vv.data.len and vv.data[end] == 0) i = end + 1 else break;
+                        }
+                        continue;
+                    },
+                    0x13 => {
+                        // SID array – items are variable-sized (8 + subcount*4)
+                        var i: usize = 0;
+                        while (i + 8 <= vv.data.len) {
+                            const subc: usize = vv.data[i + 1];
+                            const need: usize = 8 + subc * 4;
+                            if (i + need > vv.data.len) break;
+                            if (!first) try aw.writeByte(' ') else first = false;
+                            try writeValueXml(aw, 0x13, vv.data[i .. i + need]);
+                            i += need;
+                        }
+                        continue;
+                    },
+                    0x10 => {
+                        // size_t array – enforce backing 0x94/0x95 per spec
+                        var elem_sz: usize = 0;
+                        if (vv.t == 0x94) elem_sz = 4 else if (vv.t == 0x95) elem_sz = 8 else return BinXmlError.BadToken;
+                        var i: usize = 0;
+                        while (i + elem_sz <= vv.data.len) : (i += elem_sz) {
+                            if (!first) try aw.writeByte(' ') else first = false;
+                            try writeValueXml(aw, 0x10, vv.data[i .. i + elem_sz]);
+                        }
+                        continue;
+                    },
+                    else => {
+                        const elem_sz = valueTypeFixedSize(base) orelse 0;
+                        if (elem_sz > 0 and vv.data.len % elem_sz == 0) {
+                            var i: usize = 0;
+                            while (i + elem_sz <= vv.data.len) : (i += elem_sz) {
+                                if (!first) try aw.writeByte(' ') else first = false;
+                                try writeValueXml(aw, base, vv.data[i .. i + elem_sz]);
+                            }
+                            continue;
+                        }
+                    },
                 }
             }
             if (nd.pad_width > 0 and (vv.t == 0x07 or vv.t == 0x08 or vv.t == 0x09 or vv.t == 0x0a)) {
@@ -1350,10 +1149,19 @@ fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, values: []co
         .CharRef => try aw.print("&#{d};", .{nd.charref_value}),
         .EntityRef => {
             try aw.writeByte('&');
-            try writeNameFromOffset(chunk, nd.entity_name_off, aw);
+            try writeNameXml(chunk, nd.entity_name, aw);
             try aw.writeByte(';');
         },
         .CData => try writeUtf16LeXmlEscaped(aw, nd.text_utf16, nd.text_num_chars),
+        .PITarget => {
+            try aw.writeAll("<?");
+            try writeNameXml(chunk, nd.pi_target, aw);
+        },
+        .PIData => {
+            try aw.writeByte(' ');
+            try writeUtf16LeRawToUtf8(aw, nd.text_utf16, nd.text_num_chars);
+            try aw.writeAll("?>");
+        },
         .Element => {},
     };
     // Drop '+' sentinels if any made it through
@@ -1414,6 +1222,43 @@ fn renderTextContentFromIR(chunk: []const u8, nodes: []const IR.Node, values: []
                     if (base == 0x01) {
                         try writeUnicodeStringArrayCommaSeparated(w, vv.data);
                         continue;
+                    } else if (base == 0x02) {
+                        // ANSI string array: comma-separated
+                        var first = true;
+                        var idx2: usize = 0;
+                        while (idx2 <= vv.data.len) {
+                            const start = idx2;
+                            var end = idx2;
+                            while (end < vv.data.len and vv.data[end] != 0) : (end += 1) {}
+                            if (!first) try w.writeAll(",") else first = false;
+                            if (end > start) try writeAnsiCp1252Escaped(w, vv.data[start..end]);
+                            if (end < vv.data.len and vv.data[end] == 0) idx2 = end + 1 else break;
+                        }
+                        continue;
+                    } else if (base == 0x13) {
+                        // SID array: space-separated
+                        var first = true;
+                        var idx2: usize = 0;
+                        while (idx2 + 8 <= vv.data.len) {
+                            const subc: usize = vv.data[idx2 + 1];
+                            const need: usize = 8 + subc * 4;
+                            if (idx2 + need > vv.data.len) break;
+                            if (!first) try w.writeByte(' ') else first = false;
+                            try writeValueXml(w, 0x13, vv.data[idx2 .. idx2 + need]);
+                            idx2 += need;
+                        }
+                        continue;
+                    } else if (base == 0x10) {
+                        // size_t array: require 0x94/0x95 backing; space-separated
+                        var elem_sz: usize = 0;
+                        if (vv.t == 0x94) elem_sz = 4 else if (vv.t == 0x95) elem_sz = 8 else return BinXmlError.BadToken;
+                        var first = true;
+                        var idx2: usize = 0;
+                        while (idx2 + elem_sz <= vv.data.len) : (idx2 += elem_sz) {
+                            if (!first) try w.writeByte(' ') else first = false;
+                            try writeValueXml(w, 0x10, vv.data[idx2 .. idx2 + elem_sz]);
+                        }
+                        continue;
                     }
                 }
                 if (nd.pad_width > 0 and (vv.t == 0x07 or vv.t == 0x08 or vv.t == 0x09 or vv.t == 0x0a)) {
@@ -1431,10 +1276,23 @@ fn renderTextContentFromIR(chunk: []const u8, nodes: []const IR.Node, values: []
             .CharRef => try w.print("&#{d};", .{nd.charref_value}),
             .EntityRef => {
                 try w.writeByte('&');
-                try writeNameFromOffset(chunk, nd.entity_name_off, w);
+                try writeNameXml(chunk, nd.entity_name, w);
                 try w.writeByte(';');
             },
-            .CData => try writeUtf16LeXmlEscaped(w, nd.text_utf16, nd.text_num_chars),
+            .CData => {
+                try w.writeAll("<![CDATA[");
+                try writeUtf16LeRawToUtf8(w, nd.text_utf16, nd.text_num_chars);
+                try w.writeAll("]]>");
+            },
+            .PITarget => {
+                try w.writeAll("<?");
+                try writeNameXml(chunk, nd.pi_target, w);
+            },
+            .PIData => {
+                try w.writeByte(' ');
+                try writeUtf16LeRawToUtf8(w, nd.text_utf16, nd.text_num_chars);
+                try w.writeAll("?>");
+            },
             .Element => {},
         }
     }
@@ -1538,11 +1396,8 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
         try w.writeByte('"');
     }
     if (el.children.items.len == 0) {
-        // Expanded empty form
-        try w.writeByte('>');
-        try w.writeAll("</");
-        try writeNameXml(chunk, el.name, w);
-        try w.writeByte('>');
+        // Consistent self-closing for leaf nodes that should be empty in EVTX XML
+        try w.writeAll("/>");
         try w.writeByte('\n');
         return;
     }
@@ -1610,7 +1465,7 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
                 try renderTextContentFromIR(chunk, &[_]IR.Node{nd}, eff_values, w);
                 try w.writeByte('\n');
             },
-            .Text, .Pad, .CharRef, .EntityRef, .CData => {
+            .Text, .Pad, .CharRef, .EntityRef, .CData, .PITarget, .PIData => {
                 var k: usize = 0;
                 while (k < indent + 2) : (k += 1) try w.writeByte(' ');
                 try renderTextContentFromIR(chunk, &[_]IR.Node{nd}, eff_values, w);
