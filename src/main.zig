@@ -1,0 +1,63 @@
+const std = @import("std");
+const fs = std.fs;
+
+const evtx = @import("parser/evtx.zig");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    var args_iter = try std.process.argsWithAllocator(allocator);
+    defer args_iter.deinit();
+
+    // Program name
+    _ = args_iter.next();
+
+    var output_mode: OutputMode = .xml;
+    var input_path: ?[]const u8 = null;
+    var verbose: bool = false;
+    var max_records: usize = 0;
+
+    while (args_iter.next()) |arg| {
+        if (std.mem.eql(u8, arg, "-o")) {
+            const mode = args_iter.next() orelse return error.InvalidArgs;
+            if (std.mem.eql(u8, mode, "xml")) output_mode = .xml else if (std.mem.eql(u8, mode, "json")) output_mode = .json else if (std.mem.eql(u8, mode, "jsonl")) output_mode = .jsonl else return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "-v")) {
+            verbose = true;
+        } else if (std.mem.eql(u8, arg, "-n")) {
+            const n_str = args_iter.next() orelse return error.InvalidArgs;
+            max_records = try std.fmt.parseUnsigned(usize, n_str, 10);
+        } else if (arg.len > 0 and arg[0] == '-') {
+            return error.InvalidArgs;
+        } else {
+            input_path = arg;
+        }
+    }
+
+    const in_path = input_path orelse return usage();
+
+    var file = try fs.cwd().openFile(in_path, .{ .mode = .read_only });
+    defer file.close();
+
+    const reader = file.reader();
+    var buffered = std.io.bufferedReader(reader);
+    var br = buffered.reader();
+
+    var parser = try evtx.EvtxParser.init(allocator, .{ .validate_checksums = true, .verbose = verbose, .max_records = max_records });
+    defer parser.deinit();
+
+    try parser.parse(&br, switch (output_mode) {
+        .xml => evtx.Output.xml(std.io.getStdOut().writer()),
+        .json => evtx.Output.json(std.io.getStdOut().writer(), .single),
+        .jsonl => evtx.Output.json(std.io.getStdOut().writer(), .lines),
+    });
+}
+
+fn usage() noreturn {
+    const w = std.io.getStdErr().writer();
+    w.print("Usage: evtx_dump_zig [-o xml|json|jsonl] <file.evtx>\n", .{}) catch {};
+    std.process.exit(2);
+}
+
+const OutputMode = enum { xml, json, jsonl };
