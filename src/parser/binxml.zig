@@ -214,7 +214,7 @@ fn readInlineName(r: *Reader) !struct { utf16: []const u8, num_chars: usize } {
 }
 
 fn readInlineNameDefFlexible(r: *Reader) !struct { utf16: []const u8, num_chars: usize } {
-    // Prefer the most explicit variant first (with two u32 leading fields), then try simpler ones.
+    // Deterministic variants accepted by Windows manifests. Try explicit, then simpler ones.
     // Variant C: u32 unknown + u32 zero/unknown + u16 hash + u16 num + UTF16 (+ optional EOS)
     if (r.rem() >= 12) {
         const saveC = r.pos;
@@ -259,20 +259,7 @@ fn readInlineNameDefFlexible(r: *Reader) !struct { utf16: []const u8, num_chars:
         }
         r.pos = saveB;
     }
-    // Fallback to partial variant with u32 unknown + u16 hash + u16 num + UTF16
-    if (r.rem() >= 8) {
-        const saveF = r.pos;
-        _ = try r.readU32le(); // unknown
-        _ = try r.readU16le(); // hash
-        const numF = try r.readU16le();
-        const bytesF = @as(usize, numF) * 2;
-        if (numF > 0 and r.rem() >= bytesF and r.pos + bytesF <= r.buf.len) {
-            const sliceF = r.buf[r.pos .. r.pos + bytesF];
-            r.pos += bytesF;
-            return .{ .utf16 = sliceF, .num_chars = numF };
-        }
-        r.pos = saveF;
-    }
+    // No additional fallback variants per important.mdc
     return BinXmlError.UnexpectedEof;
 }
 
@@ -285,16 +272,20 @@ const TemplateValue = struct {
 };
 
 fn parseTemplateInstanceValues(r: *Reader, allocator: std.mem.Allocator) ![]TemplateValue {
-    // Robust descriptor parsing:
-    // Primary path: u32 count, then count descriptors (u16 size, u8 type, u8 reserved=0), then payloads
-    // Fallback: if the declared count is implausible for remaining bytes, rewind and infer count by scanning descriptors
+    // Strict descriptor parsing per spec:
+    // u32 count, then count descriptors (u16 size, u8 type, u8 reserved), then payloads
     const start_pos = r.pos;
     if (r.rem() < 4) return BinXmlError.UnexpectedEof;
     const declared = try r.readU32le();
     if (log.enabled(.trace)) log.trace("tmpl values: declared={d} rem={d}", .{ declared, r.rem() });
     const bytes_after_count = r.rem();
-    const plausible = (declared <= 1024) and (bytes_after_count >= declared * 4);
-    if (plausible) {
+    if (declared == 0) return allocator.alloc(TemplateValue, 0);
+    // Ensure there are enough bytes for descriptor table: 4 bytes per value
+    if (declared > bytes_after_count / 4) {
+        r.pos = start_pos;
+        return BinXmlError.UnexpectedEof;
+    }
+    {
         if (log.enabled(.trace) and r.rem() >= 16) {
             log.trace("desc first16: {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{
                 r.buf[r.pos + 0],  r.buf[r.pos + 1],  r.buf[r.pos + 2],  r.buf[r.pos + 3],
@@ -326,9 +317,7 @@ fn parseTemplateInstanceValues(r: *Reader, allocator: std.mem.Allocator) ![]Temp
         allocator.free(types);
         return values;
     }
-    // Per important.mdc, avoid heuristics: treat implausible header as error
-    r.pos = start_pos;
-    return BinXmlError.UnexpectedEof;
+    unreachable;
 }
 
 fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
