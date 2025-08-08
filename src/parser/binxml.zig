@@ -353,36 +353,15 @@ fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
             const v = std.mem.readInt(u16, data[0..2], .little);
             try w.print("{d}", .{v});
         },
-        0x01 => { // StringType -> expect Unicode text string layout (num_chars + UTF-16LE)
-            if (data.len < 2) {
-                // Treat as empty
-                return;
-            }
+        0x01 => { // StringType -> Unicode (num_chars u16 followed by UTF-16LE data)
+            if (data.len < 2) return BinXmlError.UnexpectedEof;
             const num_chars = std.mem.readInt(u16, data[0..2], .little);
             const byte_len = @as(usize, num_chars) * 2;
-            if (2 + byte_len > data.len) {
-                const avail = if (data.len > 2) data.len - 2 else 0;
-                const safe_chars: usize = @min(@divFloor(avail, 2), num_chars);
-                if (safe_chars == 0) return;
-                try writeUtf16LeXmlEscaped(w, data[2 .. 2 + safe_chars * 2], safe_chars);
-            } else {
-                try writeUtf16LeXmlEscaped(w, data[2 .. 2 + byte_len], num_chars);
-            }
+            if (2 + byte_len > data.len) return BinXmlError.UnexpectedEof;
+            try writeUtf16LeXmlEscaped(w, data[2 .. 2 + byte_len], num_chars);
         },
-        0x02 => { // AnsiStringType (codepage) - decode CP-1252 best-effort
-            // data here may be len-prefixed if originating from value text; if it comes from substitution, it's raw bytes
-            // Heuristic: if first two bytes interpreted as little-endian length fits buffer exactly (len + 2 == data.len), strip the prefix
-            if (data.len >= 2) {
-                const n = std.mem.readInt(u16, data[0..2], .little);
-                const need = 2 + @as(usize, n);
-                if (need <= data.len) {
-                    try writeAnsiCp1252Escaped(w, data[2..need]);
-                } else {
-                    try writeAnsiCp1252Escaped(w, data);
-                }
-            } else {
-                try writeAnsiCp1252Escaped(w, data);
-            }
+        0x02 => { // AnsiStringType (codepage) - payload is exactly the descriptor-sized byte slice
+            try writeAnsiCp1252Escaped(w, data);
         },
         0x0b => { // Real32Type
             if (data.len < 4) return;
