@@ -75,6 +75,8 @@ pub const EvtxParser = struct {
             }
             if (self.opts.validate_checksums) try chunk.validateChecksums();
             ctx.resetPerChunk();
+            // propagate verbosity into binxml module for this chunk
+            ctx.verbose = self.opts.verbose;
             var rec_iter = chunk.records();
             while (try rec_iter.next()) |rec| {
                 if (self.opts.verbose) {

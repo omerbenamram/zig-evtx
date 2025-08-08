@@ -6,3 +6,18 @@ alwaysApply: true
 - You must use the @Makefile to run build commands.
 - DO dynamically control logging verbosity per module.
 - DO store useful comparison commands in the Makefile.
+
+
+# Heuristics
+
+- If you think a heuristic is useful, then you are definetly wrong and this means we are taking a wrong approach.
+- Format is fully deterministic. You MUST consider breaking out of local maxima in case you try to use heuristics.
+- Try to avoid allocating "reasonable" amounts of memory. You should have information from the binary format to know how much memory to allocate.
+- Many of the errors you will see are because we are interpreting wrong values as some other binxml stuff, which can cause huge offsets, jumps etc.
+- Avoid fallbacks, these again mean you have not understood the format or our approach is wrong.
+
+# Templates and substitutions
+
+- Always keep in mind that we have some extra bits of state regarding templates and substitutions.
+- They could be nested
+- in case of nesting, some binary fields may not be present.

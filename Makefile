@@ -76,9 +76,7 @@ xml-zig:
 
 compare-first: xml-rs xml-zig
 	name=$$(basename "$(FILE)"); \
-	awk 'BEGIN{RS="</Event>"; ORS="</Event>\n"} NR==1 {print}' "$(OUT_DIR)/$$name.rs.xml" | sed '/^<\?xml /d' > "$(OUT_DIR)/$$name.rs.one.xml"; \
-	awk 'BEGIN{RS="</Event>"; ORS="</Event>\n"} NR==1 {print}' "$(OUT_DIR)/$$name.zig.xml" | sed '/^<\?xml /d' > "$(OUT_DIR)/$$name.zig.one.xml"; \
-	$(DIFF) "$(OUT_DIR)/$$name.rs.one.xml" "$(OUT_DIR)/$$name.zig.one.xml" || true
+	$(PYTHON) scripts/record_diff.py --rs "$(OUT_DIR)/$$name.rs.xml" --zig "$(OUT_DIR)/$$name.zig.xml" --index 1 --out-dir "$(OUT_DIR)" --name "$$name"
 
 # --- Full file comparison over all records ---
 .PHONY: xml-all-rs xml-all-zig compare-all
