@@ -1,6 +1,6 @@
 ---
-alwaysApply: true
 description: Concise guide for the project logger with levels and environment controls
+alwaysApply: false
 ---
 ### Logger usage (Zig)
 

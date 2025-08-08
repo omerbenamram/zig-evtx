@@ -1,7 +1,7 @@
 ---
-alwaysApply: true
+description: When thinking about the architecture of the parser.
+alwaysApply: false
 ---
-
 ### EVTX BinXML: IR-first architecture, template caching, deferred rendering
 
 This codebase should parse EVTX Binary XML in two stages: build a typed IR, then render. Avoid doing I/O or string building during tokenization beyond what is strictly required.

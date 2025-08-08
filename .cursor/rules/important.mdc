@@ -1,6 +1,8 @@
 ---
 alwaysApply: true
 ---
+# zig
+- we are using zig 0.14.1
 
 # Usage of the Makefile
 - You must use the @Makefile to run build commands.
