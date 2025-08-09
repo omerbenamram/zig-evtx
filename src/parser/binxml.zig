@@ -131,6 +131,52 @@ pub fn valueTypeFixedSize(vtype: u8) ?usize {
 }
 
 const Source = enum { rec, def };
+fn materializeNameFromChunkOffset(chunk: []const u8, allocator: std.mem.Allocator, off_u32: u32) !IR.Name {
+    const off_usize: usize = @intCast(off_u32);
+    if (off_usize + 8 > chunk.len) return BinXmlError.UnexpectedEof;
+    const num_chars = std.mem.readInt(u16, chunk[off_usize + 6 .. off_usize + 8][0..2], .little);
+    const str_start = off_usize + 8;
+    const byte_len = @as(usize, num_chars) * 2;
+    if (str_start + byte_len > chunk.len) return BinXmlError.UnexpectedEof;
+    var take_chars = num_chars;
+    if (byte_len >= 2) {
+        const last = std.mem.readInt(u16, chunk[str_start + byte_len - 2 .. str_start + byte_len][0..2], .little);
+        if (last == 0 and take_chars > 0) take_chars -= 1;
+    }
+    const buf = try allocator.alloc(u8, take_chars * 2);
+    @memcpy(buf, chunk[str_start .. str_start + take_chars * 2]);
+    return IR.Name{ .InlineUtf16 = .{ .bytes = buf, .num_chars = take_chars } };
+}
+
+fn parseDefNameIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, chunk_base: usize) !IR.Name {
+    const name_off = try r.readU32le();
+    if (log.enabled(.trace)) log.trace("def name_off=0x{x} cur_after_off=0x{x}", .{ name_off, r.pos });
+    const abs_after_off: usize = chunk_base + r.pos;
+    if (name_off == @as(u32, @intCast(abs_after_off))) {
+        const inl_start = r.pos;
+        if (r.rem() < 6) return BinXmlError.UnexpectedEof;
+        const next_string = try r.readU32le();
+        const name_hash = try r.readU16le();
+        if (log.enabled(.trace)) log.trace("inline NameLink next=0x{x} hash=0x{x} inl_start=0x{x}", .{ next_string, name_hash, inl_start });
+        // The inline name layout then carries a u16 length, followed by UTF-16 bytes and 4 bytes padding/terminator.
+        if (r.rem() < 2) return BinXmlError.UnexpectedEof;
+        const num = try r.readU16le();
+        const bytes = @as(usize, num) * 2;
+        if (log.enabled(.trace)) log.trace("inline name num={d} r.pos=0x{x}", .{ num, r.pos });
+        if (r.rem() < bytes) return BinXmlError.UnexpectedEof;
+        const slice_src = r.buf[r.pos .. r.pos + bytes];
+        r.pos += bytes;
+        // Seek to end of inline name block: NameLink(6) + string(len*2) + 4 (terminator/padding)
+        const want_end = inl_start + 6 + @as(usize, num) * 2 + 4;
+        if (log.enabled(.trace)) log.trace("inline name end want=0x{x} now=0x{x}", .{ want_end, r.pos });
+        if (r.pos < want_end and want_end <= r.buf.len) r.pos = want_end;
+        const buf = try allocator.alloc(u8, bytes);
+        @memcpy(buf, slice_src);
+        return IR.Name{ .InlineUtf16 = .{ .bytes = buf, .num_chars = @intCast(num) } };
+    }
+    // Name by chunk offset
+    return materializeNameFromChunkOffset(chunk, allocator, name_off);
+}
 
 pub fn logNameTrace(chunk: []const u8, name: IR.Name, label: []const u8) !void {
     if (!log.enabled(.trace)) return;
@@ -158,29 +204,13 @@ fn isNameSystemTimeFromOffset(chunk: []const u8, name_offset: u32) bool {
 }
 
 fn readInlineNameDefFlexibleAlloc(r: *Reader, alloc: std.mem.Allocator) !struct { bytes: []u8, num_chars: usize } {
-    // Deterministic variants accepted by Windows manifests. Try explicit, then simpler ones.
-    // Variant C: u32 unknown + u32 zero/unknown + u16 hash + u16 num + UTF16 (+ optional EOS)
-    if (r.rem() >= 12) {
-        const saveC = r.pos;
-        _ = try r.readU32le();
-        _ = try r.readU32le();
-        _ = try r.readU16le(); // hash
-        const numC = try r.readU16le();
-        const bytesC = @as(usize, numC) * 2;
-        if (numC > 0 and r.rem() >= bytesC and r.pos + bytesC <= r.buf.len) {
-            const sliceC_src = r.buf[r.pos .. r.pos + bytesC];
-            r.pos += bytesC;
-            if (r.rem() >= 2) {
-                const eos = std.mem.readInt(u16, r.buf[r.pos .. r.pos + 2][0..2], .little);
-                if (eos == 0) r.pos += 2;
-            }
-            const buf = try alloc.alloc(u8, bytesC);
-            @memcpy(buf, sliceC_src);
-            return .{ .bytes = buf, .num_chars = numC };
-        }
-        r.pos = saveC;
-    }
-    // Variant A: u16 hash + u16 num + UTF16
+    // According to the spec (Windows XML Event Log (EVTX).asciidoc -> Name),
+    // the 4-byte unknown prefix is NOT present in Windows Event Template resources.
+    // Therefore, for definitions we must read the inline name as:
+    //   u16 hash + u16 num_chars + UTF-16LE string + optional end-of-string (u16 0)
+    // Try the hash-prefixed form first, then a minimal (num + UTF16) fallback.
+
+    // Variant A: u16 hash + u16 num + UTF16 (+ optional EOS)
     if (r.rem() >= 4) {
         const saveA = r.pos;
         _ = try r.readU16le(); // hash
@@ -189,13 +219,19 @@ fn readInlineNameDefFlexibleAlloc(r: *Reader, alloc: std.mem.Allocator) !struct 
         if (numA > 0 and r.rem() >= bytesA and r.pos + bytesA <= r.buf.len) {
             const sliceA_src = r.buf[r.pos .. r.pos + bytesA];
             r.pos += bytesA;
+            // Optional end-of-string (u16 0)
+            if (r.rem() >= 2) {
+                const eos = std.mem.readInt(u16, r.buf[r.pos .. r.pos + 2][0..2], .little);
+                if (eos == 0) r.pos += 2;
+            }
             const buf = try alloc.alloc(u8, bytesA);
             @memcpy(buf, sliceA_src);
             return .{ .bytes = buf, .num_chars = numA };
         }
         r.pos = saveA;
     }
-    // Variant B: u16 num + UTF16
+
+    // Variant B: u16 num + UTF16 (+ optional EOS)
     if (r.rem() >= 2) {
         const saveB = r.pos;
         const numB = try r.readU16le();
@@ -203,12 +239,18 @@ fn readInlineNameDefFlexibleAlloc(r: *Reader, alloc: std.mem.Allocator) !struct 
         if (numB > 0 and r.rem() >= bytesB and r.pos + bytesB <= r.buf.len) {
             const sliceB_src = r.buf[r.pos .. r.pos + bytesB];
             r.pos += bytesB;
+            // Optional end-of-string (u16 0)
+            if (r.rem() >= 2) {
+                const eos = std.mem.readInt(u16, r.buf[r.pos .. r.pos + 2][0..2], .little);
+                if (eos == 0) r.pos += 2;
+            }
             const buf = try alloc.alloc(u8, bytesB);
             @memcpy(buf, sliceB_src);
             return .{ .bytes = buf, .num_chars = numB };
         }
         r.pos = saveB;
     }
+
     // No additional fallback variants per important.mdc
     return BinXmlError.UnexpectedEof;
 }
@@ -803,7 +845,7 @@ fn parseInlineNameFlexibleIR(r: *Reader, alloc: std.mem.Allocator) !IR.Name {
     return IR.Name{ .InlineUtf16 = .{ .bytes = nm.bytes, .num_chars = nm.num_chars } };
 }
 
-fn parseAttributeListIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, max_end: usize) !std.ArrayList(IR.Attr) {
+fn parseAttributeListIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, max_end: usize, chunk_base: usize) !std.ArrayList(IR.Attr) {
     const list_size = try r.readU32le();
     const list_start = r.pos;
     const list_end = list_start + list_size;
@@ -832,7 +874,7 @@ fn parseAttributeListIR(chunk: []const u8, r: *Reader, allocator: std.mem.Alloca
                 name = IR.Name{ .InlineUtf16 = .{ .bytes = buf, .num_chars = take_chars } };
             },
             .def => {
-                name = try parseInlineNameFlexibleIR(r, allocator);
+                name = try parseDefNameIR(chunk, r, allocator, chunk_base);
             },
         }
         if (log.enabled(.trace)) {
@@ -840,14 +882,14 @@ fn parseAttributeListIR(chunk: []const u8, r: *Reader, allocator: std.mem.Alloca
         }
         // Collect attribute value tokens into IR
         var tokens = std.ArrayList(IR.Node).init(allocator);
-        try collectValueTokensIRWithCtx(chunk, r, &tokens, src, list_end, allocator);
+        try collectValueTokensIRWithCtx(chunk, r, &tokens, src, list_end, allocator, chunk_base);
         try out.append(.{ .name = name, .value = tokens });
     }
     if (r.pos != list_end) r.pos = list_end;
     return out;
 }
 
-fn collectValueTokensIRWithCtx(chunk: []const u8, r: *Reader, out: *std.ArrayList(IR.Node), src: Source, end_pos: usize, allocator: std.mem.Allocator) !void {
+fn collectValueTokensIRWithCtx(chunk: []const u8, r: *Reader, out: *std.ArrayList(IR.Node), src: Source, end_pos: usize, allocator: std.mem.Allocator, chunk_base: usize) !void {
     var want_pad2: bool = false;
     while (true) {
         if (r.rem() == 0 or r.pos >= end_pos) break;
@@ -934,7 +976,7 @@ fn collectValueTokensIRWithCtx(chunk: []const u8, r: *Reader, out: *std.ArrayLis
                     nm = IR.Name{ .InlineUtf16 = .{ .bytes = buf, .num_chars = take_chars } };
                 },
                 .def => {
-                    nm = try parseInlineNameFlexibleIR(r, allocator);
+                    nm = try parseDefNameIR(chunk, r, allocator, chunk_base);
                 },
             }
             try out.append(.{ .tag = .EntityRef, .entity_name = nm });
@@ -966,7 +1008,7 @@ fn collectValueTokensIRWithCtx(chunk: []const u8, r: *Reader, out: *std.ArrayLis
                     @memcpy(buf, chunk[str_start .. str_start + take_chars * 2]);
                     nm = IR.Name{ .InlineUtf16 = .{ .bytes = buf, .num_chars = take_chars } };
                 },
-                .def => nm = try parseInlineNameFlexibleIR(r, allocator),
+                .def => nm = try parseDefNameIR(chunk, r, allocator, chunk_base),
             }
             try out.append(.{ .tag = .PITarget, .pi_target = nm });
             continue;
@@ -1003,7 +1045,7 @@ fn updateHintsFromNodes(el: *IR.Element, nodes: []const IR.Node, include_attr: b
     }
 }
 
-pub fn parseElementIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source) !*IR.Element {
+fn parseElementIRBase(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, chunk_base: usize) !*IR.Element {
     const element_start = r.pos;
     if (log.enabled(.trace)) {
         var tmp: [24]u8 = undefined;
@@ -1048,7 +1090,15 @@ pub fn parseElementIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocato
                 const save1 = r.pos;
                 if (r.readU16le()) |_| {
                     if (r.readU32le()) |dsz| {
-                        if (parseInlineNameFlexibleIR(r, allocator)) |nm| {
+                        // Read name field (u32 offset or inline block)
+                        if (log.enabled(.trace)) {
+                            var tmpn: [24]u8 = undefined;
+                            const take = @min(r.rem(), tmpn.len);
+                            @memcpy(tmpn[0..take], r.buf[r.pos .. r.pos + take]);
+                            log.trace("def pre-name (with dep) pos=0x{x} look: {s}", .{ r.pos, std.fmt.fmtSliceHexLower(tmpn[0..take]) });
+                        }
+                        if (parseDefNameIR(chunk, r, allocator, chunk_base)) |nm| {
+                            // header does NOT include name offset; it is part of data_size per spec
                             const hdr_len_try: usize = 1 + 2 + 4;
                             const end_try = element_start + hdr_len_try + @as(usize, dsz);
                             if (end_try <= r.buf.len) {
@@ -1072,8 +1122,15 @@ pub fn parseElementIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocato
             if (!parsed_with_dep) {
                 r.pos = save0;
                 data_size = try r.readU32le();
+                // header does NOT include name offset; it is part of data_size per spec
                 header_len = 1 + 4;
-                name = try parseInlineNameFlexibleIR(r, allocator);
+                if (log.enabled(.trace)) {
+                    var tmpn2: [24]u8 = undefined;
+                    const take2 = @min(r.rem(), tmpn2.len);
+                    @memcpy(tmpn2[0..take2], r.buf[r.pos .. r.pos + take2]);
+                    log.trace("def pre-name (no dep) pos=0x{x} look: {s}", .{ r.pos, std.fmt.fmtSliceHexLower(tmpn2[0..take2]) });
+                }
+                name = try parseDefNameIR(chunk, r, allocator, chunk_base);
             }
             if (log.enabled(.trace)) log.trace("def hdr: data_size={d} header_len={d} pos=0x{x}", .{ data_size, header_len, r.pos });
         },
@@ -1082,23 +1139,32 @@ pub fn parseElementIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocato
     if (element_end > r.buf.len or element_end < element_start) return BinXmlError.UnexpectedEof;
     const el = try IRModule.irNewElement(allocator, name);
     if (hasMore(start, TOK_OPEN_START)) {
-        el.attrs = try parseAttributeListIR(chunk, r, allocator, src, element_end);
+        el.attrs = try parseAttributeListIR(chunk, r, allocator, src, element_end, chunk_base);
         // hints from attributes
         var ai_h: usize = 0;
         while (ai_h < el.attrs.items.len) : (ai_h += 1) {
             updateHintsFromNodes(el, el.attrs.items[ai_h].value.items, true);
         }
-        // skip padding up to 4 zeros
-        var pad: usize = 0;
-        while (pad < 4 and r.pos < element_end and r.buf[r.pos] == 0) : (pad += 1) r.pos += 1;
     }
+    // Skip up to 4 bytes of zero padding after start header/attr list regardless of hasMore
+    var pad: usize = 0;
+    while (pad < 4 and r.pos < element_end and r.buf[r.pos] == 0) : (pad += 1) r.pos += 1;
     if (r.pos >= element_end or r.rem() == 0) return el;
+    const prev_pos = r.pos;
     const nxt = try r.readU8();
     if (log.enabled(.trace)) log.trace("parseElementIR nxt=0x{x} pos=0x{x} end=0x{x}", .{ nxt, r.pos, element_end });
     if (isToken(nxt, TOK_CLOSE_EMPTY)) {
         return el;
     }
     if (!isToken(nxt, TOK_CLOSE_START)) {
+        if (log.enabled(.trace)) {
+            var tmp: [64]u8 = undefined;
+            const win_start = if (prev_pos >= 16) prev_pos - 16 else 0;
+            const win_end = @min(element_end, win_start + tmp.len);
+            const take = win_end - win_start;
+            @memcpy(tmp[0..take], r.buf[win_start .. win_start + take]);
+            log.trace("unexpected nxt window [0x{x}..0x{x}): {s}", .{ win_start, win_end, std.fmt.fmtSliceHexLower(tmp[0..take]) });
+        }
         log.err("expected CloseStart, got 0x{x} at 0x{x}", .{ nxt, r.pos - 1 });
         return BinXmlError.BadToken;
     }
@@ -1112,12 +1178,12 @@ pub fn parseElementIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocato
             break;
         } else if (isToken(t, TOK_OPEN_START)) {
             // Optional dependency id handling for nested 0x21 payload elements (spec: dep-id may be omitted)
-            const child = try parseElementIR(chunk, r, allocator, src);
+            const child = try parseElementIRBase(chunk, r, allocator, src, chunk_base);
             try el.children.append(.{ .tag = .Element, .elem = child });
             el.has_element_child = true;
         } else if (isToken(t, TOK_VALUE) or isToken(t, TOK_NORMAL_SUBST) or isToken(t, TOK_OPTIONAL_SUBST) or isToken(t, TOK_CDATA) or isToken(t, TOK_CHARREF) or isToken(t, TOK_ENTITYREF) or isToken(t, TOK_PITARGET) or isToken(t, TOK_PIDATA)) {
             var seq = std.ArrayList(IR.Node).init(allocator);
-            try collectValueTokensIRWithCtx(chunk, r, &seq, src, element_end, allocator);
+            try collectValueTokensIRWithCtx(chunk, r, &seq, src, element_end, allocator, chunk_base);
             if (r.pos > element_end) r.pos = element_end;
             // append tokens into children list as individual nodes
             for (seq.items) |nd| try el.children.append(nd);
@@ -1127,6 +1193,10 @@ pub fn parseElementIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocato
         if (r.pos >= element_end) break;
     }
     return el;
+}
+
+pub fn parseElementIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source) !*IR.Element {
+    return parseElementIRBase(chunk, r, allocator, src, 0);
 }
 
 pub fn attrNameIsSystemTime(name: IR.Name, chunk: []const u8) bool {
@@ -1175,7 +1245,7 @@ pub fn appendEvtXmlPayloadChildrenIR(chunk: []const u8, data: []const u8, alloc:
                 _ = try def_r.readU8();
                 _ = try def_r.readU8();
             }
-            const child_def = try parseElementIR(chunk, &def_r, alloc, .def);
+            const child_def = try parseElementIRBase(chunk, &def_r, alloc, .def, data_start);
             const expected = expectedValuesFromTemplate(child_def);
             const vals = try parseTemplateInstanceValuesExpected(&r, alloc, expected);
             const expanded_child = try expandElementWithValues(child_def, vals, alloc);
@@ -1277,7 +1347,7 @@ pub fn buildExpandedElementTree(ctx: *Context, chunk: []const u8, bin: []const u
             _ = try def_r.readU8();
             _ = try def_r.readU8();
         }
-        const parsed_def = try parseElementIR(chunk, &def_r, ctx.arena.allocator(), .def);
+        const parsed_def = try parseElementIRBase(chunk, &def_r, ctx.arena.allocator(), .def, data_start);
         // Values
         const expected = expectedValuesFromTemplate(parsed_def);
         const values = try parseTemplateInstanceValuesExpected(&r, ctx.arena.allocator(), expected);
