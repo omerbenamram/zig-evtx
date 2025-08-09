@@ -340,6 +340,7 @@ fn writeElementBodyJson(chunk: []const u8, el: *const IR.Element, alloc: std.mem
     defer textual_nodes.deinit();
 
     var ci: usize = 0;
+    if (el.children.items.len > 0) try textual_nodes.ensureTotalCapacityPrecise(el.children.items.len);
     while (ci < el.children.items.len) : (ci += 1) {
         const nd = el.children.items[ci];
         switch (nd.tag) {
@@ -364,6 +365,8 @@ fn writeElementBodyJson(chunk: []const u8, el: *const IR.Element, alloc: std.mem
                 var entry = try groups.getOrPut(key);
                 if (!entry.found_existing) {
                     entry.value_ptr.* = std.ArrayList(*IR.Element).init(alloc);
+                    // Guess a small group size to avoid early growth (tuneable)
+                    try entry.value_ptr.ensureTotalCapacityPrecise(2);
                 }
                 try entry.value_ptr.append(child);
             },
