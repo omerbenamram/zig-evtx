@@ -93,7 +93,10 @@ Record these here:
   - Alternatively, batch writes of safe spans between escapes.
 - Validation: same as above.
 - Expected impact: Reduced memmove/copies; modest speedup.
-- Results: time: ... s (Δ ...%), records: ... (OK/FAIL)
+- Results:
+  - Mean ± σ: 1.031 s ± 0.077 s (Δ -8.6% vs Opt 2; -35.0% vs baseline)
+  - Records (JSONL): 62031 (OK)
+  - Notes: Escape functions now batch safe spans and emit entities inline; fewer memmoves and calls.
 
 ### Opt 6: IR/output growth strategy and hints
 

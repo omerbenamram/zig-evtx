@@ -1,18 +1,27 @@
 const std = @import("std");
 
 pub fn writeXmlEscaped(w: anytype, s: []const u8) !void {
+    // Fast path: scan and write contiguous safe spans; only emit entities when needed
     var i: usize = 0;
+    var start: usize = 0;
     while (i < s.len) : (i += 1) {
         const c = s[i];
+        var ent: ?[]const u8 = null;
         switch (c) {
-            '&' => try w.writeAll("&amp;"),
-            '<' => try w.writeAll("&lt;"),
-            '>' => try w.writeAll("&gt;"),
-            '"' => try w.writeAll("&quot;"),
-            '\'' => try w.writeAll("&apos;"),
-            else => try w.writeByte(c),
+            '&' => ent = "&amp;",
+            '<' => ent = "&lt;",
+            '>' => ent = "&gt;",
+            '"' => ent = "&quot;",
+            '\'' => ent = "&apos;",
+            else => {},
+        }
+        if (ent) |e| {
+            if (i > start) try w.writeAll(s[start..i]);
+            try w.writeAll(e);
+            start = i + 1;
         }
     }
+    if (start < s.len) try w.writeAll(s[start..]);
 }
 
 // JSON escaping for UTF-8 input
@@ -68,7 +77,64 @@ fn writeUtf16LeWithEscaper(w: anytype, utf16le: []const u8, num_chars: usize, co
 }
 
 pub fn writeUtf16LeXmlEscaped(w: anytype, utf16le: []const u8, num_chars: usize) !void {
-    return writeUtf16LeWithEscaper(w, utf16le, num_chars, writeXmlEscaped);
+    // Specialized fast path: avoid per-byte escaping callback; batch ASCII and emit entities inline
+    var ascii_buf: [256]u8 = undefined;
+    var ascii_len: usize = 0;
+    var i: usize = 0;
+    while (i < num_chars and (i * 2 + 1) < utf16le.len) : (i += 1) {
+        const lo = @as(u16, utf16le[i * 2]) | (@as(u16, utf16le[i * 2 + 1]) << 8);
+        var codepoint: u21 = lo;
+        if (lo >= 0xD800 and lo <= 0xDBFF) {
+            if (i + 1 >= num_chars or (i + 1) * 2 + 1 >= utf16le.len) break;
+            const lo2 = @as(u16, utf16le[(i + 1) * 2]) | (@as(u16, utf16le[(i + 1) * 2 + 1]) << 8);
+            if (lo2 >= 0xDC00 and lo2 <= 0xDFFF) {
+                const high_ten = lo - 0xD800;
+                const low_ten = lo2 - 0xDC00;
+                codepoint = 0x10000 + (@as(u21, high_ten) << 10) + @as(u21, low_ten);
+                i += 1;
+            } else {
+                continue;
+            }
+        } else if (lo >= 0xDC00 and lo <= 0xDFFF) {
+            continue;
+        }
+        if (codepoint <= 0x7F) {
+            const c: u8 = @truncate(codepoint);
+            var ent: ?[]const u8 = null;
+            switch (c) {
+                '&' => ent = "&amp;",
+                '<' => ent = "&lt;",
+                '>' => ent = "&gt;",
+                '"' => ent = "&quot;",
+                '\'' => ent = "&apos;",
+                else => {},
+            }
+            if (ent) |e| {
+                if (ascii_len > 0) {
+                    try w.writeAll(ascii_buf[0..ascii_len]);
+                    ascii_len = 0;
+                }
+                try w.writeAll(e);
+            } else {
+                if (ascii_len == ascii_buf.len) {
+                    try w.writeAll(ascii_buf[0..ascii_len]);
+                    ascii_len = 0;
+                }
+                ascii_buf[ascii_len] = c;
+                ascii_len += 1;
+            }
+        } else {
+            if (ascii_len > 0) {
+                try w.writeAll(ascii_buf[0..ascii_len]);
+                ascii_len = 0;
+            }
+            var buf: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(codepoint, &buf) catch 0;
+            if (len == 0) continue;
+            try w.writeAll(buf[0..len]);
+        }
+    }
+    if (ascii_len > 0) try w.writeAll(ascii_buf[0..ascii_len]);
 }
 
 // Write UTF-16LE input as JSON-escaped UTF-8
