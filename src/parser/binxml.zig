@@ -67,10 +67,6 @@ fn writeNameFromUtf16(w: anytype, utf16le: []const u8, num_chars: usize) !void {
 // - Inline cached template definition blocks (header + fragment) are skipped deterministically
 //   based on their `data_size` and a fragment header check.
 // - Empty BinaryType values render as `<Binary></Binary>` to match `evtx_dump` output.
-
-// Gate non-spec "+" integer padding sentinel behind build flag
-const ENABLE_PLUS_PAD: bool = false;
-
 pub const RenderMode = enum { xml, json, jsonl };
 
 // Token constants (subset)
@@ -791,10 +787,6 @@ fn collectValueTokensIRWithCtx(ctx: *Context, chunk: []const u8, r: *Reader, out
                 r.pos += blen;
             } else if (vtype == 0x01) {
                 const text = try r.readUnicodeTextStringBounded(end_pos);
-                if (ENABLE_PLUS_PAD and text.len == 2 and text[0] == 0x2B and text[1] == 0x00) {
-                    want_pad2 = true;
-                    continue;
-                }
                 try out.append(.{ .tag = .Text, .text_utf16 = text, .text_num_chars = text.len / 2 });
             } else if (vtype == 0x02) {
                 // Some manifests use ANSI string in value text; treat like 0x0e (len-prefixed) but decode as CP-1252 during rendering

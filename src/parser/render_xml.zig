@@ -19,6 +19,47 @@ const buildExpandedElementTree = @import("binxml.zig").buildExpandedElementTree;
 const valueTypeFixedSize = @import("binxml.zig").valueTypeFixedSize;
 const attrNameIsSystemTime = @import("binxml.zig").attrNameIsSystemTime;
 
+// Stream attribute value tokens directly to destination (no buffering)
+fn renderAttrValueFromIRStream(chunk: []const u8, nodes: []const IR.Node, _: []const TemplateValue, w: anytype) !void {
+    var pending_pad: usize = 0;
+    for (nodes) |nd| switch (nd.tag) {
+        .Text => try writeUtf16LeXmlEscaped(w, nd.text_utf16, nd.text_num_chars),
+        .Pad => pending_pad = nd.pad_width,
+        .Value => {
+            if (pending_pad > 0 and (nd.vtype == 0x07 or nd.vtype == 0x08 or nd.vtype == 0x09 or nd.vtype == 0x0a)) {
+                switch (nd.vtype) {
+                    0x07 => try writePaddedInt(w, i32, std.mem.readInt(i32, nd.vbytes[0..4], .little), pending_pad),
+                    0x08 => try writePaddedInt(w, u32, std.mem.readInt(u32, nd.vbytes[0..4], .little), pending_pad),
+                    0x09 => try writePaddedInt(w, i64, std.mem.readInt(i64, nd.vbytes[0..8], .little), pending_pad),
+                    0x0a => try writePaddedInt(w, u64, std.mem.readInt(u64, nd.vbytes[0..8], .little), pending_pad),
+                    else => {},
+                }
+                pending_pad = 0;
+            } else {
+                try writeValueXml(w, nd.vtype, nd.vbytes);
+            }
+        },
+        .Subst => {},
+        .CharRef => try w.print("&#{d};", .{nd.charref_value}),
+        .EntityRef => {
+            try w.writeByte('&');
+            try writeNameXml(chunk, nd.entity_name, w);
+            try w.writeByte(';');
+        },
+        .CData => try writeUtf16LeXmlEscaped(w, nd.text_utf16, nd.text_num_chars),
+        .PITarget => {
+            try w.writeAll("<?");
+            try writeNameXml(chunk, nd.pi_target, w);
+        },
+        .PIData => {
+            try w.writeByte(' ');
+            try writeUtf16LeRawToUtf8(w, nd.text_utf16, nd.text_num_chars);
+            try w.writeAll("?>");
+        },
+        .Element => {},
+    };
+}
+
 inline fn writeSpaces(w: anytype, count: usize) !void {
     if (count == 0) return;
     const SPACES = "                                                                "; // 64 spaces
@@ -100,20 +141,29 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
                     var ai_: usize = 0;
                     while (ai_ < el_.attrs.items.len) : (ai_ += 1) {
                         const a_ = el_.attrs.items[ai_];
-                        var tmp_: [512]u8 = undefined;
-                        var fbs_ = std.io.fixedBufferStream(&tmp_);
                         const eff_vals_: []const TemplateValue = if (el_.local_values.len > 0) el_.local_values else &[_]TemplateValue{};
-                        try renderAttrValueFromIR(chunk_, a_.value.items, eff_vals_, fbs_.writer());
-                        const rendered_ = fbs_.getWritten();
-                        if (rendered_.len == 0) continue;
+
+                        // Drop attribute if it is a single optional substitution resolving to NULL
+                        var drop_attr_: bool = false;
+                        if (a_.value.items.len == 1) {
+                            const n0_ = a_.value.items[0];
+                            if (n0_.tag == .Subst and n0_.subst_optional and n0_.subst_id < eff_vals_.len) {
+                                const vv0_ = eff_vals_[n0_.subst_id];
+                                if (vv0_.t == 0x00 or vv0_.data.len == 0) drop_attr_ = true;
+                            }
+                        }
+                        if (drop_attr_) continue;
+
                         try w_.writeByte(' ');
                         try writeNameXml(chunk_, a_.name, w_);
                         try w_.writeAll("=\"");
                         if (attrNameIsSystemTime(a_.name, chunk_)) {
+                            var tmp_: [512]u8 = undefined;
+                            var fbs_ = std.io.fixedBufferStream(&tmp_);
+                            try renderAttrValueFromIR(chunk_, a_.value.items, eff_vals_, fbs_.writer());
+                            const rendered_ = fbs_.getWritten();
                             try normalizeAndWriteSystemTimeAscii(w_, rendered_);
-                        } else {
-                            try w_.writeAll(rendered_);
-                        }
+                        } else try renderAttrValueFromIRStream(chunk_, a_.value.items, eff_vals_, w_);
                         try w_.writeByte('"');
                     }
                     try w_.writeByte('>');
@@ -195,11 +245,6 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
     var ai: usize = 0;
     while (ai < el.attrs.items.len) : (ai += 1) {
         const a = el.attrs.items[ai];
-        // Render attribute value to buffer
-        var tmp: [512]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&tmp);
-        try renderAttrValueFromIR(chunk, a.value.items, eff_values, fbs.writer());
-        const rendered = fbs.getWritten();
         // Drop only if the attribute is a single optional substitution resolving NULL
         var drop_attr = false;
         if (a.value.items.len == 1) {
@@ -214,10 +259,13 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
         try writeNameXml(chunk, a.name, w);
         try w.writeAll("=\"");
         if (attrNameIsSystemTime(a.name, chunk)) {
+            // Use a small buffer only for SystemTime normalization
+            var tmp: [512]u8 = undefined;
+            var fbs = std.io.fixedBufferStream(&tmp);
+            try renderAttrValueFromIR(chunk, a.value.items, eff_values, fbs.writer());
+            const rendered = fbs.getWritten();
             try normalizeAndWriteSystemTimeAscii(w, rendered);
-        } else {
-            try w.writeAll(rendered);
-        }
+        } else try renderAttrValueFromIRStream(chunk, a.value.items, eff_values, w);
         try w.writeByte('"');
     }
     if (el.children.items.len == 0) {
@@ -347,21 +395,8 @@ fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, _: []const T
         },
         .Element => {},
     };
-    // Drop '+' sentinels if any made it through, but prefer span writes
     const written = fbs.getWritten();
-    if (std.mem.indexOfScalar(u8, written, '+') == null) {
-        if (written.len > 0) try w.writeAll(written);
-    } else {
-        var start: usize = 0;
-        var i: usize = 0;
-        while (i < written.len) : (i += 1) {
-            if (written[i] == '+') {
-                if (i > start) try w.writeAll(written[start..i]);
-                start = i + 1;
-            }
-        }
-        if (start < written.len) try w.writeAll(written[start..]);
-    }
+    if (written.len > 0) try w.writeAll(written);
 }
 
 fn renderTextContentFromIR(chunk: []const u8, nodes: []const IR.Node, _: []const TemplateValue, w: anytype) !void {

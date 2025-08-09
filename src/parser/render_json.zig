@@ -200,13 +200,7 @@ fn renderTextToJsonString(_: []const u8, nodes: []const IR.Node, w: anytype) !vo
     while (i < nodes.len) : (i += 1) {
         const nd = nodes[i];
         switch (nd.tag) {
-            .Text => {
-                // Drop '+' padding sentinels that occasionally appear in manifests
-                if (nd.text_num_chars == 1 and nd.text_utf16.len >= 2 and nd.text_utf16[0] == 0x2B and nd.text_utf16[1] == 0x00) {
-                    continue;
-                }
-                try writeUtf16LeJsonEscaped(w, nd.text_utf16, nd.text_num_chars);
-            },
+            .Text => try writeUtf16LeJsonEscaped(w, nd.text_utf16, nd.text_num_chars),
             .Pad => pending_pad = nd.pad_width,
             .Value => {
                 if (pending_pad > 0 and (nd.vtype == 0x07 or nd.vtype == 0x08 or nd.vtype == 0x09 or nd.vtype == 0x0a)) {

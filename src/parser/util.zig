@@ -222,6 +222,18 @@ pub fn utf16EqualsAscii(utf16le: []const u8, num_chars: usize, ascii: []const u8
 }
 
 pub fn normalizeAndWriteSystemTimeAscii(w: anytype, ascii: []const u8) !void {
+    // Some manifests include '+' markers around components. Strip them before parsing.
+    var sanitized_buf: [64]u8 = undefined;
+    var s_len: usize = 0;
+    var i_s: usize = 0;
+    while (i_s < ascii.len and s_len < sanitized_buf.len) : (i_s += 1) {
+        const c = ascii[i_s];
+        if (c == '+') continue;
+        sanitized_buf[s_len] = c;
+        s_len += 1;
+    }
+    const s = sanitized_buf[0..s_len];
+
     var year: []const u8 = &[_]u8{};
     var month: []const u8 = &[_]u8{};
     var day: []const u8 = &[_]u8{};
@@ -230,18 +242,18 @@ pub fn normalizeAndWriteSystemTimeAscii(w: anytype, ascii: []const u8) !void {
     var second: []const u8 = &[_]u8{};
     var micros: []const u8 = &[_]u8{};
 
-    const t_idx = std.mem.indexOfScalar(u8, ascii, 'T') orelse return w.writeAll(ascii);
-    const z_idx = std.mem.lastIndexOfScalar(u8, ascii, 'Z') orelse return w.writeAll(ascii);
-    const date = ascii[0..t_idx];
-    const time = ascii[t_idx + 1 .. z_idx];
+    const t_idx = std.mem.indexOfScalar(u8, s, 'T') orelse return w.writeAll(s);
+    const z_idx = std.mem.lastIndexOfScalar(u8, s, 'Z') orelse return w.writeAll(s);
+    const date = s[0..t_idx];
+    const time = s[t_idx + 1 .. z_idx];
     var it = std.mem.splitScalar(u8, date, '-');
-    year = it.next() orelse return w.writeAll(ascii);
-    month = it.next() orelse return w.writeAll(ascii);
-    day = it.next() orelse return w.writeAll(ascii);
+    year = it.next() orelse return w.writeAll(s);
+    month = it.next() orelse return w.writeAll(s);
+    day = it.next() orelse return w.writeAll(s);
     var it2 = std.mem.splitScalar(u8, time, ':');
-    hour = it2.next() orelse return w.writeAll(ascii);
-    minute = it2.next() orelse return w.writeAll(ascii);
-    const sec_frac = it2.next() orelse return w.writeAll(ascii);
+    hour = it2.next() orelse return w.writeAll(s);
+    minute = it2.next() orelse return w.writeAll(s);
+    const sec_frac = it2.next() orelse return w.writeAll(s);
     if (std.mem.indexOfScalar(u8, sec_frac, '.')) |dot| {
         second = sec_frac[0..dot];
         micros = sec_frac[dot + 1 ..];
