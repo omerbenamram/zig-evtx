@@ -44,11 +44,11 @@ pub fn OutputImpl(comptime W: type) type {
         ema_alpha: f64 = 0.25,
 
         pub fn initXml(w: W) @This() {
-            return .{ .w = w, .mode = .xml, .scratch = std.ArrayList(u8).init(std.heap.c_allocator), .last_size_hint = 4096, .bufw = std.io.BufferedWriter(1048576, W){ .unbuffered_writer = w } };
+            return .{ .w = w, .mode = .xml, .scratch = std.ArrayList(u8).init(std.heap.page_allocator), .last_size_hint = 4096, .bufw = std.io.BufferedWriter(1048576, W){ .unbuffered_writer = w } };
         }
 
         pub fn initJson(w: W, json_mode: Output.JsonMode) @This() {
-            return .{ .w = w, .mode = if (json_mode == .single) .json_single else .json_lines, .scratch = std.ArrayList(u8).init(std.heap.c_allocator), .last_size_hint = 4096, .bufw = std.io.BufferedWriter(1048576, W){ .unbuffered_writer = w } };
+            return .{ .w = w, .mode = if (json_mode == .single) .json_single else .json_lines, .scratch = std.ArrayList(u8).init(std.heap.page_allocator), .last_size_hint = 4096, .bufw = std.io.BufferedWriter(1048576, W){ .unbuffered_writer = w } };
         }
 
         pub fn setContext(self: *@This(), c: *binxml.Context) void {
@@ -408,7 +408,7 @@ pub const EvtxParser = struct {
                     const has_limits = (self_.parser.opts.max_records != 0) or (self_.parser.opts.skip_first > 0);
                     if (!has_limits) {
                         // Fast path: no global limits, render the whole chunk to a local buffer, then single write
-                        var chunk_out = std.ArrayList(u8).init(std.heap.c_allocator);
+                        var chunk_out = std.ArrayList(u8).init(std.heap.page_allocator);
                         defer chunk_out.deinit();
                         _ = chunk_out.ensureTotalCapacityPrecise(96 * 1024) catch {};
                         while (rec_iter.next() catch null) |rec| {
