@@ -13,6 +13,9 @@ const formatIso8601UtcFromUnixMs = util.formatIso8601UtcFromUnixMs;
 const formatIso8601UtcFromFiletimeMicros = util.formatIso8601UtcFromFiletimeMicros;
 const writeAnsiCp1252Escaped = util.writeAnsiCp1252Escaped;
 
+// Gate non-spec "+" integer padding sentinel behind build flag
+const ENABLE_PLUS_PAD: bool = false;
+
 pub const RenderMode = enum { xml, json, jsonl };
 
 pub const BinXmlError = error{
@@ -124,7 +127,13 @@ fn writeNameFromOffset(chunk: []const u8, name_offset: u32, w: anytype) !void {
     const str_start = off + 8;
     const byte_len = @as(usize, num_chars) * 2;
     if (str_start + byte_len > chunk.len) return BinXmlError.OutOfBounds;
-    try writeUtf16LeXmlEscaped(w, chunk[str_start .. str_start + byte_len], num_chars);
+    // Defensive: trim a trailing NUL if manifests encoded EOS in num_chars
+    var num = num_chars;
+    if (byte_len >= 2) {
+        const last = std.mem.readInt(u16, chunk[str_start + byte_len - 2 .. str_start + byte_len][0..2], .little);
+        if (last == 0 and num > 0) num -= 1;
+    }
+    try writeUtf16LeXmlEscaped(w, chunk[str_start .. str_start + num * 2], num);
 }
 
 fn readFixedBytes(r: *Reader, n: usize) ![]const u8 {
@@ -132,6 +141,11 @@ fn readFixedBytes(r: *Reader, n: usize) ![]const u8 {
     const slice = r.buf[r.pos .. r.pos + n];
     r.pos += n;
     return slice;
+}
+
+fn readFixedBytesBounded(r: *Reader, n: usize, end_pos: usize) ![]const u8 {
+    if (r.pos + n > end_pos) return BinXmlError.UnexpectedEof;
+    return try readFixedBytes(r, n);
 }
 
 fn valueTypeFixedSize(vtype: u8) ?usize {
@@ -168,6 +182,36 @@ fn readUnicodeTextString(r: *Reader) ![]const u8 {
     if (r.pos + byte_len > r.buf.len) return BinXmlError.UnexpectedEof;
     const slice = r.buf[r.pos .. r.pos + byte_len];
     r.pos += byte_len;
+    return slice;
+}
+
+fn readUnicodeTextStringBounded(r: *Reader, end_pos: usize) ![]const u8 {
+    if (r.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
+    const num_chars = try r.readU16le();
+    const byte_len = @as(usize, num_chars) * 2;
+    if (r.pos + byte_len > end_pos) return BinXmlError.UnexpectedEof;
+    const slice = r.buf[r.pos .. r.pos + byte_len];
+    r.pos += byte_len;
+    return slice;
+}
+
+fn readLenPrefixedBytes16Bounded(r: *Reader, end_pos: usize) ![]const u8 {
+    if (r.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
+    const blen = try r.readU16le();
+    if (r.pos + @as(usize, blen) > end_pos) return BinXmlError.UnexpectedEof;
+    const slice = r.buf[r.pos .. r.pos + blen];
+    r.pos += blen;
+    return slice;
+}
+
+fn readSidBytesBounded(r: *Reader, end_pos: usize) ![]const u8 {
+    if (r.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
+    const start = r.pos;
+    const subc = r.buf[r.pos + 1];
+    const needed: usize = 8 + @as(usize, subc) * 4;
+    if (start + needed > end_pos) return BinXmlError.UnexpectedEof;
+    const slice = r.buf[start .. start + needed];
+    r.pos = start + needed;
     return slice;
 }
 
@@ -271,53 +315,142 @@ const TemplateValue = struct {
     data: []const u8,
 };
 
-fn parseTemplateInstanceValues(r: *Reader, allocator: std.mem.Allocator) ![]TemplateValue {
-    // Strict descriptor parsing per spec:
-    // u32 count, then count descriptors (u16 size, u8 type, u8 reserved), then payloads
-    const start_pos = r.pos;
-    if (r.rem() < 4) return BinXmlError.UnexpectedEof;
-    const declared = try r.readU32le();
-    if (log.enabled(.trace)) log.trace("tmpl values: declared={d} rem={d}", .{ declared, r.rem() });
-    const bytes_after_count = r.rem();
-    if (declared == 0) return allocator.alloc(TemplateValue, 0);
-    // Ensure there are enough bytes for descriptor table: 4 bytes per value
-    if (declared > bytes_after_count / 4) {
-        r.pos = start_pos;
-        return BinXmlError.UnexpectedEof;
+fn maxSubstIndexNodes(nodes: []const IR.Node) ?usize {
+    var max: ?usize = null;
+    var i: usize = 0;
+    while (i < nodes.len) : (i += 1) {
+        const nd = nodes[i];
+        if (nd.tag == .Subst) {
+            if (max) |m| {
+                if (@as(usize, nd.subst_id) > m) max = nd.subst_id;
+            } else max = nd.subst_id;
+        } else if (nd.tag == .Element) {
+            if (nd.elem) |child| {
+                // attributes of child
+                var ai: usize = 0;
+                while (ai < child.attrs.items.len) : (ai += 1) {
+                    if (maxSubstIndexNodes(child.attrs.items[ai].value.items)) |v| {
+                        if (max) |m2| {
+                            if (v > m2) max = v;
+                        } else max = v;
+                    }
+                }
+                if (maxSubstIndexNodes(child.children.items)) |v2| {
+                    if (max) |m3| {
+                        if (v2 > m3) max = v2;
+                    } else max = v2;
+                }
+            }
+        }
     }
-    {
-        if (log.enabled(.trace) and r.rem() >= 16) {
-            log.trace("desc first16: {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{
-                r.buf[r.pos + 0],  r.buf[r.pos + 1],  r.buf[r.pos + 2],  r.buf[r.pos + 3],
-                r.buf[r.pos + 4],  r.buf[r.pos + 5],  r.buf[r.pos + 6],  r.buf[r.pos + 7],
-                r.buf[r.pos + 8],  r.buf[r.pos + 9],  r.buf[r.pos + 10], r.buf[r.pos + 11],
-                r.buf[r.pos + 12], r.buf[r.pos + 13], r.buf[r.pos + 14], r.buf[r.pos + 15],
-            });
+    return max;
+}
+
+fn expectedValuesFromTemplate(el: *const IR.Element) usize {
+    var max: ?usize = null;
+    // attributes
+    var ai: usize = 0;
+    while (ai < el.attrs.items.len) : (ai += 1) {
+        if (maxSubstIndexNodes(el.attrs.items[ai].value.items)) |v| {
+            if (max) |m| {
+                if (v > m) max = v;
+            } else max = v;
         }
-        var sizes = try allocator.alloc(u16, declared);
-        errdefer allocator.free(sizes);
-        var types = try allocator.alloc(u8, declared);
-        errdefer allocator.free(types);
-        var i: usize = 0;
-        while (i < declared) : (i += 1) {
-            sizes[i] = try r.readU16le();
-            types[i] = try r.readU8();
-            _ = try r.readU8(); // reserved, often 0x00, but ignore if not
-        }
-        var values = try allocator.alloc(TemplateValue, declared);
-        i = 0;
-        while (i < declared) : (i += 1) {
-            const need: usize = @intCast(sizes[i]);
-            if (r.rem() < need) return BinXmlError.UnexpectedEof;
-            const slice = r.buf[r.pos .. r.pos + need];
-            r.pos += need;
+    }
+    // children
+    if (maxSubstIndexNodes(el.children.items)) |v2| {
+        if (max) |m2| {
+            if (v2 > m2) max = v2;
+        } else max = v2;
+    }
+    return if (max) |mfinal| mfinal + 1 else 0;
+}
+
+fn parseTemplateInstanceValues(r: *Reader, allocator: std.mem.Allocator) ![]TemplateValue {
+    // Spec-compliant: MUST start with u32 number_of_substitutions
+    if (r.rem() < 4) return BinXmlError.UnexpectedEof;
+    const declared_u32 = try r.readU32le();
+    const declared: usize = @intCast(declared_u32);
+    if (log.enabled(.trace)) log.trace("tmpl values declared={d}", .{declared});
+    if (declared == 0) return allocator.alloc(TemplateValue, 0);
+    if (r.rem() < 4 * declared) return BinXmlError.UnexpectedEof;
+    // Read descriptor table
+    var sizes = try allocator.alloc(u16, declared);
+    errdefer allocator.free(sizes);
+    var types = try allocator.alloc(u8, declared);
+    errdefer allocator.free(types);
+    var reserved = try allocator.alloc(u8, declared);
+    errdefer allocator.free(reserved);
+    var i: usize = 0;
+    while (i < declared) : (i += 1) {
+        sizes[i] = try r.readU16le();
+        types[i] = try r.readU8();
+        reserved[i] = try r.readU8();
+        if (log.enabled(.trace)) log.trace("  desc[{d}]: size={d} type=0x{x} reserved={d}", .{ i, sizes[i], types[i], reserved[i] });
+    }
+    // Payloads
+    var values = try allocator.alloc(TemplateValue, declared);
+    i = 0;
+    while (i < declared) : (i += 1) {
+        const need: usize = @intCast(sizes[i]);
+        if (r.rem() < need) return BinXmlError.UnexpectedEof;
+        const slice = r.buf[r.pos .. r.pos + need];
+        r.pos += need;
+        if (types[i] == 0x00) {
+            // NullType: keep an empty value; data bytes are skipped by size
+            values[i] = .{ .t = 0x00, .data = &[_]u8{} };
+        } else {
             values[i] = .{ .t = types[i], .data = slice };
         }
-        allocator.free(sizes);
-        allocator.free(types);
-        return values;
+        if (log.enabled(.trace)) log.trace("  payload[{d}]: t=0x{x} len={d}", .{ i, types[i], need });
     }
-    unreachable;
+    allocator.free(sizes);
+    allocator.free(types);
+    allocator.free(reserved);
+    return values;
+}
+
+fn parseTemplateInstanceValuesExpected(r: *Reader, allocator: std.mem.Allocator, expected: usize) ![]TemplateValue {
+    if (r.rem() < 4) return BinXmlError.UnexpectedEof;
+    const declared_u32 = try r.readU32le();
+    const declared: usize = @intCast(declared_u32);
+    _ = expected; // trust declared count per spec (Rust behavior)
+    if (log.enabled(.trace)) log.trace("tmpl values declared={d}", .{declared});
+    if (declared == 0) return allocator.alloc(TemplateValue, 0);
+    if (r.rem() < 4 * declared) return BinXmlError.UnexpectedEof;
+    // Read descriptor table
+    var sizes = try allocator.alloc(u16, declared);
+    errdefer allocator.free(sizes);
+    var types = try allocator.alloc(u8, declared);
+    errdefer allocator.free(types);
+    var reserved = try allocator.alloc(u8, declared);
+    errdefer allocator.free(reserved);
+    var i: usize = 0;
+    while (i < declared) : (i += 1) {
+        sizes[i] = try r.readU16le();
+        types[i] = try r.readU8();
+        reserved[i] = try r.readU8();
+        if (log.enabled(.trace)) log.trace("  desc[{d}]: size={d} type=0x{x} reserved={d}", .{ i, sizes[i], types[i], reserved[i] });
+    }
+    // Payloads
+    var values = try allocator.alloc(TemplateValue, declared);
+    i = 0;
+    while (i < declared) : (i += 1) {
+        const need: usize = @intCast(sizes[i]);
+        if (r.rem() < need) return BinXmlError.UnexpectedEof;
+        const slice = r.buf[r.pos .. r.pos + need];
+        r.pos += need;
+        if (types[i] == 0x00) {
+            values[i] = .{ .t = 0x00, .data = &[_]u8{} };
+        } else {
+            values[i] = .{ .t = types[i], .data = slice };
+        }
+        if (log.enabled(.trace)) log.trace("  payload[{d}]: t=0x{x} len={d}", .{ i, types[i], need });
+    }
+    allocator.free(sizes);
+    allocator.free(types);
+    allocator.free(reserved);
+    return values;
 }
 
 fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
@@ -342,12 +475,18 @@ fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
             const v = std.mem.readInt(u16, data[0..2], .little);
             try w.print("{d}", .{v});
         },
-        0x01 => { // StringType -> Unicode (num_chars u16 followed by UTF-16LE data)
-            if (data.len < 2) return BinXmlError.UnexpectedEof;
-            const num_chars = std.mem.readInt(u16, data[0..2], .little);
-            const byte_len = @as(usize, num_chars) * 2;
-            if (2 + byte_len > data.len) return BinXmlError.UnexpectedEof;
-            try writeUtf16LeXmlEscaped(w, data[2 .. 2 + byte_len], num_chars);
+        0x01 => { // StringType
+            // In template substitutions the payload is sized UTF-16 bytes without a length prefix.
+            // In value tokens inside definitions we never reach here (they become Text nodes).
+            if (data.len == 0) return; // empty string
+            if ((data.len & 1) != 0) return BinXmlError.UnexpectedEof; // must be UTF-16LE bytes
+            var num = data.len / 2;
+            if (num > 0) {
+                const last = std.mem.readInt(u16, data[data.len - 2 .. data.len][0..2], .little);
+                if (last == 0) num -= 1;
+            }
+            if (num == 0) return;
+            try writeUtf16LeXmlEscaped(w, data[0 .. num * 2], num);
         },
         0x02 => { // AnsiStringType (codepage) - payload is exactly the descriptor-sized byte slice
             try writeAnsiCp1252Escaped(w, data);
@@ -450,6 +589,10 @@ fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
             }
         },
         0x0e => { // BinaryType → hex
+            if (data.len == 0) {
+                // Represent empty binary as empty element content; caller will produce <Binary></Binary>
+                return;
+            }
             var i: usize = 0;
             while (i < data.len) : (i += 1) {
                 try w.print("{x:0>2}", .{data[i]});
@@ -496,6 +639,143 @@ fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
     }
 }
 
+const JoinerPolicy = enum { Attr, Text };
+
+fn joinerFor(policy: JoinerPolicy, base: u8) []const u8 {
+    return switch (policy) {
+        .Attr => " ",
+        .Text => if (base == 0x01 or base == 0x02) "," else " ",
+    };
+}
+
+fn writeSingleWithPad(w: anytype, t: u8, bytes: []const u8, pad: usize) !void {
+    if (pad > 0 and (t == 0x07 or t == 0x08 or t == 0x09 or t == 0x0a)) {
+        switch (t) {
+            0x07 => try writePaddedInt(w, i32, std.mem.readInt(i32, bytes[0..4], .little), pad),
+            0x08 => try writePaddedInt(w, u32, std.mem.readInt(u32, bytes[0..4], .little), pad),
+            0x09 => try writePaddedInt(w, i64, std.mem.readInt(i64, bytes[0..8], .little), pad),
+            0x0a => try writePaddedInt(w, u64, std.mem.readInt(u64, bytes[0..8], .little), pad),
+            else => try writeValueXml(w, t, bytes),
+        }
+    } else {
+        try writeValueXml(w, t, bytes);
+    }
+}
+
+fn arrayItemNext(base: u8, backing_t: u8, data: []const u8, idx: *usize) ?[]const u8 {
+    switch (base) {
+        0x01 => { // Unicode string, NUL-terminated items
+            const i = idx.*;
+            if (i >= data.len) return null;
+            if (data.len - i < 2) {
+                idx.* = data.len;
+                return null;
+            }
+            const start = i;
+            var end = i;
+            while (end + 1 < data.len) : (end += 2) {
+                const u = std.mem.readInt(u16, data[end .. end + 2][0..2], .little);
+                if (u == 0) break;
+            }
+            // Advance idx beyond terminator if present
+            const new_idx = if (end + 1 < data.len) end + 2 else end;
+            if (new_idx <= i) {
+                idx.* = data.len;
+                return null;
+            }
+            idx.* = new_idx;
+            return data[start..end];
+        },
+        0x02 => { // ANSI string, NUL-terminated items
+            const i = idx.*;
+            if (i >= data.len) return null;
+            const start = i;
+            var end = i;
+            while (end < data.len and data[end] != 0) : (end += 1) {}
+            const new_idx = if (end < data.len and data[end] == 0) end + 1 else end;
+            if (new_idx <= i) {
+                idx.* = data.len;
+                return null;
+            }
+            idx.* = new_idx;
+            return data[start..end];
+        },
+        0x13 => { // SID: 8 + subcount*4
+            const i = idx.*;
+            if (i + 8 > data.len) return null;
+            const subc: usize = data[i + 1];
+            const need: usize = 8 + subc * 4;
+            if (i + need > data.len) return null;
+            idx.* = i + need;
+            return data[i .. i + need];
+        },
+        0x10 => { // size_t: enforce 0x94/0x95 backing
+            var esz: usize = 0;
+            if (backing_t == 0x94) esz = 4 else if (backing_t == 0x95) esz = 8 else return null;
+            const i = idx.*;
+            if (i + esz > data.len) return null;
+            const out = data[i .. i + esz];
+            idx.* = i + esz;
+            return out;
+        },
+        else => {
+            if (valueTypeFixedSize(base)) |esz| {
+                const i = idx.*;
+                if (i + esz > data.len) return null;
+                const out = data[i .. i + esz];
+                idx.* = i + esz;
+                return out;
+            }
+            return null;
+        },
+    }
+}
+
+fn writeArrayItemsJoined(w: anytype, policy: JoinerPolicy, base: u8, backing_t: u8, data: []const u8, pad: usize) !bool {
+    var first = true;
+    var idx: usize = 0;
+    const sep = joinerFor(policy, base);
+    var any_item = false;
+    while (arrayItemNext(base, backing_t, data, &idx)) |seg| {
+        if (!first) try w.writeAll(sep) else first = false;
+        any_item = true;
+        // For string items, seg is raw (no length prefix)
+        if (base == 0x01) {
+            try writeUtf16LeXmlEscaped(w, seg, seg.len / 2);
+        } else if (base == 0x02) {
+            try writeAnsiCp1252Escaped(w, seg);
+        } else if (base == 0x10) {
+            try writeSingleWithPad(w, 0x10, seg, pad);
+        } else {
+            try writeSingleWithPad(w, base, seg, pad);
+        }
+    }
+    return any_item;
+}
+
+fn writeSubstAsText(w: anytype, policy: JoinerPolicy, nd: IR.Node, vv: TemplateValue) !void {
+    // Skip EvtXml in textual contexts; caller handles splicing
+    if ((vv.t & 0x7f) == 0x21) return;
+    if (log.enabled(.trace)) {
+        const is_arr = (nd.subst_vtype & 0x80) != 0;
+        const base: u8 = nd.subst_vtype & 0x7f;
+        log.trace("subst_text id={d} base=0x{x} arr={any} val_t=0x{x} len={d}", .{ nd.subst_id, base, is_arr, vv.t, vv.data.len });
+    }
+    if ((nd.subst_vtype & 0x80) != 0) {
+        const base = nd.subst_vtype & 0x7f;
+        // size_t array must have 0x94/0x95 backing
+        if (base == 0x10 and !(vv.t == 0x94 or vv.t == 0x95)) {
+            log.warn("size array backing mismatch: expected 0x94/0x95, got 0x{x}", .{vv.t});
+            // Skip instead of error to tolerate dirty logs
+            return;
+        }
+        _ = try writeArrayItemsJoined(w, policy, base, vv.t, vv.data, nd.pad_width);
+        return;
+    }
+    // scalar
+    try writeSingleWithPad(w, vv.t, vv.data, nd.pad_width);
+}
+
 // (removed) legacy streaming substitution renderer `renderSubstitutionXml`
 
 // (removed) legacy streaming element renderer `renderElementXml`
@@ -521,29 +801,14 @@ fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w: an
     const first = try r.peekU8();
     log.debug("first=0x{x} len={d}", .{ first, bin.len });
     if (first == TOK_TEMPLATE_INSTANCE) {
-        _ = try r.readU8(); // consume
-        // Template definition (header within the record, data in chunk at def_data_off)
-        if (r.rem() < 1 + 4 + 4 + 4 + 16 + 4) return BinXmlError.UnexpectedEof;
-        _ = try r.readU8(); // unknown
+        _ = try r.readU8(); // consume 0x0c
+        if (r.rem() < 1 + 4 + 4) return BinXmlError.UnexpectedEof;
+        _ = try r.readU8(); // unknown (matches Rust reader)
         _ = try r.readU32le(); // template id (unused)
         const def_data_off = try r.readU32le();
-        _ = try r.readU32le(); // next def off (unused)
-        // GUID
-        const guid = try r.readGuid();
-        // Optional definition data size in record: present only when an inline copy follows
-        var def_size: u32 = 0;
-        if (r.rem() >= 5) {
-            const size_peek = std.mem.readInt(u32, r.buf[r.pos .. r.pos + 4][0..4], .little);
-            const tok_after = r.buf[r.pos + 4];
-            if (tok_after == TOK_FRAGMENT_HEADER or isToken(tok_after, TOK_OPEN_START)) {
-                def_size = size_peek;
-                _ = try r.readU32le();
-            }
-        }
-        log.debug("tmpl def_off=0x{x} def_size={d}", .{ def_data_off, def_size });
+        log.debug("tmpl def_off=0x{x} def_size={d}", .{ def_data_off, 0 });
 
-        // Chunk template header layout observed in EVTX chunk:
-        // [0..4] unknown, [4..20] GUID, [20..24] data_size, [24..] data (fragment header + element + EOF)
+        // Per Rust: template header: next_template_offset (4), guid (16), data_size (4), then payload of size data_size
         const def_off_usize: usize = @intCast(def_data_off);
         if (def_off_usize + 24 > chunk.len) return BinXmlError.OutOfBounds;
         const td_data_size = std.mem.readInt(u32, chunk[def_off_usize + 20 .. def_off_usize + 24][0..4], .little);
@@ -557,7 +822,7 @@ fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w: an
                 def_r.buf[0], def_r.buf[1], def_r.buf[2], def_r.buf[3], def_r.buf[4], def_r.buf[5], def_r.buf[6], def_r.buf[7],
             });
         }
-        // Optional fragment header inside definition
+        // Optional fragment header inside definition (chunk copy)
         if (def_r.rem() >= 4 and def_r.buf[def_r.pos] == TOK_FRAGMENT_HEADER) {
             _ = try def_r.readU8();
             _ = try def_r.readU8();
@@ -565,49 +830,50 @@ fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w: an
             _ = try def_r.readU8();
         }
 
-        // Skip inline copy of template definition data in the record if present by parsing it.
-        if (def_size > 0 and r.rem() >= def_size and (r.buf[r.pos] == TOK_FRAGMENT_HEADER or isToken(r.buf[r.pos], TOK_OPEN_START))) {
-            const save_pos = r.pos;
-            var inl = Reader.init(r.buf[r.pos..]);
-            // Optional fragment header
-            if (inl.rem() >= 4 and inl.buf[inl.pos] == TOK_FRAGMENT_HEADER) {
-                _ = inl.readU8() catch {};
-                _ = inl.readU8() catch {};
-                _ = inl.readU8() catch {};
-                _ = inl.readU8() catch {};
-            }
-            var tmp_gpa = std.heap.GeneralPurposeAllocator(.{}){};
-            defer _ = tmp_gpa.deinit();
-            const tmp_alloc = tmp_gpa.allocator();
-            // Parse definition element to learn its exact length
-            if (parseElementIR(chunk, &inl, tmp_alloc, .def)) |_| {
-                // Optional EOF
-                if (inl.rem() > 0 and inl.buf[inl.pos] == TOK_EOF) {
-                    _ = inl.readU8() catch {};
-                }
-                const consumed = inl.pos;
-                r.pos = save_pos + consumed;
-                log.trace("skipped inline def by parse size={d}", .{consumed});
-            } else |_| {
-                // Fallback: trust def_size and skip bytes
-                r.pos = save_pos + @as(usize, def_size);
-                log.trace("skipped inline def by size field size={d}", .{def_size});
-            }
+        // Skip inline copy when def_data_off equals current record-relative cursor position
+        // Match Rust: compare against cursor.position() within the record buffer
+        // If the template definition header is inlined at the current record cursor, skip it deterministically
+        if (def_data_off == @as(u32, @intCast(r.pos))) {
+            if (r.rem() < 24) return BinXmlError.UnexpectedEof;
+            _ = try r.readU32le(); // next_template_offset
+            _ = try r.readGuid();
+            const data_size_inline = try r.readU32le();
+            if (r.rem() < data_size_inline) return BinXmlError.UnexpectedEof;
+            r.pos += @as(usize, data_size_inline);
         }
 
-        // Values follow in the record after the header we just read (and possible inline data)
+        // Some records embed additional cached template definition blocks before the substitution array.
+        // These blocks have a fixed 24-byte header followed by a fragment of size `data_size` beginning with 0x0f.
+        // Skip any such blocks deterministically before reading substitutions.
+        while (r.rem() >= 28) {
+            const data_size_peek = std.mem.readInt(u32, r.buf[r.pos + 20 .. r.pos + 24][0..4], .little);
+            const block_end = r.pos + 24 + @as(usize, data_size_peek);
+            if (block_end > r.buf.len) break;
+            const payload_first = r.buf[r.pos + 24];
+            if (payload_first != TOK_FRAGMENT_HEADER) break;
+            if (ctx.verbose) log.trace("skipping inline cached template def: size={d} at 0x{x}..0x{x}", .{ data_size_peek, r.pos, block_end });
+            r.pos = block_end;
+        }
+
+        // Parse the template definition IR (using chunk copy) before values so we can compute expected substitutions
+        const parsed_def = parseElementIR(chunk, &def_r, ctx.arena.allocator(), .def) catch |e| {
+            log.err("parse def IR failed: {s}", .{@errorName(e)});
+            return e;
+        };
+        // With the template parsed, compute expected substitution count and parse values accordingly
         var gpa = std.heap.GeneralPurposeAllocator(.{}){};
         defer _ = gpa.deinit();
         const alloc = gpa.allocator();
-        log.trace("values start at rec+0x{x}; rem={d}", .{ r.pos, r.rem() });
+        const expected = expectedValuesFromTemplate(parsed_def);
+        log.trace("values start at rec+0x{x}; rem={d} expected={d}", .{ r.pos, r.rem(), expected });
         if (ctx.verbose and r.rem() >= 8) {
             log.trace("values first8: {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2} {x:0>2}", .{
                 r.buf[r.pos + 0], r.buf[r.pos + 1], r.buf[r.pos + 2], r.buf[r.pos + 3],
                 r.buf[r.pos + 4], r.buf[r.pos + 5], r.buf[r.pos + 6], r.buf[r.pos + 7],
             });
         }
-        const values = parseTemplateInstanceValues(&r, alloc) catch |e| {
-            log.err("parse values failed: {s} rem={d}", .{ @errorName(e), r.rem() });
+        const values = parseTemplateInstanceValuesExpected(&r, alloc, expected) catch |e| {
+            log.err("parse values (expected) failed: {s} rem={d}", .{ @errorName(e), r.rem() });
             return e;
         };
         if (ctx.verbose) log.trace("parsed {d} values; rec_pos=0x{x} rem={d}", .{ values.len, r.pos, r.rem() });
@@ -616,21 +882,20 @@ fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w: an
         var vi: usize = 0;
         while (vi < values.len) : (vi += 1) vals_copy[vi] = values[vi];
         defer alloc.free(values);
+        // Fetch GUID from the chunk template header for cache keying
+        var guid: [16]u8 = undefined;
+        std.mem.copyForwards(u8, guid[0..], chunk[def_off_usize + 4 .. def_off_usize + 20]);
         const key: Context.DefKey = .{ .def_data_off = def_data_off, .guid = guid };
         const got = try ctx.cache.getOrPut(key);
         if (!got.found_existing) {
-            const parsed = parseElementIR(chunk, &def_r, ctx.arena.allocator(), .def) catch |e| {
-                log.err("parse def IR failed: {s} first4=0x{x} 0x{x} 0x{x} 0x{x}", .{ @errorName(e), def_r.buf[0], def_r.buf[1], def_r.buf[2], def_r.buf[3] });
-                return e;
-            };
-            got.value_ptr.* = parsed;
+            got.value_ptr.* = parsed_def;
             if (ctx.verbose) {
                 try logNameTrace(chunk, got.value_ptr.*.name, "tmpl root");
             }
         }
-        const cloned = try cloneElementTree(got.value_ptr.*, ctx.arena.allocator());
-        cloned.local_values = vals_copy;
-        renderElementIRXml(chunk, cloned, vals_copy, w, 0) catch |e| {
+        // Expand substitutions into the IR using the correct scope
+        const expanded = try expandElementWithValues(got.value_ptr.*, vals_copy, ctx.arena.allocator());
+        renderElementIRXml(chunk, expanded, &[_]TemplateValue{}, w, 0) catch |e| {
             log.err("render tmpl failed: {s}", .{@errorName(e)});
             return e;
         };
@@ -800,6 +1065,91 @@ const IR = struct {
     };
 };
 
+fn utf16FromAscii(alloc: std.mem.Allocator, ascii: []const u8) ![]u8 {
+    if (ascii.len == 0) return try alloc.alloc(u8, 0);
+    var buf = try alloc.alloc(u8, ascii.len * 2);
+    var i: usize = 0;
+    while (i < ascii.len) : (i += 1) {
+        buf[i * 2] = ascii[i];
+        buf[i * 2 + 1] = 0;
+    }
+    return buf;
+}
+
+fn cloneNodesReplacingSubstWithPolicy(policy: JoinerPolicy, alloc: std.mem.Allocator, nodes: []const IR.Node, values: []const TemplateValue) anyerror!std.ArrayList(IR.Node) {
+    var out = std.ArrayList(IR.Node).init(alloc);
+    var i: usize = 0;
+    while (i < nodes.len) : (i += 1) {
+        const nd = nodes[i];
+        switch (nd.tag) {
+            .Subst => {
+                if (nd.subst_id >= values.len) continue;
+                const vv = values[nd.subst_id];
+                if (nd.subst_optional and (vv.t == 0x00 or vv.data.len == 0)) {
+                    continue;
+                }
+                const is_arr = (nd.subst_vtype & 0x80) != 0;
+                const base: u8 = nd.subst_vtype & 0x7f;
+                if (is_arr) {
+                    var idx: usize = 0;
+                    var first = true;
+                    const sep_ascii = joinerFor(policy, base);
+                    while (arrayItemNext(base, vv.t, vv.data, &idx)) |seg| {
+                        if (!first and sep_ascii.len > 0) {
+                            const sep_utf16 = try utf16FromAscii(alloc, sep_ascii);
+                            try out.append(.{ .tag = .Text, .text_utf16 = sep_utf16, .text_num_chars = sep_ascii.len });
+                        }
+                        first = false;
+                        if (base == 0x01) {
+                            try out.append(.{ .tag = .Text, .text_utf16 = seg, .text_num_chars = seg.len / 2 });
+                        } else {
+                            try out.append(.{ .tag = .Value, .vtype = base, .vbytes = seg });
+                        }
+                    }
+                } else {
+                    if (base == 0x01) {
+                        // sized UTF-16 (possibly NUL-terminated)
+                        var num = vv.data.len / 2;
+                        if (num > 0 and std.mem.readInt(u16, vv.data[vv.data.len - 2 .. vv.data.len][0..2], .little) == 0) num -= 1;
+                        try out.append(.{ .tag = .Text, .text_utf16 = vv.data[0 .. num * 2], .text_num_chars = num });
+                    } else {
+                        try out.append(.{ .tag = .Value, .vtype = vv.t, .vbytes = vv.data, .pad_width = nd.pad_width });
+                    }
+                }
+            },
+            .Element => {
+                const child = nd.elem.?;
+                const eff_vals: []const TemplateValue = if (child.local_values.len > 0) child.local_values else values;
+                const repl = try expandElementWithValues(child, eff_vals, alloc);
+                try out.append(.{ .tag = .Element, .elem = repl });
+            },
+            else => try out.append(nd),
+        }
+    }
+    return out;
+}
+
+fn expandElementWithValues(src: *const IR.Element, values: []const TemplateValue, alloc: std.mem.Allocator) anyerror!*IR.Element {
+    const dst = try irNewElement(alloc, src.name);
+    // attributes
+    var ai: usize = 0;
+    while (ai < src.attrs.items.len) : (ai += 1) {
+        const a = src.attrs.items[ai];
+        const expanded = try cloneNodesReplacingSubstWithPolicy(.Attr, alloc, a.value.items, values);
+        try dst.attrs.append(.{ .name = a.name, .value = expanded });
+    }
+    // children
+    const expanded_children = try cloneNodesReplacingSubstWithPolicy(.Text, alloc, src.children.items, values);
+    var ci: usize = 0;
+    while (ci < expanded_children.items.len) : (ci += 1) try dst.children.append(expanded_children.items[ci]);
+    // flags (conservative)
+    dst.has_element_child = src.has_element_child;
+    dst.has_evtxml_value_in_tree = false;
+    dst.has_evtxml_subst_in_tree = false;
+    dst.has_attr_evtxml_value = false;
+    dst.has_attr_evtxml_subst = false;
+    return dst;
+}
 fn nameEqualsAscii(chunk: []const u8, name: IR.Name, ascii: []const u8) bool {
     switch (name) {
         .NameOffset => |off| {
@@ -834,10 +1184,11 @@ fn parseInlineNameFlexibleIR(r: *Reader) !IR.Name {
     return IR.Name{ .InlineUtf16 = .{ .bytes = nm.utf16, .num_chars = nm.num_chars } };
 }
 
-fn parseAttributeListIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source) !std.ArrayList(IR.Attr) {
+fn parseAttributeListIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, max_end: usize) !std.ArrayList(IR.Attr) {
     const list_size = try r.readU32le();
     const list_start = r.pos;
     const list_end = list_start + list_size;
+    if (list_end > max_end or list_end < list_start) return BinXmlError.UnexpectedEof;
     var out = std.ArrayList(IR.Attr).init(allocator);
     while (r.pos < list_end and r.rem() > 0 and isToken(r.buf[r.pos], TOK_ATTRIBUTE)) {
         _ = try r.readU8();
@@ -851,59 +1202,71 @@ fn parseAttributeListIR(chunk: []const u8, r: *Reader, allocator: std.mem.Alloca
                 name = try parseInlineNameFlexibleIR(r);
             },
         }
+        if (log.enabled(.trace)) {
+            try logNameTrace(chunk, name, "attr");
+        }
         // Collect attribute value tokens into IR
         var tokens = std.ArrayList(IR.Node).init(allocator);
-        try collectValueTokensIRWithCtx(chunk, r, &tokens, src);
+        try collectValueTokensIRWithCtx(chunk, r, &tokens, src, list_end);
         try out.append(.{ .name = name, .value = tokens });
     }
     if (r.pos != list_end) r.pos = list_end;
     return out;
 }
 
-fn collectValueTokensIRWithCtx(_: []const u8, r: *Reader, out: *std.ArrayList(IR.Node), src: Source) !void {
+fn collectValueTokensIRWithCtx(_: []const u8, r: *Reader, out: *std.ArrayList(IR.Node), src: Source, end_pos: usize) !void {
     var want_pad2: bool = false;
     while (true) {
-        if (r.rem() == 0) break;
+        if (r.rem() == 0 or r.pos >= end_pos) break;
         const pk = r.buf[r.pos];
+        if (log.enabled(.trace)) log.trace("valtok pk=0x{x} at 0x{x}", .{ pk, r.pos });
         if (isToken(pk, TOK_ATTRIBUTE) or isToken(pk, TOK_CLOSE_START) or isToken(pk, TOK_CLOSE_EMPTY)) break;
         if (isToken(pk, TOK_VALUE)) {
             _ = try r.readU8();
             const vtype = try r.readU8();
+            if (log.enabled(.trace)) log.trace("  vtype=0x{x}", .{vtype});
             if ((vtype & 0x7f) == 0x21) {
-                if (r.rem() < 2) return BinXmlError.UnexpectedEof;
+                if (r.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
                 const blen = try r.readU16le();
-                if (r.rem() < blen) return BinXmlError.UnexpectedEof;
+                if (r.pos + @as(usize, blen) > end_pos) return BinXmlError.UnexpectedEof;
                 // Store as Value node with vtype=0x21 and bytes payload; will be parsed and spliced at resolution/render time
                 try out.append(.{ .tag = .Value, .vtype = vtype, .vbytes = r.buf[r.pos .. r.pos + blen] });
                 r.pos += blen;
             } else if (vtype == 0x01) {
-                const text = try readUnicodeTextString(r);
-                if (text.len == 2 and text[0] == 0x2B and text[1] == 0x00) {
+                const text = try readUnicodeTextStringBounded(r, end_pos);
+                if (ENABLE_PLUS_PAD and text.len == 2 and text[0] == 0x2B and text[1] == 0x00) {
                     want_pad2 = true;
                     continue;
                 }
                 try out.append(.{ .tag = .Text, .text_utf16 = text, .text_num_chars = text.len / 2 });
             } else if (vtype == 0x02) {
                 // Some manifests use ANSI string in value text; treat like 0x0e (len-prefixed) but decode as CP-1252 during rendering
-                const payload = try r.readLenPrefixedBytes16();
+                const payload = try readLenPrefixedBytes16Bounded(r, end_pos);
                 try out.append(.{ .tag = .Value, .vtype = vtype, .vbytes = payload, .pad_width = if (want_pad2) 2 else 0 });
                 want_pad2 = false;
             } else if (valueTypeFixedSize(vtype)) |sz| {
-                const payload = try readFixedBytes(r, sz);
+                const payload = try readFixedBytesBounded(r, sz, end_pos);
                 try out.append(.{ .tag = .Value, .vtype = vtype, .vbytes = payload, .pad_width = if (want_pad2) 2 else 0 });
                 want_pad2 = false;
             } else if (vtype == 0x0e) {
-                const payload = try r.readLenPrefixedBytes16();
+                const payload = try readLenPrefixedBytes16Bounded(r, end_pos);
                 try out.append(.{ .tag = .Value, .vtype = vtype, .vbytes = payload, .pad_width = if (want_pad2) 2 else 0 });
                 want_pad2 = false;
             } else if (vtype == 0x13) {
-                const payload = try r.readSidBytes();
+                const payload = try readSidBytesBounded(r, end_pos);
                 try out.append(.{ .tag = .Value, .vtype = vtype, .vbytes = payload });
-            } else return BinXmlError.BadToken;
+            } else {
+                log.err("unknown value vtype=0x{x} at pos=0x{x} src={s}", .{ vtype, r.pos, switch (src) {
+                    .rec => "rec",
+                    .def => "def",
+                } });
+                return BinXmlError.BadToken;
+            }
             continue;
         } else if (isToken(pk, TOK_NORMAL_SUBST) or isToken(pk, TOK_OPTIONAL_SUBST)) {
             const optional = isToken(pk, TOK_OPTIONAL_SUBST);
             _ = try r.readU8();
+            if (r.pos + 2 + 1 > end_pos) return BinXmlError.UnexpectedEof;
             const id = try r.readU16le();
             const vtype = try r.readU8();
             try out.append(.{ .tag = .Subst, .subst_id = id, .subst_vtype = vtype, .subst_optional = optional, .pad_width = if (want_pad2) 2 else 0 });
@@ -911,6 +1274,7 @@ fn collectValueTokensIRWithCtx(_: []const u8, r: *Reader, out: *std.ArrayList(IR
             continue;
         } else if (isToken(pk, TOK_CHARREF)) {
             _ = try r.readU8();
+            if (r.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
             const v = try r.readU16le();
             try out.append(.{ .tag = .CharRef, .charref_value = v });
             continue;
@@ -919,6 +1283,7 @@ fn collectValueTokensIRWithCtx(_: []const u8, r: *Reader, out: *std.ArrayList(IR
             var nm: IR.Name = undefined;
             switch (src) {
                 .rec => {
+                    if (r.pos + 4 > end_pos) return BinXmlError.UnexpectedEof;
                     const ent_name_off = try r.readU32le();
                     nm = IR.Name{ .NameOffset = ent_name_off };
                 },
@@ -930,21 +1295,24 @@ fn collectValueTokensIRWithCtx(_: []const u8, r: *Reader, out: *std.ArrayList(IR
             continue;
         } else if (isToken(pk, TOK_CDATA)) {
             _ = try r.readU8();
-            const data = try readUnicodeTextString(r);
+            const data = try readUnicodeTextStringBounded(r, end_pos);
             try out.append(.{ .tag = .CData, .text_utf16 = data, .text_num_chars = data.len / 2 });
             continue;
         } else if (isToken(pk, TOK_PITARGET)) {
             _ = try r.readU8();
             var nm: IR.Name = undefined;
             switch (src) {
-                .rec => nm = IR.Name{ .NameOffset = try r.readU32le() },
+                .rec => {
+                    if (r.pos + 4 > end_pos) return BinXmlError.UnexpectedEof;
+                    nm = IR.Name{ .NameOffset = try r.readU32le() };
+                },
                 .def => nm = try parseInlineNameFlexibleIR(r),
             }
             try out.append(.{ .tag = .PITarget, .pi_target = nm });
             continue;
         } else if (isToken(pk, TOK_PIDATA)) {
             _ = try r.readU8();
-            const data = try readUnicodeTextString(r);
+            const data = try readUnicodeTextStringBounded(r, end_pos);
             try out.append(.{ .tag = .PIData, .text_utf16 = data, .text_num_chars = data.len / 2 });
             continue;
         } else break;
@@ -960,9 +1328,15 @@ fn updateHintsFromNodes(el: *IR.Element, nodes: []const IR.Node, include_attr: b
                 el.has_evtxml_value_in_tree = true;
                 if (include_attr) el.has_attr_evtxml_value = true;
             },
-            .Subst => if ((nd.subst_vtype & 0x7f) == 0x21) {
-                el.has_evtxml_subst_in_tree = true;
-                if (include_attr) el.has_attr_evtxml_subst = true;
+            .Subst => {
+                const base = nd.subst_vtype & 0x7f;
+                const is_arr = (nd.subst_vtype & 0x80) != 0;
+                if (base == 0x21) {
+                    el.has_evtxml_subst_in_tree = true;
+                    if (include_attr) el.has_attr_evtxml_subst = true;
+                }
+                // If an array substitution appears only inside attributes, we will warn later at render time
+                _ = is_arr;
             },
             else => {},
         }
@@ -993,6 +1367,7 @@ fn parseElementIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, s
             name = IR.Name{ .NameOffset = try r.readU32le() };
         },
         .def => {
+            // Attempt with dependency_identifier first; rollback if resulting window is invalid
             const save0 = r.pos;
             var parsed_with_dep = false;
             if (r.rem() >= 2 + 4) {
@@ -1000,10 +1375,16 @@ fn parseElementIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, s
                 if (r.readU16le()) |_| {
                     if (r.readU32le()) |dsz| {
                         if (parseInlineNameFlexibleIR(r)) |nm| {
-                            data_size = dsz;
-                            header_len = 1 + 2 + 4;
-                            name = nm;
-                            parsed_with_dep = true;
+                            const hdr_len_try: usize = 1 + 2 + 4;
+                            const end_try = element_start + hdr_len_try + @as(usize, dsz);
+                            if (end_try <= r.buf.len) {
+                                data_size = dsz;
+                                header_len = hdr_len_try;
+                                name = nm;
+                                parsed_with_dep = true;
+                            } else {
+                                r.pos = save1;
+                            }
                         } else |_| {
                             r.pos = save1;
                         }
@@ -1023,11 +1404,11 @@ fn parseElementIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, s
             if (log.enabled(.trace)) log.trace("def hdr: data_size={d} header_len={d} pos=0x{x}", .{ data_size, header_len, r.pos });
         },
     }
-    var element_end = element_start + header_len + @as(usize, data_size);
-    if (element_end > r.buf.len) element_end = r.buf.len;
+    const element_end = element_start + header_len + @as(usize, data_size);
+    if (element_end > r.buf.len or element_end < element_start) return BinXmlError.UnexpectedEof;
     const el = try irNewElement(allocator, name);
     if (hasMore(start, TOK_OPEN_START)) {
-        el.attrs = try parseAttributeListIR(chunk, r, allocator, src);
+        el.attrs = try parseAttributeListIR(chunk, r, allocator, src, element_end);
         // hints from attributes
         var ai_h: usize = 0;
         while (ai_h < el.attrs.items.len) : (ai_h += 1) {
@@ -1039,14 +1420,19 @@ fn parseElementIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, s
     }
     if (r.pos >= element_end or r.rem() == 0) return el;
     const nxt = try r.readU8();
+    if (log.enabled(.trace)) log.trace("parseElementIR nxt=0x{x} pos=0x{x} end=0x{x}", .{ nxt, r.pos, element_end });
     if (isToken(nxt, TOK_CLOSE_EMPTY)) {
         return el;
     }
-    if (!isToken(nxt, TOK_CLOSE_START)) return BinXmlError.BadToken;
+    if (!isToken(nxt, TOK_CLOSE_START)) {
+        log.err("expected CloseStart, got 0x{x} at 0x{x}", .{ nxt, r.pos - 1 });
+        return BinXmlError.BadToken;
+    }
     // content
     while (true) {
         if (r.pos >= element_end or r.rem() == 0) break;
         const t = r.buf[r.pos];
+        if (log.enabled(.trace)) log.trace("content token 0x{x} at 0x{x}/0x{x}", .{ t, r.pos, element_end });
         if (isToken(t, TOK_END_ELEMENT)) {
             _ = try r.readU8();
             break;
@@ -1057,7 +1443,8 @@ fn parseElementIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, s
             el.has_element_child = true;
         } else if (isToken(t, TOK_VALUE) or isToken(t, TOK_NORMAL_SUBST) or isToken(t, TOK_OPTIONAL_SUBST) or isToken(t, TOK_CDATA) or isToken(t, TOK_CHARREF) or isToken(t, TOK_ENTITYREF) or isToken(t, TOK_PITARGET) or isToken(t, TOK_PIDATA)) {
             var seq = std.ArrayList(IR.Node).init(allocator);
-            try collectValueTokensIRWithCtx(chunk, r, &seq, src);
+            try collectValueTokensIRWithCtx(chunk, r, &seq, src, element_end);
+            if (r.pos > element_end) r.pos = element_end;
             // append tokens into children list as individual nodes
             for (seq.items) |nd| try el.children.append(nd);
             // update hints from these tokens
@@ -1108,91 +1495,7 @@ fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, values: []co
             if (nd.subst_id >= values.len) continue;
             const vv = values[nd.subst_id];
             if (nd.subst_optional and (vv.t == 0x00 or vv.data.len == 0)) continue;
-            if ((vv.t & 0x7f) == 0x21) {
-                // Do not inject markup into attributes; skip textualization for 0x21 here.
-                continue;
-            }
-            // Array handling driven by declared substitution vtype
-            if ((nd.subst_vtype & 0x80) != 0) {
-                const base = nd.subst_vtype & 0x7f;
-                var first = true;
-                switch (base) {
-                    0x01 => {
-                        var i: usize = 0;
-                        while (i <= vv.data.len) {
-                            const start = i;
-                            var end = i;
-                            while (end + 1 < vv.data.len) : (end += 2) {
-                                const u = std.mem.readInt(u16, vv.data[end .. end + 2][0..2], .little);
-                                if (u == 0) break;
-                            }
-                            if (!first) try aw.writeByte(' ') else first = false;
-                            if (end > start) try writeUtf16LeXmlEscaped(aw, vv.data[start..end], (end - start) / 2);
-                            if (end + 1 < vv.data.len) i = end + 2 else break;
-                        }
-                        continue;
-                    },
-                    0x02 => {
-                        // ANSI string array (NUL-terminated per item)
-                        var i: usize = 0;
-                        while (i <= vv.data.len) {
-                            const start = i;
-                            var end = i;
-                            while (end < vv.data.len and vv.data[end] != 0) : (end += 1) {}
-                            if (!first) try aw.writeByte(' ') else first = false;
-                            if (end > start) try writeAnsiCp1252Escaped(aw, vv.data[start..end]);
-                            if (end < vv.data.len and vv.data[end] == 0) i = end + 1 else break;
-                        }
-                        continue;
-                    },
-                    0x13 => {
-                        // SID array – items are variable-sized (8 + subcount*4)
-                        var i: usize = 0;
-                        while (i + 8 <= vv.data.len) {
-                            const subc: usize = vv.data[i + 1];
-                            const need: usize = 8 + subc * 4;
-                            if (i + need > vv.data.len) break;
-                            if (!first) try aw.writeByte(' ') else first = false;
-                            try writeValueXml(aw, 0x13, vv.data[i .. i + need]);
-                            i += need;
-                        }
-                        continue;
-                    },
-                    0x10 => {
-                        // size_t array – enforce backing 0x94/0x95 per spec
-                        var elem_sz: usize = 0;
-                        if (vv.t == 0x94) elem_sz = 4 else if (vv.t == 0x95) elem_sz = 8 else return BinXmlError.BadToken;
-                        var i: usize = 0;
-                        while (i + elem_sz <= vv.data.len) : (i += elem_sz) {
-                            if (!first) try aw.writeByte(' ') else first = false;
-                            try writeValueXml(aw, 0x10, vv.data[i .. i + elem_sz]);
-                        }
-                        continue;
-                    },
-                    else => {
-                        const elem_sz = valueTypeFixedSize(base) orelse 0;
-                        if (elem_sz > 0 and vv.data.len % elem_sz == 0) {
-                            var i: usize = 0;
-                            while (i + elem_sz <= vv.data.len) : (i += elem_sz) {
-                                if (!first) try aw.writeByte(' ') else first = false;
-                                try writeValueXml(aw, base, vv.data[i .. i + elem_sz]);
-                            }
-                            continue;
-                        }
-                    },
-                }
-            }
-            if (nd.pad_width > 0 and (vv.t == 0x07 or vv.t == 0x08 or vv.t == 0x09 or vv.t == 0x0a)) {
-                switch (vv.t) {
-                    0x07 => try writePaddedInt(aw, i32, std.mem.readInt(i32, vv.data[0..4], .little), nd.pad_width),
-                    0x08 => try writePaddedInt(aw, u32, std.mem.readInt(u32, vv.data[0..4], .little), nd.pad_width),
-                    0x09 => try writePaddedInt(aw, i64, std.mem.readInt(i64, vv.data[0..8], .little), nd.pad_width),
-                    0x0a => try writePaddedInt(aw, u64, std.mem.readInt(u64, vv.data[0..8], .little), nd.pad_width),
-                    else => try writeValueXml(aw, vv.t, vv.data),
-                }
-            } else {
-                try writeValueXml(aw, vv.t, vv.data);
-            }
+            try writeSubstAsText(aw, .Attr, nd, vv);
         },
         .CharRef => try aw.print("&#{d};", .{nd.charref_value}),
         .EntityRef => {
@@ -1260,66 +1563,7 @@ fn renderTextContentFromIR(chunk: []const u8, nodes: []const IR.Node, values: []
                 if (nd.subst_id >= values.len) continue;
                 const vv = values[nd.subst_id];
                 if (nd.subst_optional and (vv.t == 0x00 or vv.data.len == 0)) continue;
-                if ((vv.t & 0x7f) == 0x21) {
-                    // nested evt xml: not part of inline text
-                    continue;
-                }
-                // Array handling
-                if ((nd.subst_vtype & 0x80) != 0) {
-                    const base = nd.subst_vtype & 0x7f;
-                    if (base == 0x01) {
-                        try writeUnicodeStringArrayCommaSeparated(w, vv.data);
-                        continue;
-                    } else if (base == 0x02) {
-                        // ANSI string array: comma-separated
-                        var first = true;
-                        var idx2: usize = 0;
-                        while (idx2 <= vv.data.len) {
-                            const start = idx2;
-                            var end = idx2;
-                            while (end < vv.data.len and vv.data[end] != 0) : (end += 1) {}
-                            if (!first) try w.writeAll(",") else first = false;
-                            if (end > start) try writeAnsiCp1252Escaped(w, vv.data[start..end]);
-                            if (end < vv.data.len and vv.data[end] == 0) idx2 = end + 1 else break;
-                        }
-                        continue;
-                    } else if (base == 0x13) {
-                        // SID array: space-separated
-                        var first = true;
-                        var idx2: usize = 0;
-                        while (idx2 + 8 <= vv.data.len) {
-                            const subc: usize = vv.data[idx2 + 1];
-                            const need: usize = 8 + subc * 4;
-                            if (idx2 + need > vv.data.len) break;
-                            if (!first) try w.writeByte(' ') else first = false;
-                            try writeValueXml(w, 0x13, vv.data[idx2 .. idx2 + need]);
-                            idx2 += need;
-                        }
-                        continue;
-                    } else if (base == 0x10) {
-                        // size_t array: require 0x94/0x95 backing; space-separated
-                        var elem_sz: usize = 0;
-                        if (vv.t == 0x94) elem_sz = 4 else if (vv.t == 0x95) elem_sz = 8 else return BinXmlError.BadToken;
-                        var first = true;
-                        var idx2: usize = 0;
-                        while (idx2 + elem_sz <= vv.data.len) : (idx2 += elem_sz) {
-                            if (!first) try w.writeByte(' ') else first = false;
-                            try writeValueXml(w, 0x10, vv.data[idx2 .. idx2 + elem_sz]);
-                        }
-                        continue;
-                    }
-                }
-                if (nd.pad_width > 0 and (vv.t == 0x07 or vv.t == 0x08 or vv.t == 0x09 or vv.t == 0x0a)) {
-                    switch (vv.t) {
-                        0x07 => try writePaddedInt(w, i32, std.mem.readInt(i32, vv.data[0..4], .little), nd.pad_width),
-                        0x08 => try writePaddedInt(w, u32, std.mem.readInt(u32, vv.data[0..4], .little), nd.pad_width),
-                        0x09 => try writePaddedInt(w, i64, std.mem.readInt(i64, vv.data[0..8], .little), nd.pad_width),
-                        0x0a => try writePaddedInt(w, u64, std.mem.readInt(u64, vv.data[0..8], .little), nd.pad_width),
-                        else => try writeValueXml(w, vv.t, vv.data),
-                    }
-                } else {
-                    try writeValueXml(w, vv.t, vv.data);
-                }
+                try writeSubstAsText(w, .Text, nd, vv);
             },
             .CharRef => try w.print("&#{d};", .{nd.charref_value}),
             .EntityRef => {
@@ -1358,7 +1602,8 @@ fn renderEvtXmlPayloadAsChildren(chunk: []const u8, data: []const u8, alloc: std
     while (r.rem() > 0) {
         const pk = r.buf[r.pos];
         if (isToken(pk, TOK_OPEN_START)) {
-            const child = try parseElementIR(chunk, &r, alloc, .def);
+            // Allow offset-based names inside payloads (treat like record context)
+            const child = try parseElementIR(chunk, &r, alloc, .rec);
             try renderElementIRXml(chunk, child, values, w, indent);
         } else break;
     }
@@ -1375,19 +1620,21 @@ fn appendEvtXmlPayloadChildrenIR(chunk: []const u8, data: []const u8, alloc: std
     }
     while (r.rem() > 0) {
         const pk = r.buf[r.pos];
-        if (isToken(pk, TOK_OPEN_START)) {
-            const child = try parseElementIR(chunk, &r, alloc, .def);
-            try parent.children.append(.{ .tag = .Element, .elem = child });
-        } else if (pk == TOK_TEMPLATE_INSTANCE) {
+        if (pk == TOK_TEMPLATE_INSTANCE) {
             _ = try r.readU8();
-            if (r.rem() < 1 + 4 + 4 + 4 + 16 + 4) break;
+            if (r.rem() < 1 + 4 + 4) break;
             _ = try r.readU8(); // unknown
             _ = try r.readU32le(); // template id
             const def_data_off = try r.readU32le();
-            _ = try r.readU32le(); // next def off
-            if (r.rem() < 16) break;
-            _ = try r.readGuid(); // GUID
-            const def_size = try r.readU32le();
+            // Skip any inline cached template definition blocks deterministically
+            while (r.rem() >= 28) {
+                const data_size_inline = std.mem.readInt(u32, r.buf[r.pos + 20 .. r.pos + 24][0..4], .little);
+                const block_end_inline = r.pos + 24 + @as(usize, data_size_inline);
+                if (block_end_inline <= r.buf.len and r.buf[r.pos + 24] == TOK_FRAGMENT_HEADER) {
+                    r.pos = block_end_inline;
+                } else break;
+            }
+            // Use chunk-stored definition to parse expected substitutions
             const def_off_usize: usize = @intCast(def_data_off);
             if (def_off_usize + 24 > chunk.len) break;
             const td_data_size = std.mem.readInt(u32, chunk[def_off_usize + 20 .. def_off_usize + 24][0..4], .little);
@@ -1401,15 +1648,11 @@ fn appendEvtXmlPayloadChildrenIR(chunk: []const u8, data: []const u8, alloc: std
                 _ = try def_r.readU8();
                 _ = try def_r.readU8();
             }
-            if (r.rem() >= def_size and (r.buf[r.pos] == TOK_FRAGMENT_HEADER or r.buf[r.pos] == TOK_OPEN_START)) {
-                r.pos += @as(usize, def_size);
-            }
-            // Parse values that follow the template header
-            const vals = try parseTemplateInstanceValues(&r, alloc);
-            // Parse definition into IR and attach local_values
-            const child = try parseElementIR(chunk, &def_r, alloc, .def);
-            child.local_values = vals;
-            try parent.children.append(.{ .tag = .Element, .elem = child });
+            const child_def = try parseElementIR(chunk, &def_r, alloc, .def);
+            const expected = expectedValuesFromTemplate(child_def);
+            const vals = try parseTemplateInstanceValuesExpected(&r, alloc, expected);
+            const expanded_child = try expandElementWithValues(child_def, vals, alloc);
+            try parent.children.append(.{ .tag = .Element, .elem = expanded_child });
         } else break;
     }
 }
@@ -1423,6 +1666,7 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
     const has_elem_child = el.has_element_child;
     const has_evtxml_subst = el.has_evtxml_subst_in_tree;
     const has_evtxml_value = el.has_evtxml_value_in_tree;
+    // Drop debug-only Data tracing (kept minimal logging elsewhere)
     // Early: drop element if its only content is an optional substitution resolving to NULL
     if (!has_elem_child and el.children.items.len == 1) {
         const only = el.children.items[0];
@@ -1432,11 +1676,17 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
         }
     }
     // Early: array substitution repetition for sole content
-    if (!has_elem_child and !has_evtxml_subst and !has_evtxml_value and el.children.items.len == 1) {
+    if (!has_elem_child and !has_evtxml_subst and !has_evtxml_value and el.children.items.len == 1 and !nameEqualsAscii(chunk, el.name, "Data")) {
         const c0 = el.children.items[0];
         if (c0.tag == .Subst and (c0.subst_vtype & 0x80) != 0 and c0.subst_id < eff_values.len) {
             const vv = eff_values[c0.subst_id];
             const base: u8 = c0.subst_vtype & 0x7f;
+            if (base == 0x21) {
+                log.warn("array of 0x21 not supported; skipping repetition", .{});
+            } else if (base == 0x10 and !(vv.t == 0x94 or vv.t == 0x95)) {
+                log.warn("size array backing mismatch in element repetition: got 0x{x}", .{vv.t});
+                return;
+            }
             // Helper lambdas
             const write_open = struct {
                 fn go(chunk_: []const u8, el_: *const IR.Element, w_: anytype, indent_spaces: usize) !void {
@@ -1535,11 +1785,38 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
         }
     }
 
+    // Debug: trace EventData children composition
+    if (log.enabled(.trace)) {
+        if (nameEqualsAscii(chunk, el.name, "EventData")) {
+            log.trace("EventData has {d} children, attr_evtxml={any}", .{ el.children.items.len, el.has_attr_evtxml_value });
+            var di: usize = 0;
+            while (di < el.children.items.len) : (di += 1) {
+                const nd = el.children.items[di];
+                switch (nd.tag) {
+                    .Element => {
+                        if (nd.elem) |child| {
+                            if (nameEqualsAscii(chunk, child.name, "Data")) {
+                                log.trace("  child: <Data>", .{});
+                            }
+                            if (nameEqualsAscii(chunk, child.name, "Binary")) {
+                                log.trace("  child: <Binary>", .{});
+                            }
+                        }
+                    },
+                    .Subst => log.trace("  text subst id={d} vtype=0x{x}", .{ nd.subst_id, nd.subst_vtype }),
+                    .Value => log.trace("  text value vtype=0x{x} len={d}", .{ nd.vtype, nd.vbytes.len }),
+                    else => {},
+                }
+            }
+        }
+    }
+
     // Write opening tag and attributes (after early structural decisions)
     var i: usize = 0;
     while (i < indent) : (i += 1) try w.writeByte(' ');
     try w.writeByte('<');
     try writeNameXml(chunk, el.name, w);
+
     var ai: usize = 0;
     while (ai < el.attrs.items.len) : (ai += 1) {
         const a = el.attrs.items[ai];
@@ -1569,7 +1846,11 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
         try w.writeByte('"');
     }
     if (el.children.items.len == 0) {
-        try w.writeAll("/>");
+        // Emit explicit open/close for elements that can be compared with rust output (<Binary></Binary>)
+        try w.writeByte('>');
+        try w.writeAll("</");
+        try writeNameXml(chunk, el.name, w);
+        try w.writeByte('>');
         try w.writeByte('\n');
         return;
     }
@@ -1601,6 +1882,7 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
             }
         }
     }
+
     // First render textual tokens (if any) as indented separate line(s)
     var idx: usize = 0;
     while (idx < el.children.items.len) : (idx += 1) {

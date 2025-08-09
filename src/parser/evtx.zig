@@ -86,7 +86,7 @@ pub const EvtxParser = struct {
                 out.writeRecord(view) catch |e| {
                     failed += 1;
                     log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
-                    continue;
+                    continue; // keep going to inspect later records and compare outputs
                 };
                 emitted += 1;
                 if (self.opts.max_records != 0 and emitted >= self.opts.max_records) {
