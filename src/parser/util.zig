@@ -41,7 +41,7 @@ pub fn jsonEscapeUtf8(w: anytype, s: []const u8) !void {
     }
 }
 
-pub fn writeUtf16LeXmlEscaped(w: anytype, utf16le: []const u8, num_chars: usize) !void {
+fn writeUtf16LeWithEscaper(w: anytype, utf16le: []const u8, num_chars: usize, comptime escape: anytype) !void {
     var i: usize = 0;
     while (i < num_chars and (i * 2 + 1) < utf16le.len) : (i += 1) {
         const lo = @as(u16, utf16le[i * 2]) | (@as(u16, utf16le[i * 2 + 1]) << 8);
@@ -60,67 +60,30 @@ pub fn writeUtf16LeXmlEscaped(w: anytype, utf16le: []const u8, num_chars: usize)
         } else if (lo >= 0xDC00 and lo <= 0xDFFF) {
             continue;
         }
-
         var buf: [4]u8 = undefined;
         const len = std.unicode.utf8Encode(codepoint, &buf) catch 0;
         if (len == 0) continue;
-        try writeXmlEscaped(w, buf[0..len]);
+        try escape(w, buf[0..len]);
     }
+}
+
+pub fn writeUtf16LeXmlEscaped(w: anytype, utf16le: []const u8, num_chars: usize) !void {
+    return writeUtf16LeWithEscaper(w, utf16le, num_chars, writeXmlEscaped);
 }
 
 // Write UTF-16LE input as JSON-escaped UTF-8
 pub fn writeUtf16LeJsonEscaped(w: anytype, utf16le: []const u8, num_chars: usize) !void {
-    var i: usize = 0;
-    while (i < num_chars and (i * 2 + 1) < utf16le.len) : (i += 1) {
-        const lo = @as(u16, utf16le[i * 2]) | (@as(u16, utf16le[i * 2 + 1]) << 8);
-        var codepoint: u21 = lo;
-        if (lo >= 0xD800 and lo <= 0xDBFF) {
-            if (i + 1 >= num_chars or (i + 1) * 2 + 1 >= utf16le.len) break;
-            const lo2 = @as(u16, utf16le[(i + 1) * 2]) | (@as(u16, utf16le[(i + 1) * 2 + 1]) << 8);
-            if (lo2 >= 0xDC00 and lo2 <= 0xDFFF) {
-                const high_ten = lo - 0xD800;
-                const low_ten = lo2 - 0xDC00;
-                codepoint = 0x10000 + (@as(u21, high_ten) << 10) + @as(u21, low_ten);
-                i += 1;
-            } else {
-                continue;
-            }
-        } else if (lo >= 0xDC00 and lo <= 0xDFFF) {
-            continue;
-        }
-
-        var buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(codepoint, &buf) catch 0;
-        if (len == 0) continue;
-        try jsonEscapeUtf8(w, buf[0..len]);
-    }
+    return writeUtf16LeWithEscaper(w, utf16le, num_chars, jsonEscapeUtf8);
 }
 
 // Write UTF-16LE input as raw UTF-8 (no XML escaping). Suitable for CDATA bodies.
 pub fn writeUtf16LeRawToUtf8(w: anytype, utf16le: []const u8, num_chars: usize) !void {
-    var i: usize = 0;
-    while (i < num_chars and (i * 2 + 1) < utf16le.len) : (i += 1) {
-        const lo = @as(u16, utf16le[i * 2]) | (@as(u16, utf16le[i * 2 + 1]) << 8);
-        var codepoint: u21 = lo;
-        if (lo >= 0xD800 and lo <= 0xDBFF) {
-            if (i + 1 >= num_chars or (i + 1) * 2 + 1 >= utf16le.len) break;
-            const lo2 = @as(u16, utf16le[(i + 1) * 2]) | (@as(u16, utf16le[(i + 1) * 2 + 1]) << 8);
-            if (lo2 >= 0xDC00 and lo2 <= 0xDFFF) {
-                const high_ten = lo - 0xD800;
-                const low_ten = lo2 - 0xDC00;
-                codepoint = 0x10000 + (@as(u21, high_ten) << 10) + @as(u21, low_ten);
-                i += 1;
-            } else {
-                continue;
-            }
-        } else if (lo >= 0xDC00 and lo <= 0xDFFF) {
-            continue;
+    const Raw = struct {
+        pub fn apply(ww: anytype, s: []const u8) !void {
+            try ww.writeAll(s);
         }
-        var buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(codepoint, &buf) catch 0;
-        if (len == 0) continue;
-        try w.writeAll(buf[0..len]);
-    }
+    };
+    return writeUtf16LeWithEscaper(w, utf16le, num_chars, Raw.apply);
 }
 
 pub fn cp1252ToCodepoint(b: u8) u21 {
