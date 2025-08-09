@@ -956,25 +956,25 @@ fn collectValueTokensIRWithCtx(chunk: []const u8, r: *Reader, out: *std.ArrayLis
         } else if (isToken(pk, TOK_ENTITYREF)) {
             _ = try r.readU8();
             var nm: IR.Name = undefined;
-            switch (src) {
-                .rec => {
-                    if (r.pos + 4 > end_pos) return BinXmlError.UnexpectedEof;
-                    const ent_name_off = try r.readU32le();
-                    const off_usize: usize = @intCast(ent_name_off);
-                    if (off_usize + 8 > chunk.len) return BinXmlError.UnexpectedEof;
-                    const num_chars = std.mem.readInt(u16, chunk[off_usize + 6 .. off_usize + 8][0..2], .little);
-                    const str_start = off_usize + 8;
-                    const byte_len = @as(usize, num_chars) * 2;
-                    if (str_start + byte_len > chunk.len) return BinXmlError.UnexpectedEof;
-                    var take_chars = num_chars;
-                    if (byte_len >= 2) {
-                        const last = std.mem.readInt(u16, chunk[str_start + byte_len - 2 .. str_start + byte_len][0..2], .little);
-                        if (last == 0 and take_chars > 0) take_chars -= 1;
-                    }
-                    const buf = try allocator.alloc(u8, take_chars * 2);
-                    @memcpy(buf, chunk[str_start .. str_start + take_chars * 2]);
-                    nm = IR.Name{ .InlineUtf16 = .{ .bytes = buf, .num_chars = take_chars } };
-                },
+        switch (src) {
+            .rec => {
+                if (r.pos + 4 > end_pos) return BinXmlError.UnexpectedEof;
+                const ent_name_off = try r.readU32le();
+                const off_usize: usize = @intCast(ent_name_off);
+                if (off_usize + 8 > chunk.len) return BinXmlError.UnexpectedEof;
+                const num_chars = std.mem.readInt(u16, chunk[off_usize + 6 .. off_usize + 8][0..2], .little);
+                const str_start = off_usize + 8;
+                const byte_len = @as(usize, num_chars) * 2;
+                if (str_start + byte_len > chunk.len) return BinXmlError.UnexpectedEof;
+                var take_chars = num_chars;
+                if (byte_len >= 2) {
+                    const last = std.mem.readInt(u16, chunk[str_start + byte_len - 2 .. str_start + byte_len][0..2], .little);
+                    if (last == 0 and take_chars > 0) take_chars -= 1;
+                }
+                const buf = try allocator.alloc(u8, take_chars * 2);
+                @memcpy(buf, chunk[str_start .. str_start + take_chars * 2]);
+                nm = IR.Name{ .InlineUtf16 = .{ .bytes = buf, .num_chars = take_chars } };
+            },
                 .def => {
                     nm = try parseDefNameIR(chunk, r, allocator, chunk_base);
                 },
