@@ -121,28 +121,25 @@ pub fn cp1252ToCodepoint(b: u8) u21 {
     };
 }
 
-pub fn writeAnsiCp1252Escaped(w: anytype, bytes: []const u8) !void {
-    // Best-effort CP-1252 decode to UTF-8 then XML-escape
+fn writeAnsiCp1252WithEscaper(w: anytype, bytes: []const u8, comptime escape: anytype) !void {
     var out_buf: [8]u8 = undefined;
     var i: usize = 0;
     while (i < bytes.len) : (i += 1) {
         const codepoint: u21 = cp1252ToCodepoint(bytes[i]);
         const n = std.unicode.utf8Encode(codepoint, &out_buf) catch 0;
         if (n == 0) continue;
-        try writeXmlEscaped(w, out_buf[0..n]);
+        try escape(w, out_buf[0..n]);
     }
+}
+
+pub fn writeAnsiCp1252Escaped(w: anytype, bytes: []const u8) !void {
+    // Best-effort CP-1252 decode to UTF-8 then XML-escape
+    return writeAnsiCp1252WithEscaper(w, bytes, writeXmlEscaped);
 }
 
 // CP-1252 decode to UTF-8 then JSON-escape
 pub fn writeAnsiCp1252JsonEscaped(w: anytype, bytes: []const u8) !void {
-    var out_buf: [8]u8 = undefined;
-    var i: usize = 0;
-    while (i < bytes.len) : (i += 1) {
-        const codepoint: u21 = cp1252ToCodepoint(bytes[i]);
-        const n = std.unicode.utf8Encode(codepoint, &out_buf) catch 0;
-        if (n == 0) continue;
-        try jsonEscapeUtf8(w, out_buf[0..n]);
-    }
+    return writeAnsiCp1252WithEscaper(w, bytes, jsonEscapeUtf8);
 }
 
 pub fn utf16EqualsAscii(utf16le: []const u8, num_chars: usize, ascii: []const u8) bool {
