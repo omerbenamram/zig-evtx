@@ -16,7 +16,7 @@ pub fn main() !void {
 
     var output_mode: OutputMode = .xml;
     var input_path: ?[]const u8 = null;
-    var verbose: bool = false;
+    var verbosity: u8 = 0;
     var max_records: usize = 0;
     var skip_first: usize = 0;
 
@@ -25,7 +25,11 @@ pub fn main() !void {
             const mode = args_iter.next() orelse return error.InvalidArgs;
             if (std.mem.eql(u8, mode, "xml")) output_mode = .xml else if (std.mem.eql(u8, mode, "json")) output_mode = .json else if (std.mem.eql(u8, mode, "jsonl")) output_mode = .jsonl else return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "-v")) {
-            verbose = true;
+            if (verbosity < 1) verbosity = 1;
+        } else if (std.mem.eql(u8, arg, "-vv")) {
+            if (verbosity < 2) verbosity = 2;
+        } else if (std.mem.eql(u8, arg, "-vvv")) {
+            if (verbosity < 3) verbosity = 3;
         } else if (std.mem.eql(u8, arg, "-n")) {
             const n_str = args_iter.next() orelse return error.InvalidArgs;
             max_records = try std.fmt.parseUnsigned(usize, n_str, 10);
@@ -48,7 +52,7 @@ pub fn main() !void {
     var buffered = std.io.bufferedReader(reader);
     var br = buffered.reader();
 
-    var parser = try evtx.EvtxParser.init(allocator, .{ .validate_checksums = true, .verbose = verbose, .max_records = max_records, .skip_first = skip_first });
+    var parser = try evtx.EvtxParser.init(allocator, .{ .validate_checksums = true, .verbosity = verbosity, .max_records = max_records, .skip_first = skip_first });
     defer parser.deinit();
 
     try parser.parse(&br, switch (output_mode) {
@@ -60,7 +64,7 @@ pub fn main() !void {
 
 fn usage() noreturn {
     const w = std.io.getStdErr().writer();
-    w.print("Usage: evtx_dump_zig [-v] [-o xml|json|jsonl] [-s N] [-n N] <file.evtx>\n", .{}) catch {};
+    w.print("Usage: evtx_dump_zig [-v|-vv|-vvv] [-o xml|json|jsonl] [-s N] [-n N] <file.evtx>\n", .{}) catch {};
     std.process.exit(2);
 }
 

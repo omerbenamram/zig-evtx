@@ -6,7 +6,12 @@ const log = logger.scoped("evtx");
 
 pub const ParserOptions = struct {
     validate_checksums: bool = true,
-    verbose: bool = false,
+    // Verbosity levels:
+    // 0 = warnings+errors only (default)
+    // 1 = info
+    // 2 = debug
+    // 3+ = trace
+    verbosity: u8 = 0,
     // 0 means no limit
     max_records: usize = 0,
     // number of records to skip before emitting any output
@@ -61,10 +66,24 @@ pub const EvtxParser = struct {
     }
 
     pub fn parse(self: *EvtxParser, reader: anytype, out: anytype) !void {
-        if (self.opts.verbose) {
-            logger.setModuleLevel("evtx", .info);
-            logger.setModuleLevel("binxml", .warn);
-            log.info("reading file header...", .{});
+        // Configure logging levels per verbosity
+        switch (self.opts.verbosity) {
+            0 => {},
+            1 => {
+                logger.setModuleLevel("evtx", .info);
+                logger.setModuleLevel("binxml", .warn);
+                log.info("reading file header...", .{});
+            },
+            2 => {
+                logger.setModuleLevel("evtx", .debug);
+                logger.setModuleLevel("binxml", .debug);
+                log.info("reading file header...", .{});
+            },
+            else => {
+                logger.setModuleLevel("evtx", .trace);
+                logger.setModuleLevel("binxml", .trace);
+                log.info("reading file header...", .{});
+            },
         }
         var hdr: FileHeader = try FileHeader.read(reader);
         if (self.opts.validate_checksums) try hdr.validateChecksum();
@@ -77,15 +96,15 @@ pub const EvtxParser = struct {
         defer ctx.deinit();
         while (chunk_index < hdr.num_chunks) : (chunk_index += 1) {
             var chunk = try Chunk.read(reader);
-            if (self.opts.verbose) log.info("chunk {d}: free_off=0x{x}, last_rec_off=0x{x}", .{ chunk_index, chunk.header.free_space_offset, chunk.header.last_event_record_offset });
+            if (self.opts.verbosity >= 1) log.info("chunk {d}: free_off=0x{x}, last_rec_off=0x{x}", .{ chunk_index, chunk.header.free_space_offset, chunk.header.last_event_record_offset });
             if (self.opts.validate_checksums) try chunk.validateChecksums();
             ctx.resetPerChunk();
-            // propagate verbosity into binxml module for this chunk
-            ctx.verbose = self.opts.verbose;
+            // Only enable deepest renderer-specific traces at -vvv
+            ctx.verbose = (self.opts.verbosity >= 3);
             var rec_iter = chunk.records();
             var selected_including_skips: usize = 0;
             while (try rec_iter.next()) |rec| {
-                if (self.opts.verbose) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
+                if (self.opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
                 // Skip initial records if requested
                 if (self.opts.skip_first > 0 and skipped < self.opts.skip_first) {
                     skipped += 1;
@@ -112,7 +131,7 @@ pub const EvtxParser = struct {
                 }
             }
         }
-        if (self.opts.verbose) log.info("done. emitted={d} failed={d}", .{ emitted, failed });
+        if (self.opts.verbosity >= 1) log.info("done. emitted={d} failed={d}", .{ emitted, failed });
     }
 };
 
@@ -254,8 +273,6 @@ pub const EventRecordView = struct {
     fn writeXml(self: *const EventRecordView, w: anytype) !void {
         // Buffer per-record output to avoid leaking partial garbage on failures
         var ctx = try binxml.Context.init(std.heap.page_allocator);
-        // Enable verbose token logs to aid triage (propagate outer verbosity later)
-        ctx.verbose = true;
         defer ctx.deinit();
         var buf = std.ArrayList(u8).init(std.heap.page_allocator);
         defer buf.deinit();
