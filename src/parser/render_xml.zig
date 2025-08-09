@@ -19,6 +19,48 @@ const buildExpandedElementTree = @import("binxml.zig").buildExpandedElementTree;
 const valueTypeFixedSize = @import("binxml.zig").valueTypeFixedSize;
 const attrNameIsSystemTime = @import("binxml.zig").attrNameIsSystemTime;
 
+inline fn writeSpaces(w: anytype, count: usize) !void {
+    if (count == 0) return;
+    const SPACES = "                                                                "; // 64 spaces
+    var rem: usize = count;
+    while (rem > 0) {
+        const take = @min(rem, SPACES.len);
+        try w.writeAll(SPACES[0..take]);
+        rem -= take;
+    }
+}
+
+inline fn writeDecSigned(w: anytype, comptime T: type, v: T) !void {
+    var buf: [64]u8 = undefined;
+    const s = try std.fmt.bufPrint(&buf, "{d}", .{v});
+    try w.writeAll(s);
+}
+
+inline fn writeDecUnsigned(w: anytype, comptime T: type, v: T) !void {
+    var buf: [64]u8 = undefined;
+    const s = try std.fmt.bufPrint(&buf, "{d}", .{v});
+    try w.writeAll(s);
+}
+
+inline fn writeHexBytesLower(w: anytype, bytes: []const u8) !void {
+    if (bytes.len == 0) return;
+    var tmp: [512]u8 = undefined; // emits up to 256 bytes per flush
+    var i: usize = 0;
+    while (i < bytes.len) : (i += 1) {
+        const b = bytes[i];
+        const hi = (b >> 4) & 0xF;
+        const lo = b & 0xF;
+        const idx = (i % 256) * 2;
+        tmp[idx] = @as(u8, "0123456789abcdef"[hi]);
+        tmp[idx + 1] = @as(u8, "0123456789abcdef"[lo]);
+        if ((i % 256) == 255) {
+            try w.writeAll(tmp[0..512]);
+        }
+    }
+    const rem = bytes.len % 256;
+    if (rem != 0) try w.writeAll(tmp[0 .. rem * 2]);
+}
+
 fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const TemplateValue, w: anytype, indent: usize) anyerror!void {
     // If this element has local template values, prefer them for its subtree
     const eff_values: []const TemplateValue = if (el.local_values.len > 0) el.local_values else values;
@@ -146,8 +188,7 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
     }
 
     // Write opening tag and attributes (after early structural decisions)
-    var i: usize = 0;
-    while (i < indent) : (i += 1) try w.writeByte(' ');
+    try writeSpaces(w, indent);
     try w.writeByte('<');
     try writeNameXml(chunk, el.name, w);
 
@@ -210,22 +251,19 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
             .Element => try renderElementIRXml(chunk, nd.elem.?, eff_values, w, indent + 2),
             .Subst => {},
             .Value => {
-                var k: usize = 0;
-                while (k < indent + 2) : (k += 1) try w.writeByte(' ');
+                try writeSpaces(w, indent + 2);
                 try renderTextContentFromIR(chunk, &[_]IR.Node{nd}, eff_values, w);
                 try w.writeByte('\n');
             },
             .Text, .Pad, .CharRef, .EntityRef, .CData, .PITarget, .PIData => {
-                var k: usize = 0;
-                while (k < indent + 2) : (k += 1) try w.writeByte(' ');
+                try writeSpaces(w, indent + 2);
                 try renderTextContentFromIR(chunk, &[_]IR.Node{nd}, eff_values, w);
                 try w.writeByte('\n');
             },
         }
     }
     // close tag
-    i = 0;
-    while (i < indent) : (i += 1) try w.writeByte(' ');
+    try writeSpaces(w, indent);
     try w.writeAll("</");
     try writeNameXml(chunk, el.name, w);
     try w.writeByte('>');
@@ -309,13 +347,20 @@ fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, _: []const T
         },
         .Element => {},
     };
-    // Drop '+' sentinels if any made it through
+    // Drop '+' sentinels if any made it through, but prefer span writes
     const written = fbs.getWritten();
-    var i: usize = 0;
-    while (i < written.len) : (i += 1) {
-        const ch = written[i];
-        if (ch == '+') continue;
-        try w.writeByte(ch);
+    if (std.mem.indexOfScalar(u8, written, '+') == null) {
+        if (written.len > 0) try w.writeAll(written);
+    } else {
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i < written.len) : (i += 1) {
+            if (written[i] == '+') {
+                if (i > start) try w.writeAll(written[start..i]);
+                start = i + 1;
+            }
+        }
+        if (start < written.len) try w.writeAll(written[start..]);
     }
 }
 
@@ -385,25 +430,21 @@ fn writeSingleWithPad(w: anytype, t: u8, bytes: []const u8, pad: usize) !void {
 // This function is intentionally kept free of any parser state and can be reused by renderers.
 pub fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
     switch (t) {
-        0x03 => { // Int8
+        0x03 => {
             if (data.len < 1) return;
-            const v: i8 = @bitCast(data[0]);
-            try w.print("{d}", .{v});
+            try writeDecSigned(w, i8, @bitCast(data[0]));
         },
-        0x04 => { // UInt8
+        0x04 => {
             if (data.len < 1) return;
-            const v: u8 = data[0];
-            try w.print("{d}", .{v});
+            try writeDecUnsigned(w, u8, data[0]);
         },
-        0x05 => { // Int16
+        0x05 => {
             if (data.len < 2) return;
-            const v = std.mem.readInt(i16, data[0..2], .little);
-            try w.print("{d}", .{v});
+            try writeDecSigned(w, i16, std.mem.readInt(i16, data[0..2], .little));
         },
-        0x06 => { // UInt16
+        0x06 => {
             if (data.len < 2) return;
-            const v = std.mem.readInt(u16, data[0..2], .little);
-            try w.print("{d}", .{v});
+            try writeDecUnsigned(w, u16, std.mem.readInt(u16, data[0..2], .little));
         },
         0x01 => { // StringType (UTF-16LE, sized, optional NUL)
             if (data.len == 0) return; // empty string
@@ -435,25 +476,21 @@ pub fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
             if (std.math.isInf(f)) return try w.writeAll(if (f > 0) "1.#INF" else "-1.#INF");
             try w.print("{d}", .{f});
         },
-        0x07 => { // Int32Type
+        0x07 => {
             if (data.len < 4) return;
-            const v = std.mem.readInt(i32, data[0..4], .little);
-            try w.print("{d}", .{v});
+            try writeDecSigned(w, i32, std.mem.readInt(i32, data[0..4], .little));
         },
-        0x08 => { // UInt32Type
+        0x08 => {
             if (data.len < 4) return;
-            const v = std.mem.readInt(u32, data[0..4], .little);
-            try w.print("{d}", .{v});
+            try writeDecUnsigned(w, u32, std.mem.readInt(u32, data[0..4], .little));
         },
-        0x09 => { // Int64Type
+        0x09 => {
             if (data.len < 8) return;
-            const v = std.mem.readInt(i64, data[0..8], .little);
-            try w.print("{d}", .{v});
+            try writeDecSigned(w, i64, std.mem.readInt(i64, data[0..8], .little));
         },
-        0x0a => { // UInt64Type
+        0x0a => {
             if (data.len < 8) return;
-            const v = std.mem.readInt(u64, data[0..8], .little);
-            try w.print("{d}", .{v});
+            try writeDecUnsigned(w, u64, std.mem.readInt(u64, data[0..8], .little));
         },
         0x0d => { // BoolType (DWORD)
             if (data.len < 4) return;
@@ -515,10 +552,7 @@ pub fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
         },
         0x0e => { // BinaryType → hex
             if (data.len == 0) return; // empty binary -> caller will emit <Binary></Binary>
-            var i: usize = 0;
-            while (i < data.len) : (i += 1) {
-                try w.print("{x:0>2}", .{data[i]});
-            }
+            try writeHexBytesLower(w, data);
         },
         0x10 => { // SizeTType
             if (data.len >= 8) {
@@ -549,10 +583,7 @@ pub fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
             }
         },
         0x23 => { // EvtXml (opaque) – hex string
-            var i: usize = 0;
-            while (i < data.len) : (i += 1) {
-                try w.print("{x:0>2}", .{data[i]});
-            }
+            try writeHexBytesLower(w, data);
         },
         else => {
             // Unknown/unsupported types: no-op

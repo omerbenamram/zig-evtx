@@ -36,7 +36,7 @@ pub fn OutputImpl(comptime W: type) type {
         mode: enum { xml, json_single, json_lines },
         scratch: std.ArrayList(u8),
         last_size_hint: usize,
-        bufw: std.io.BufferedWriter(65536, W),
+        bufw: std.io.BufferedWriter(1048576, W),
         // Optional reusable rendering context provided by parser (per-chunk)
         ctx: ?*binxml.Context = null,
         // Exponential moving average of previous serialized sizes for pre-sizing
@@ -44,11 +44,11 @@ pub fn OutputImpl(comptime W: type) type {
         ema_alpha: f64 = 0.25,
 
         pub fn initXml(w: W) @This() {
-            return .{ .w = w, .mode = .xml, .scratch = std.ArrayList(u8).init(std.heap.c_allocator), .last_size_hint = 4096, .bufw = std.io.BufferedWriter(65536, W){ .unbuffered_writer = w } };
+            return .{ .w = w, .mode = .xml, .scratch = std.ArrayList(u8).init(std.heap.c_allocator), .last_size_hint = 4096, .bufw = std.io.BufferedWriter(1048576, W){ .unbuffered_writer = w } };
         }
 
         pub fn initJson(w: W, json_mode: Output.JsonMode) @This() {
-            return .{ .w = w, .mode = if (json_mode == .single) .json_single else .json_lines, .scratch = std.ArrayList(u8).init(std.heap.c_allocator), .last_size_hint = 4096, .bufw = std.io.BufferedWriter(65536, W){ .unbuffered_writer = w } };
+            return .{ .w = w, .mode = if (json_mode == .single) .json_single else .json_lines, .scratch = std.ArrayList(u8).init(std.heap.c_allocator), .last_size_hint = 4096, .bufw = std.io.BufferedWriter(1048576, W){ .unbuffered_writer = w } };
         }
 
         pub fn setContext(self: *@This(), c: *binxml.Context) void {
@@ -226,6 +226,13 @@ pub const EvtxParser = struct {
             if (self.opts.verbosity >= 1) log.info("chunk {d}: free_off=0x{x}, last_rec_off=0x{x}", .{ chunk_index, chunk.header.free_space_offset, chunk.header.last_event_record_offset });
             if (self.opts.validate_checksums) try chunk.validateChecksums();
             ctx.resetPerChunk();
+            // Seed arena with a modest capacity based on chunk header guidance
+            const est_names = chunk.header.common_strings_count;
+            const est_templates = chunk.header.template_ptrs_count;
+            const bytes_hint: usize = @min((est_names * 128) + (est_templates * 2048), 64 * 1024);
+            if (bytes_hint > 0) {
+                _ = ctx.arena.allocator().alloc(u8, bytes_hint) catch {};
+            }
             // Only enable deepest renderer-specific traces at -vvv
             ctx.verbose = (self.opts.verbosity >= 3);
             // Provide output with reusable context for this chunk
@@ -584,13 +591,33 @@ const ChunkHeader = struct {
     header_size: u32,
     last_event_record_offset: u32,
     free_space_offset: u32,
+    // Parsed guidance from chunk header arrays (relative offsets from chunk start)
+    common_string_offsets: [64]u32 = [_]u32{0} ** 64,
+    template_ptrs: [32]u32 = [_]u32{0} ** 32,
+    common_strings_count: usize = 0,
+    template_ptrs_count: usize = 0,
 
     fn parse(buf: *const [65536]u8) !ChunkHeader {
         if (!std.mem.eql(u8, buf[0..8], "ElfChnk\x00")) return error.BadChunkSignature;
         const header_size = std.mem.readInt(u32, buf[40..44], .little);
         const last_event_record_offset = std.mem.readInt(u32, buf[44..48], .little);
         const free_space_offset = std.mem.readInt(u32, buf[48..52], .little);
-        return .{ .header_size = header_size, .last_event_record_offset = last_event_record_offset, .free_space_offset = free_space_offset };
+        var ch: ChunkHeader = .{ .header_size = header_size, .last_event_record_offset = last_event_record_offset, .free_space_offset = free_space_offset };
+        // Common string offset array at 128: 64 u32
+        var i: usize = 0;
+        while (i < 64) : (i += 1) {
+            const off = std.mem.readInt(u32, buf[128 + i * 4 .. 128 + i * 4 + 4][0..4], .little);
+            ch.common_string_offsets[i] = off;
+            if (off != 0 and off < buf.len) ch.common_strings_count += 1;
+        }
+        // TemplatePtr array at 384: 32 u32
+        i = 0;
+        while (i < 32) : (i += 1) {
+            const off = std.mem.readInt(u32, buf[384 + i * 4 .. 384 + i * 4 + 4][0..4], .little);
+            ch.template_ptrs[i] = off;
+            if (off != 0 and off < buf.len) ch.template_ptrs_count += 1;
+        }
+        return ch;
     }
 };
 

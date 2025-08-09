@@ -83,12 +83,13 @@ install-flamegraph:
 # Usage: make flamegraph [FLAME_FILE=path/to/file.evtx] [DURATION=30] [FORMAT=xml|json|jsonl]
 flamegraph: install-flamegraph
 	@set -euo pipefail; \
+	rm -rf "$(OUT_DIR)" || true; \
 	mkdir -p "$(OUT_DIR)"; \
 	echo "Building Debug for better symbols..."; \
 	$(MAKE) build OPT=Debug >/dev/null; \
 	if [ ! -f "$(FLAME_FILE)" ]; then echo "Missing FLAME_FILE: $(FLAME_FILE)"; exit 1; fi; \
 	echo "Starting target on $(FLAME_FILE)..."; \
-	"$(BIN)" -o $(FORMAT) "$(FLAME_FILE)" >/dev/null 2>&1 & echo $$! > "$(OUT_DIR)/app.pid"; \
+	"$(BIN)" -t 1 -o $(FORMAT) "$(FLAME_FILE)" >/dev/null 2>&1 & echo $$! > "$(OUT_DIR)/app.pid"; \
 	pid=$$(cat "$(OUT_DIR)/app.pid"); echo "PID: $$pid"; \
 	echo "Sampling for $(DURATION)s..."; \
 	sample $$pid $(DURATION) -file "$(SAMPLE_FILE)" >/dev/null 2>&1 || true; \
@@ -109,12 +110,13 @@ flamegraph: install-flamegraph
 # Production-like flamegraph: ReleaseFast with symbols (strip=false)
 flamegraph-prod: install-flamegraph
 	@set -euo pipefail; \
+	rm -rf "$(OUT_DIR)" || true; \
 	mkdir -p "$(OUT_DIR)"; \
 	echo "Building ReleaseFast..."; \
 	$(MAKE) build OPT=ReleaseFast >/dev/null; \
 	if [ ! -f "$(FLAME_FILE)" ]; then echo "Missing FLAME_FILE: $(FLAME_FILE)"; exit 1; fi; \
 	echo "Starting target on $(FLAME_FILE)..."; \
-	"$(BIN)" -o $(FORMAT) "$(FLAME_FILE)" >/dev/null 2>&1 & echo $$! > "$(OUT_DIR)/app.pid"; \
+	"$(BIN)" -t 1 -o $(FORMAT) "$(FLAME_FILE)" >/dev/null 2>&1 & echo $$! > "$(OUT_DIR)/app.pid"; \
 	pid=$$(cat "$(OUT_DIR)/app.pid"); echo "PID: $$pid"; \
 	echo "Sampling for $(DURATION)s..."; \
 	sample $$pid $(DURATION) -file "$(SAMPLE_FILE)" >/dev/null 2>&1 || true; \
