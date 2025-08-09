@@ -82,7 +82,10 @@ Record these here:
   - Repoint `ArrayList.init` and other temp allocs to the arena allocator. Call `arena.reset()` per record.
 - Validation: same as above; watch for peak RSS.
 - Expected impact: Lower alloc/free overhead; tighter lifetimes; improved speed.
-- Results: time: ... s (Δ ...%), records: ... (OK/FAIL)
+- Results:
+  - Measured together with Opt 6 (context reuse + sizing hints) since `binxml.Context` already used a per-chunk arena and the main win came from reusing that context across records and improving sizing. See Opt 6 below for end-to-end numbers.
+  - Records (JSONL): 62031 (OK)
+  - Notes: `binxml.Context` already wraps a `std.heap.ArenaAllocator` and render paths (`buildExpandedElementTree`, JSON grouping) allocate from it. The change here was to plumb a reusable context into `OutputImpl` so XML/JSON rendering reuses the same arena per chunk rather than creating a fresh context per record.
 
 ### Opt 5: Reduce XML escaping churn
 
@@ -107,7 +110,17 @@ Record these here:
   - Where possible, estimate output size from input record size as an upper bound.
 - Validation: same as above.
 - Expected impact: Fewer reallocations; fewer copies; better throughput.
-- Results: time: ... s (Δ ...%), records: ... (OK/FAIL)
+- Results:
+  - Mean ± σ: 0.919 s ± 0.066 s (Δ -10.9% vs Opt 5; -42.1% vs baseline)
+  - Records (JSONL): 62031 (OK)
+  - Notes:
+    - Implemented EMA-based reservation in the per-output scratch buffer and increased the buffered writer to 64 KiB.
+    - Reused `binxml.Context` across records via `OutputImpl.setContext`, amortizing arena growth and cache.
+    - Flamegraph (ReleaseFast, 25s sample) shows fewer small writes and reduced `_platform_memmove` relative weight.
+
+#### Flamegraph snapshot (post Opt 4+6)
+- Top functions (aggregated frames): see `out/top_functions.txt` (e.g., `renderWithContext`, `renderElementIRXml`, `buildExpandedElementTree` dominate as expected; allocator and memmove leafs reduced).
+- Top leaf frames: see `out/top_leaf.txt` (e.g., `_platform_memmove` lower share; `ArrayList.append` still present in IR building but improved).
 
 ### Reporting Template (fill per optimization)
 
