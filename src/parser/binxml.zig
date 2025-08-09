@@ -16,6 +16,7 @@ const irNewElement = IRModule.irNewElement;
 const renderXmlWithContext = @import("render_xml.zig").renderXmlWithContext;
 const renderElementJson = @import("render_json.zig").renderElementJson;
 const BinXmlError = @import("err.zig").BinXmlError;
+const NameCacheEntry = struct { bytes: []u8, num_chars: usize };
 
 // Local name writers for tracing (avoid renderer dependency)
 fn writeNameFromOffset(chunk: []const u8, name_offset: u32, w: anytype) !void {
@@ -148,7 +149,7 @@ fn skipInlineCachedTemplateDefs(r: *Reader) void {
 
 // Parse a template definition from a chunk using its record-relative data offset.
 // Returns the parsed IR element and the absolute data_start for the def window.
-fn parseTemplateDefFromChunk(chunk: []const u8, def_data_off: u32, allocator: std.mem.Allocator) !struct { def: *IR.Element, data_start: usize } {
+fn parseTemplateDefFromChunk(ctx: *Context, chunk: []const u8, def_data_off: u32, allocator: std.mem.Allocator) !struct { def: *IR.Element, data_start: usize } {
     const def_off_usize: usize = @intCast(def_data_off);
     if (def_off_usize + 24 > chunk.len) return BinXmlError.OutOfBounds;
     const td_data_size = std.mem.readInt(u32, chunk[def_off_usize + 20 .. def_off_usize + 24][0..4], .little);
@@ -157,12 +158,12 @@ fn parseTemplateDefFromChunk(chunk: []const u8, def_data_off: u32, allocator: st
     if (data_end > chunk.len or data_start >= chunk.len) return BinXmlError.OutOfBounds;
     var def_r = Reader.init(chunk[data_start..data_end]);
     try skipFragmentHeaderIfPresent(&def_r);
-    const parsed_def = try parseElementIRBase(chunk, &def_r, allocator, .def, data_start);
+    const parsed_def = try parseElementIRBase(ctx, chunk, &def_r, allocator, .def, data_start);
     return .{ .def = parsed_def, .data_start = data_start };
 }
 
 const Source = enum { rec, def };
-fn materializeNameFromChunkOffset(chunk: []const u8, allocator: std.mem.Allocator, off_u32: u32) !IR.Name {
+fn materializeNameFromChunkOffset(ctx: *Context, chunk: []const u8, off_u32: u32) !IR.Name {
     const off_usize: usize = @intCast(off_u32);
     if (off_usize + 8 > chunk.len) return BinXmlError.UnexpectedEof;
     const num_chars = std.mem.readInt(u16, chunk[off_usize + 6 .. off_usize + 8][0..2], .little);
@@ -174,12 +175,18 @@ fn materializeNameFromChunkOffset(chunk: []const u8, allocator: std.mem.Allocato
         const last = std.mem.readInt(u16, chunk[str_start + byte_len - 2 .. str_start + byte_len][0..2], .little);
         if (last == 0 and take_chars > 0) take_chars -= 1;
     }
-    const buf = try allocator.alloc(u8, take_chars * 2);
+    if (ctx.name_cache.get(off_u32)) |entry| {
+        return IR.Name{ .InlineUtf16 = .{ .bytes = entry.bytes, .num_chars = entry.num_chars } };
+    }
+    const buf = try ctx.arena.allocator().alloc(u8, take_chars * 2);
     @memcpy(buf, chunk[str_start .. str_start + take_chars * 2]);
+    try ctx.name_cache.put(off_u32, NameCacheEntry{ .bytes = buf, .num_chars = take_chars });
     return IR.Name{ .InlineUtf16 = .{ .bytes = buf, .num_chars = take_chars } };
 }
 
-fn parseDefNameIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, chunk_base: usize) !IR.Name {
+// (Cached via ctx)
+
+fn parseDefNameIR(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, chunk_base: usize) !IR.Name {
     const name_off = try r.readU32le();
     if (log.enabled(.trace)) log.trace("def name_off=0x{x} cur_after_off=0x{x}", .{ name_off, r.pos });
     const abs_after_off: usize = chunk_base + r.pos;
@@ -206,7 +213,7 @@ fn parseDefNameIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, c
         return IR.Name{ .InlineUtf16 = .{ .bytes = buf, .num_chars = @intCast(num) } };
     }
     // Name by chunk offset
-    return materializeNameFromChunkOffset(chunk, allocator, name_off);
+    return materializeNameFromChunkOffset(ctx, chunk, name_off);
 }
 
 pub fn logNameTrace(chunk: []const u8, name: IR.Name, label: []const u8) !void {
@@ -293,14 +300,14 @@ pub const TemplateValue = struct {
 };
 
 // Read a name according to source kind, respecting end bounds where applicable.
-fn readNameIRBounded(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, end_pos: usize, chunk_base: usize) !IR.Name {
+fn readNameIRBounded(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, end_pos: usize, chunk_base: usize) !IR.Name {
     return switch (src) {
         .rec => blk: {
             if (r.pos + 4 > end_pos) break :blk BinXmlError.UnexpectedEof;
             const off = try r.readU32le();
-            break :blk try materializeNameFromChunkOffset(chunk, allocator, off);
+            break :blk try materializeNameFromChunkOffset(ctx, chunk, off);
         },
-        .def => try parseDefNameIR(chunk, r, allocator, chunk_base),
+        .def => try parseDefNameIR(ctx, chunk, r, allocator, chunk_base),
     };
 }
 
@@ -520,19 +527,22 @@ pub const Context = struct {
     arena: std.heap.ArenaAllocator,
     cache: std.AutoHashMap(DefKey, *IR.Element),
     verbose: bool = false,
+    name_cache: std.AutoHashMap(u32, NameCacheEntry),
 
     pub fn init(allocator: std.mem.Allocator) !Context {
-        return .{ .allocator = allocator, .arena = std.heap.ArenaAllocator.init(allocator), .cache = std.AutoHashMap(DefKey, *IR.Element).init(allocator), .verbose = false };
+        return .{ .allocator = allocator, .arena = std.heap.ArenaAllocator.init(allocator), .cache = std.AutoHashMap(DefKey, *IR.Element).init(allocator), .verbose = false, .name_cache = std.AutoHashMap(u32, NameCacheEntry).init(allocator) };
     }
 
     pub fn deinit(self: *Context) void {
         self.cache.deinit();
+        self.name_cache.deinit();
         self.arena.deinit();
     }
 
     pub fn resetPerChunk(self: *Context) void {
         // EVTX template definitions are chunk-local. Reset arena and clear cache buckets.
         self.cache.clearRetainingCapacity();
+        self.name_cache.clearRetainingCapacity();
         self.arena.deinit();
         self.arena = std.heap.ArenaAllocator.init(self.allocator);
     }
@@ -695,29 +705,41 @@ fn parseInlineNameFlexibleIR(r: *Reader, alloc: std.mem.Allocator) !IR.Name {
     return IR.Name{ .InlineUtf16 = .{ .bytes = nm.bytes, .num_chars = nm.num_chars } };
 }
 
-fn parseAttributeListIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, max_end: usize, chunk_base: usize) !std.ArrayList(IR.Attr) {
+fn parseAttributeListIR(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, max_end: usize, chunk_base: usize) !std.ArrayList(IR.Attr) {
     const list_size = try r.readU32le();
     const list_start = r.pos;
     const list_end = list_start + list_size;
     if (list_end > max_end or list_end < list_start) return BinXmlError.UnexpectedEof;
     var out = std.ArrayList(IR.Attr).init(allocator);
+    // Estimate number of attributes: scan tokens to count 0x06 ATTRIBUTE headers
+    var scan_pos = r.pos;
+    var attr_count: usize = 0;
+    while (scan_pos < list_end and scan_pos < r.buf.len and isToken(r.buf[scan_pos], TOK_ATTRIBUTE)) : (scan_pos += 1) {
+        // Skip token byte
+        // Name reading in def/rec branches varies; we can't safely skip full entry without parsing.
+        // But counting headers still helps pre-size moderately.
+        attr_count += 1;
+        // We cannot advance correctly without parsing; break to avoid mis-sync
+        break;
+    }
+    if (attr_count > 0) try out.ensureTotalCapacityPrecise(attr_count);
     while (r.pos < list_end and r.rem() > 0 and isToken(r.buf[r.pos], TOK_ATTRIBUTE)) {
         _ = try r.readU8();
         var name: IR.Name = undefined;
-        name = try readNameIRBounded(chunk, r, allocator, src, list_end, chunk_base);
+        name = try readNameIRBounded(ctx, chunk, r, allocator, src, list_end, chunk_base);
         if (log.enabled(.trace)) {
             try logNameTrace(chunk, name, "attr");
         }
         // Collect attribute value tokens into IR
         var tokens = std.ArrayList(IR.Node).init(allocator);
-        try collectValueTokensIRWithCtx(chunk, r, &tokens, src, list_end, allocator, chunk_base);
+        try collectValueTokensIRWithCtx(ctx, chunk, r, &tokens, src, list_end, allocator, chunk_base);
         try out.append(.{ .name = name, .value = tokens });
     }
     if (r.pos != list_end) r.pos = list_end;
     return out;
 }
 
-fn collectValueTokensIRWithCtx(chunk: []const u8, r: *Reader, out: *std.ArrayList(IR.Node), src: Source, end_pos: usize, allocator: std.mem.Allocator, chunk_base: usize) !void {
+fn collectValueTokensIRWithCtx(ctx: *Context, chunk: []const u8, r: *Reader, out: *std.ArrayList(IR.Node), src: Source, end_pos: usize, allocator: std.mem.Allocator, chunk_base: usize) !void {
     var want_pad2: bool = false;
     while (true) {
         if (r.rem() == 0 or r.pos >= end_pos) break;
@@ -783,7 +805,7 @@ fn collectValueTokensIRWithCtx(chunk: []const u8, r: *Reader, out: *std.ArrayLis
             continue;
         } else if (isToken(pk, TOK_ENTITYREF)) {
             _ = try r.readU8();
-            const nm = try readNameIRBounded(chunk, r, allocator, src, end_pos, chunk_base);
+            const nm = try readNameIRBounded(ctx, chunk, r, allocator, src, end_pos, chunk_base);
             try out.append(.{ .tag = .EntityRef, .entity_name = nm });
             continue;
         } else if (isToken(pk, TOK_CDATA)) {
@@ -793,7 +815,7 @@ fn collectValueTokensIRWithCtx(chunk: []const u8, r: *Reader, out: *std.ArrayLis
             continue;
         } else if (isToken(pk, TOK_PITARGET)) {
             _ = try r.readU8();
-            const nm = try readNameIRBounded(chunk, r, allocator, src, end_pos, chunk_base);
+            const nm = try readNameIRBounded(ctx, chunk, r, allocator, src, end_pos, chunk_base);
             try out.append(.{ .tag = .PITarget, .pi_target = nm });
             continue;
         } else if (isToken(pk, TOK_PIDATA)) {
@@ -831,16 +853,16 @@ fn updateHintsFromNodes(el: *IR.Element, nodes: []const IR.Node, include_attr: b
 
 const ElementHeader = struct { name: IR.Name, data_size: u32, header_len: usize };
 
-fn parseRecElementHeader(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator) !ElementHeader {
+fn parseRecElementHeader(ctx: *Context, chunk: []const u8, r: *Reader, _: std.mem.Allocator) !ElementHeader {
     _ = try r.readU16le(); // dependency id (required in records)
     const data_size = try r.readU32le();
     const header_len: usize = 1 + 2 + 4;
     const name_off = try r.readU32le();
-    const name = try materializeNameFromChunkOffset(chunk, allocator, name_off);
+    const name = try materializeNameFromChunkOffset(ctx, chunk, name_off);
     return .{ .name = name, .data_size = data_size, .header_len = header_len };
 }
 
-fn parseDefElementHeader(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, chunk_base: usize, element_start: usize) !ElementHeader {
+fn parseDefElementHeader(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, chunk_base: usize, element_start: usize) !ElementHeader {
     const save0 = r.pos;
     if (r.rem() >= 2 + 4) {
         const save1 = r.pos;
@@ -852,7 +874,7 @@ fn parseDefElementHeader(chunk: []const u8, r: *Reader, allocator: std.mem.Alloc
                     @memcpy(tmpn[0..take], r.buf[r.pos .. r.pos + take]);
                     log.trace("def pre-name (with dep) pos=0x{x} look: {s}", .{ r.pos, std.fmt.fmtSliceHexLower(tmpn[0..take]) });
                 }
-                if (parseDefNameIR(chunk, r, allocator, chunk_base)) |nm| {
+                if (parseDefNameIR(ctx, chunk, r, allocator, chunk_base)) |nm| {
                     const header_len_try: usize = 1 + 2 + 4;
                     const end_try = element_start + header_len_try + @as(usize, dsz);
                     if (end_try <= r.buf.len) {
@@ -879,22 +901,22 @@ fn parseDefElementHeader(chunk: []const u8, r: *Reader, allocator: std.mem.Alloc
         @memcpy(tmpn2[0..take2], r.buf[r.pos .. r.pos + take2]);
         log.trace("def pre-name (no dep) pos=0x{x} look: {s}", .{ r.pos, std.fmt.fmtSliceHexLower(tmpn2[0..take2]) });
     }
-    const nm2 = try parseDefNameIR(chunk, r, allocator, chunk_base);
+    const nm2 = try parseDefNameIR(ctx, chunk, r, allocator, chunk_base);
     return .{ .name = nm2, .data_size = dsz2, .header_len = header_len2 };
 }
 
 // Parse the start header of an element and compute the absolute end position for the element body.
-fn parseElementHeaderAndEnd(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, chunk_base: usize, element_start: usize) !struct { name: IR.Name, element_end: usize } {
+fn parseElementHeaderAndEnd(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, chunk_base: usize, element_start: usize) !struct { name: IR.Name, element_end: usize } {
     const hdr = switch (src) {
-        .rec => try parseRecElementHeader(chunk, r, allocator),
-        .def => try parseDefElementHeader(chunk, r, allocator, chunk_base, element_start),
+        .rec => try parseRecElementHeader(ctx, chunk, r, allocator),
+        .def => try parseDefElementHeader(ctx, chunk, r, allocator, chunk_base, element_start),
     };
     const element_end = element_start + hdr.header_len + @as(usize, hdr.data_size);
     if (element_end > r.buf.len or element_end < element_start) return BinXmlError.UnexpectedEof;
     return .{ .name = hdr.name, .element_end = element_end };
 }
 
-fn parseElementIRBase(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, chunk_base: usize) !*IR.Element {
+fn parseElementIRBase(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, chunk_base: usize) !*IR.Element {
     const element_start = r.pos;
     if (log.enabled(.trace)) {
         var tmp: [24]u8 = undefined;
@@ -907,12 +929,12 @@ fn parseElementIRBase(chunk: []const u8, r: *Reader, allocator: std.mem.Allocato
     }
     const start = try r.readU8();
     if (!isToken(start, TOK_OPEN_START)) return BinXmlError.BadToken;
-    const hdr = try parseElementHeaderAndEnd(chunk, r, allocator, src, chunk_base, element_start);
+    const hdr = try parseElementHeaderAndEnd(ctx, chunk, r, allocator, src, chunk_base, element_start);
     const name = hdr.name;
     const element_end = hdr.element_end;
     const el = try IRModule.irNewElement(allocator, name);
     if (hasMore(start, TOK_OPEN_START)) {
-        el.attrs = try parseAttributeListIR(chunk, r, allocator, src, element_end, chunk_base);
+        el.attrs = try parseAttributeListIR(ctx, chunk, r, allocator, src, element_end, chunk_base);
         // hints from attributes
         var ai_h: usize = 0;
         while (ai_h < el.attrs.items.len) : (ai_h += 1) {
@@ -951,12 +973,12 @@ fn parseElementIRBase(chunk: []const u8, r: *Reader, allocator: std.mem.Allocato
             break;
         } else if (isToken(t, TOK_OPEN_START)) {
             // Optional dependency id handling for nested 0x21 payload elements (spec: dep-id may be omitted)
-            const child = try parseElementIRBase(chunk, r, allocator, src, chunk_base);
+            const child = try parseElementIRBase(ctx, chunk, r, allocator, src, chunk_base);
             try el.children.append(.{ .tag = .Element, .elem = child });
             el.has_element_child = true;
         } else if (isToken(t, TOK_VALUE) or isToken(t, TOK_NORMAL_SUBST) or isToken(t, TOK_OPTIONAL_SUBST) or isToken(t, TOK_CDATA) or isToken(t, TOK_CHARREF) or isToken(t, TOK_ENTITYREF) or isToken(t, TOK_PITARGET) or isToken(t, TOK_PIDATA)) {
             var seq = std.ArrayList(IR.Node).init(allocator);
-            try collectValueTokensIRWithCtx(chunk, r, &seq, src, element_end, allocator, chunk_base);
+            try collectValueTokensIRWithCtx(ctx, chunk, r, &seq, src, element_end, allocator, chunk_base);
             if (r.pos > element_end) r.pos = element_end;
             // append tokens into children list as individual nodes
             for (seq.items) |nd| try el.children.append(nd);
@@ -968,8 +990,8 @@ fn parseElementIRBase(chunk: []const u8, r: *Reader, allocator: std.mem.Allocato
     return el;
 }
 
-pub fn parseElementIR(chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source) !*IR.Element {
-    return parseElementIRBase(chunk, r, allocator, src, 0);
+pub fn parseElementIR(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source) !*IR.Element {
+    return parseElementIRBase(ctx, chunk, r, allocator, src, 0);
 }
 
 pub fn attrNameIsSystemTime(name: IR.Name, chunk: []const u8) bool {
@@ -979,7 +1001,7 @@ pub fn attrNameIsSystemTime(name: IR.Name, chunk: []const u8) bool {
     };
 }
 
-pub fn appendEvtXmlPayloadChildrenIR(chunk: []const u8, data: []const u8, alloc: std.mem.Allocator, parent: *IR.Element) anyerror!void {
+pub fn appendEvtXmlPayloadChildrenIR(ctx: *Context, chunk: []const u8, data: []const u8, alloc: std.mem.Allocator, parent: *IR.Element) anyerror!void {
     if (data.len == 0) return;
     var r = Reader.init(data);
     try skipFragmentHeaderIfPresent(&r);
@@ -994,7 +1016,7 @@ pub fn appendEvtXmlPayloadChildrenIR(chunk: []const u8, data: []const u8, alloc:
             // Skip any inline cached template definition blocks deterministically
             skipInlineCachedTemplateDefs(&r);
             // Use chunk-stored definition to parse expected substitutions
-            const parsed = try parseTemplateDefFromChunk(chunk, def_data_off, alloc);
+            const parsed = try parseTemplateDefFromChunk(ctx, chunk, def_data_off, alloc);
             const child_def = parsed.def;
             const expected = expectedValuesFromTemplate(child_def);
             const vals = try parseTemplateInstanceValuesExpected(&r, alloc, expected);
@@ -1006,7 +1028,7 @@ pub fn appendEvtXmlPayloadChildrenIR(chunk: []const u8, data: []const u8, alloc:
 
 // --- Build a fully expanded IR element tree (no reader usage during render) ---
 
-fn spliceEvtXmlAll(chunk: []const u8, el: *IR.Element, alloc: std.mem.Allocator) anyerror!void {
+fn spliceEvtXmlAll(ctx: *Context, chunk: []const u8, el: *IR.Element, alloc: std.mem.Allocator) anyerror!void {
     // Splice any nested EvtXml payloads that appeared inside attribute value token streams
     var ai: usize = 0;
     while (ai < el.attrs.items.len) : (ai += 1) {
@@ -1015,7 +1037,7 @@ fn spliceEvtXmlAll(chunk: []const u8, el: *IR.Element, alloc: std.mem.Allocator)
         while (vi < a.value.items.len) : (vi += 1) {
             const nd = a.value.items[vi];
             if (nd.tag == .Value and (nd.vtype & 0x7f) == 0x21 and nd.vbytes.len > 0) {
-                try appendEvtXmlPayloadChildrenIR(chunk, nd.vbytes, alloc, el);
+                try appendEvtXmlPayloadChildrenIR(ctx, chunk, nd.vbytes, alloc, el);
             }
         }
     }
@@ -1026,12 +1048,12 @@ fn spliceEvtXmlAll(chunk: []const u8, el: *IR.Element, alloc: std.mem.Allocator)
         const nd = el.children.items[ci];
         switch (nd.tag) {
             .Element => {
-                try spliceEvtXmlAll(chunk, nd.elem.?, alloc);
+                try spliceEvtXmlAll(ctx, chunk, nd.elem.?, alloc);
                 try new_children.append(nd);
             },
             .Value => {
                 if ((nd.vtype & 0x7f) == 0x21 and nd.vbytes.len > 0) {
-                    try appendEvtXmlPayloadChildrenIR(chunk, nd.vbytes, alloc, el);
+                    try appendEvtXmlPayloadChildrenIR(ctx, chunk, nd.vbytes, alloc, el);
                     // drop this node
                 } else {
                     try new_children.append(nd);
@@ -1072,7 +1094,7 @@ pub fn buildExpandedElementTree(ctx: *Context, chunk: []const u8, bin: []const u
         // Skip cached template defs inline
         skipInlineCachedTemplateDefs(&r);
         // Parse def from chunk
-        const parsed = try parseTemplateDefFromChunk(chunk, def_data_off, ctx.arena.allocator());
+        const parsed = try parseTemplateDefFromChunk(ctx, chunk, def_data_off, ctx.arena.allocator());
         const parsed_def = parsed.def;
         // Values
         const expected = expectedValuesFromTemplate(parsed_def);
@@ -1087,12 +1109,12 @@ pub fn buildExpandedElementTree(ctx: *Context, chunk: []const u8, bin: []const u
         // Expand
         const expanded = try expandElementWithValues(got.value_ptr.*, values, ctx.arena.allocator());
         // Splice nested payloads
-        try spliceEvtXmlAll(chunk, expanded, ctx.arena.allocator());
+        try spliceEvtXmlAll(ctx, chunk, expanded, ctx.arena.allocator());
         return expanded;
     }
     // Non-template record path
-    const root = try parseElementIR(chunk, &r, ctx.arena.allocator(), .rec);
+    const root = try parseElementIR(ctx, chunk, &r, ctx.arena.allocator(), .rec);
     const expanded_root = try expandElementWithValues(root, &[_]TemplateValue{}, ctx.arena.allocator());
-    try spliceEvtXmlAll(chunk, expanded_root, ctx.arena.allocator());
+    try spliceEvtXmlAll(ctx, chunk, expanded_root, ctx.arena.allocator());
     return expanded_root;
 }
