@@ -9,6 +9,8 @@ pub const ParserOptions = struct {
     verbose: bool = false,
     // 0 means no limit
     max_records: usize = 0,
+    // number of records to skip before emitting any output
+    skip_first: usize = 0,
 };
 
 pub const Output = struct {
@@ -69,6 +71,7 @@ pub const EvtxParser = struct {
 
         var chunk_index: usize = 0;
         var emitted: usize = 0;
+        var skipped: usize = 0;
         var failed: usize = 0;
         var ctx = try binxml.Context.init(self.allocator);
         defer ctx.deinit();
@@ -80,17 +83,32 @@ pub const EvtxParser = struct {
             // propagate verbosity into binxml module for this chunk
             ctx.verbose = self.opts.verbose;
             var rec_iter = chunk.records();
+            var selected_including_skips: usize = 0;
             while (try rec_iter.next()) |rec| {
                 if (self.opts.verbose) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
+                // Skip initial records if requested
+                if (self.opts.skip_first > 0 and skipped < self.opts.skip_first) {
+                    skipped += 1;
+                    continue;
+                }
+                selected_including_skips += 1;
                 const view = EventRecordView{ .id = rec.identifier, .timestamp_filetime = rec.written_time, .raw_xml = rec.binxml, .chunk_buf = rec.chunk_buf };
                 out.writeRecord(view) catch |e| {
                     failed += 1;
                     log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
+                    // If isolating with skip_first, respect -n even when the selected record fails
+                    if (self.opts.max_records != 0 and self.opts.skip_first > 0 and selected_including_skips >= self.opts.max_records) {
+                        return;
+                    }
                     continue; // keep going to inspect later records and compare outputs
                 };
                 emitted += 1;
-                if (self.opts.max_records != 0 and emitted >= self.opts.max_records) {
-                    return;
+                if (self.opts.max_records != 0) {
+                    if (self.opts.skip_first > 0) {
+                        if (selected_including_skips >= self.opts.max_records) return;
+                    } else {
+                        if (emitted >= self.opts.max_records) return;
+                    }
                 }
             }
         }

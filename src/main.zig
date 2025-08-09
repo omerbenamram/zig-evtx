@@ -18,6 +18,7 @@ pub fn main() !void {
     var input_path: ?[]const u8 = null;
     var verbose: bool = false;
     var max_records: usize = 0;
+    var skip_first: usize = 0;
 
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "-o")) {
@@ -28,6 +29,9 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, arg, "-n")) {
             const n_str = args_iter.next() orelse return error.InvalidArgs;
             max_records = try std.fmt.parseUnsigned(usize, n_str, 10);
+        } else if (std.mem.eql(u8, arg, "-s")) {
+            const s_str = args_iter.next() orelse return error.InvalidArgs;
+            skip_first = try std.fmt.parseUnsigned(usize, s_str, 10);
         } else if (arg.len > 0 and arg[0] == '-') {
             return error.InvalidArgs;
         } else {
@@ -44,7 +48,7 @@ pub fn main() !void {
     var buffered = std.io.bufferedReader(reader);
     var br = buffered.reader();
 
-    var parser = try evtx.EvtxParser.init(allocator, .{ .validate_checksums = true, .verbose = verbose, .max_records = max_records });
+    var parser = try evtx.EvtxParser.init(allocator, .{ .validate_checksums = true, .verbose = verbose, .max_records = max_records, .skip_first = skip_first });
     defer parser.deinit();
 
     try parser.parse(&br, switch (output_mode) {
@@ -56,7 +60,7 @@ pub fn main() !void {
 
 fn usage() noreturn {
     const w = std.io.getStdErr().writer();
-    w.print("Usage: evtx_dump_zig [-o xml|json|jsonl] <file.evtx>\n", .{}) catch {};
+    w.print("Usage: evtx_dump_zig [-v] [-o xml|json|jsonl] [-s N] [-n N] <file.evtx>\n", .{}) catch {};
     std.process.exit(2);
 }
 
