@@ -1,21 +1,48 @@
 const std = @import("std");
 
+inline fn xmlEntityFor(c: u8) ?[]const u8 {
+    return switch (c) {
+        '&' => "&amp;",
+        '<' => "&lt;",
+        '>' => "&gt;",
+        '"' => "&quot;",
+        '\'' => "&apos;",
+        else => null,
+    };
+}
+
+inline fn flushAsciiRun(w: anytype, ascii_buf: *[256]u8, ascii_len: *usize) !void {
+    if (ascii_len.* > 0) {
+        try w.writeAll(ascii_buf.*[0..ascii_len.*]);
+        ascii_len.* = 0;
+    }
+}
+
+inline fn queueAsciiOrEntity(
+    w: anytype,
+    c: u8,
+    ascii_buf: *[256]u8,
+    ascii_len: *usize,
+) !void {
+    if (xmlEntityFor(c)) |e| {
+        try flushAsciiRun(w, ascii_buf, ascii_len);
+        try w.writeAll(e);
+    } else {
+        if (ascii_len.* == ascii_buf.len) {
+            try flushAsciiRun(w, ascii_buf, ascii_len);
+        }
+        ascii_buf.*[ascii_len.*] = c;
+        ascii_len.* += 1;
+    }
+}
+
 pub fn writeXmlEscaped(w: anytype, s: []const u8) !void {
     // Fast path: scan and write contiguous safe spans; only emit entities when needed
     var i: usize = 0;
     var start: usize = 0;
     while (i < s.len) : (i += 1) {
         const c = s[i];
-        var ent: ?[]const u8 = null;
-        switch (c) {
-            '&' => ent = "&amp;",
-            '<' => ent = "&lt;",
-            '>' => ent = "&gt;",
-            '"' => ent = "&quot;",
-            '\'' => ent = "&apos;",
-            else => {},
-        }
-        if (ent) |e| {
+        if (xmlEntityFor(c)) |e| {
             if (i > start) try w.writeAll(s[start..i]);
             try w.writeAll(e);
             start = i + 1;
@@ -100,41 +127,16 @@ pub fn writeUtf16LeXmlEscaped(w: anytype, utf16le: []const u8, num_chars: usize)
         }
         if (codepoint <= 0x7F) {
             const c: u8 = @truncate(codepoint);
-            var ent: ?[]const u8 = null;
-            switch (c) {
-                '&' => ent = "&amp;",
-                '<' => ent = "&lt;",
-                '>' => ent = "&gt;",
-                '"' => ent = "&quot;",
-                '\'' => ent = "&apos;",
-                else => {},
-            }
-            if (ent) |e| {
-                if (ascii_len > 0) {
-                    try w.writeAll(ascii_buf[0..ascii_len]);
-                    ascii_len = 0;
-                }
-                try w.writeAll(e);
-            } else {
-                if (ascii_len == ascii_buf.len) {
-                    try w.writeAll(ascii_buf[0..ascii_len]);
-                    ascii_len = 0;
-                }
-                ascii_buf[ascii_len] = c;
-                ascii_len += 1;
-            }
+            try queueAsciiOrEntity(w, c, &ascii_buf, &ascii_len);
         } else {
-            if (ascii_len > 0) {
-                try w.writeAll(ascii_buf[0..ascii_len]);
-                ascii_len = 0;
-            }
+            try flushAsciiRun(w, &ascii_buf, &ascii_len);
             var buf: [4]u8 = undefined;
             const len = std.unicode.utf8Encode(codepoint, &buf) catch 0;
             if (len == 0) continue;
             try w.writeAll(buf[0..len]);
         }
     }
-    if (ascii_len > 0) try w.writeAll(ascii_buf[0..ascii_len]);
+    try flushAsciiRun(w, &ascii_buf, &ascii_len);
 }
 
 // Write UTF-16LE input as JSON-escaped UTF-8
