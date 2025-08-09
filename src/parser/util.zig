@@ -15,6 +15,32 @@ pub fn writeXmlEscaped(w: anytype, s: []const u8) !void {
     }
 }
 
+// JSON escaping for UTF-8 input
+pub fn jsonEscapeUtf8(w: anytype, s: []const u8) !void {
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        switch (c) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            0x08 => try w.writeAll("\\b"),
+            0x0c => try w.writeAll("\\f"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            else => {
+                if (c < 0x20) {
+                    var buf: [6]u8 = undefined;
+                    _ = try std.fmt.bufPrint(&buf, "\\u{X:0>4}", .{c});
+                    try w.writeAll(&buf);
+                } else {
+                    try w.writeByte(c);
+                }
+            },
+        }
+    }
+}
+
 pub fn writeUtf16LeXmlEscaped(w: anytype, utf16le: []const u8, num_chars: usize) !void {
     var i: usize = 0;
     while (i < num_chars and (i * 2 + 1) < utf16le.len) : (i += 1) {
@@ -39,6 +65,34 @@ pub fn writeUtf16LeXmlEscaped(w: anytype, utf16le: []const u8, num_chars: usize)
         const len = std.unicode.utf8Encode(codepoint, &buf) catch 0;
         if (len == 0) continue;
         try writeXmlEscaped(w, buf[0..len]);
+    }
+}
+
+// Write UTF-16LE input as JSON-escaped UTF-8
+pub fn writeUtf16LeJsonEscaped(w: anytype, utf16le: []const u8, num_chars: usize) !void {
+    var i: usize = 0;
+    while (i < num_chars and (i * 2 + 1) < utf16le.len) : (i += 1) {
+        const lo = @as(u16, utf16le[i * 2]) | (@as(u16, utf16le[i * 2 + 1]) << 8);
+        var codepoint: u21 = lo;
+        if (lo >= 0xD800 and lo <= 0xDBFF) {
+            if (i + 1 >= num_chars or (i + 1) * 2 + 1 >= utf16le.len) break;
+            const lo2 = @as(u16, utf16le[(i + 1) * 2]) | (@as(u16, utf16le[(i + 1) * 2 + 1]) << 8);
+            if (lo2 >= 0xDC00 and lo2 <= 0xDFFF) {
+                const high_ten = lo - 0xD800;
+                const low_ten = lo2 - 0xDC00;
+                codepoint = 0x10000 + (@as(u21, high_ten) << 10) + @as(u21, low_ten);
+                i += 1;
+            } else {
+                continue;
+            }
+        } else if (lo >= 0xDC00 and lo <= 0xDFFF) {
+            continue;
+        }
+
+        var buf: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(codepoint, &buf) catch 0;
+        if (len == 0) continue;
+        try jsonEscapeUtf8(w, buf[0..len]);
     }
 }
 
@@ -69,53 +123,62 @@ pub fn writeUtf16LeRawToUtf8(w: anytype, utf16le: []const u8, num_chars: usize) 
     }
 }
 
+pub fn cp1252ToCodepoint(b: u8) u21 {
+    if (b < 0x80) return b;
+    if (b >= 0xA0) return b;
+    return switch (b) {
+        0x80 => 0x20AC,
+        0x82 => 0x201A,
+        0x83 => 0x0192,
+        0x84 => 0x201E,
+        0x85 => 0x2026,
+        0x86 => 0x2020,
+        0x87 => 0x2021,
+        0x88 => 0x02C6,
+        0x89 => 0x2030,
+        0x8A => 0x0160,
+        0x8B => 0x2039,
+        0x8C => 0x0152,
+        0x8E => 0x017D,
+        0x91 => 0x2018,
+        0x92 => 0x2019,
+        0x93 => 0x201C,
+        0x94 => 0x201D,
+        0x95 => 0x2022,
+        0x96 => 0x2013,
+        0x97 => 0x2014,
+        0x98 => 0x02DC,
+        0x99 => 0x2122,
+        0x9A => 0x0161,
+        0x9B => 0x203A,
+        0x9C => 0x0153,
+        0x9E => 0x017E,
+        0x9F => 0x0178,
+        else => 0xFFFD,
+    };
+}
+
 pub fn writeAnsiCp1252Escaped(w: anytype, bytes: []const u8) !void {
     // Best-effort CP-1252 decode to UTF-8 then XML-escape
     var out_buf: [8]u8 = undefined;
     var i: usize = 0;
     while (i < bytes.len) : (i += 1) {
-        const b = bytes[i];
-        var codepoint: u21 = 0;
-        if (b < 0x80) {
-            codepoint = b;
-        } else if (b >= 0xA0) {
-            codepoint = b;
-        } else {
-            // 0x80..0x9F mapping
-            codepoint = switch (b) {
-                0x80 => 0x20AC,
-                0x82 => 0x201A,
-                0x83 => 0x0192,
-                0x84 => 0x201E,
-                0x85 => 0x2026,
-                0x86 => 0x2020,
-                0x87 => 0x2021,
-                0x88 => 0x02C6,
-                0x89 => 0x2030,
-                0x8A => 0x0160,
-                0x8B => 0x2039,
-                0x8C => 0x0152,
-                0x8E => 0x017D,
-                0x91 => 0x2018,
-                0x92 => 0x2019,
-                0x93 => 0x201C,
-                0x94 => 0x201D,
-                0x95 => 0x2022,
-                0x96 => 0x2013,
-                0x97 => 0x2014,
-                0x98 => 0x02DC,
-                0x99 => 0x2122,
-                0x9A => 0x0161,
-                0x9B => 0x203A,
-                0x9C => 0x0153,
-                0x9E => 0x017E,
-                0x9F => 0x0178,
-                else => 0xFFFD,
-            };
-        }
+        const codepoint: u21 = cp1252ToCodepoint(bytes[i]);
         const n = std.unicode.utf8Encode(codepoint, &out_buf) catch 0;
         if (n == 0) continue;
         try writeXmlEscaped(w, out_buf[0..n]);
+    }
+}
+
+// CP-1252 decode to UTF-8 then JSON-escape
+pub fn writeAnsiCp1252JsonEscaped(w: anytype, bytes: []const u8) !void {
+    var out_buf: [8]u8 = undefined;
+    var i: usize = 0;
+    while (i < bytes.len) : (i += 1) {
+        const codepoint: u21 = cp1252ToCodepoint(bytes[i]);
+        const n = std.unicode.utf8Encode(codepoint, &out_buf) catch 0;
+        if (n == 0) continue;
+        try jsonEscapeUtf8(w, out_buf[0..n]);
     }
 }
 
