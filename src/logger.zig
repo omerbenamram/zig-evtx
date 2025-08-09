@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub const Level = enum(u8) { err = 1, warn = 2, info = 3, debug = 4, trace = 5 };
 
@@ -13,6 +14,9 @@ fn parseLevel(s: []const u8) ?Level {
 
 var global_level: Level = .warn;
 var global_level_loaded: bool = false;
+
+// Compile-time switch: TRACE logs are only enabled in Debug builds
+const TRACE_ENABLED: bool = builtin.mode == .Debug;
 
 fn loadGlobalLevel() void {
     if (global_level_loaded) return;
@@ -102,6 +106,7 @@ fn levelTag(lvl: Level) []const u8 {
 }
 
 fn shouldLog(module: []const u8, lvl: Level) bool {
+    if (!TRACE_ENABLED and lvl == .trace) return false;
     const eff = getModuleLevel(module);
     return @intFromEnum(lvl) <= @intFromEnum(eff);
 }
@@ -141,6 +146,7 @@ pub const Logger = struct {
         logInternal(self.module, .debug, fmt, args);
     }
     pub fn trace(self: Logger, comptime fmt: []const u8, args: anytype) void {
+        if (!TRACE_ENABLED) return;
         logInternal(self.module, .trace, fmt, args);
     }
 };
