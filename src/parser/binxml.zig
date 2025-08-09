@@ -16,6 +16,7 @@ const IRModule = @import("ir.zig");
 const IR = IRModule.IR;
 const irNewElement = IRModule.irNewElement;
 const renderXmlWithContext = @import("render_xml.zig").renderXmlWithContext;
+const renderElementJson = @import("render_json.zig").renderElementJson;
 // Local name writers for tracing (avoid renderer dependency)
 fn writeNameFromOffset(chunk: []const u8, name_offset: u32, w: anytype) !void {
     const off = @as(usize, name_offset);
@@ -595,8 +596,18 @@ pub fn render(chunk: []const u8, bin: []const u8, mode: RenderMode, w: anytype) 
     defer ctx.deinit();
     switch (mode) {
         .xml => try renderXmlWithContext(&ctx, chunk, bin, w),
-        .json => try w.writeAll("{}"),
-        .jsonl => try w.writeAll("{}"),
+        .json => {
+            var ctx2 = try Context.init(std.heap.page_allocator);
+            defer ctx2.deinit();
+            const root = try buildExpandedElementTree(&ctx2, chunk, bin);
+            try renderElementJson(chunk, root, ctx2.arena.allocator(), w);
+        },
+        .jsonl => {
+            var ctx2 = try Context.init(std.heap.page_allocator);
+            defer ctx2.deinit();
+            const root = try buildExpandedElementTree(&ctx2, chunk, bin);
+            try renderElementJson(chunk, root, ctx2.arena.allocator(), w);
+        },
     }
 }
 
@@ -683,8 +694,14 @@ fn cloneElementTree(src: *const IR.Element, alloc: std.mem.Allocator) !*IR.Eleme
 pub fn renderWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, mode: RenderMode, w: anytype) !void {
     switch (mode) {
         .xml => try renderXmlWithContext(ctx, chunk, bin, w),
-        .json => try w.writeAll("{}"),
-        .jsonl => try w.writeAll("{}"),
+        .json => {
+            const root = try buildExpandedElementTree(ctx, chunk, bin);
+            try renderElementJson(chunk, root, ctx.arena.allocator(), w);
+        },
+        .jsonl => {
+            const root = try buildExpandedElementTree(ctx, chunk, bin);
+            try renderElementJson(chunk, root, ctx.arena.allocator(), w);
+        },
     }
 }
 
