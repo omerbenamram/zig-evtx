@@ -1,5 +1,5 @@
 // Reader drives Binary XML token parsing for one buffer slice (record or template definition).
-const BinXmlError = @import("binxml.zig").BinXmlError;
+const BinXmlError = @import("err.zig").BinXmlError;
 
 const std = @import("std");
 

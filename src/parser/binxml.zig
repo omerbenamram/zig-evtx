@@ -9,14 +9,14 @@ const utf16EqualsAscii = util.utf16EqualsAscii;
 const normalizeAndWriteSystemTimeAscii = util.normalizeAndWriteSystemTimeAscii;
 const writePaddedInt = util.writePaddedInt;
 const formatIso8601UtcFromUnixMs = util.formatIso8601UtcFromUnixMs;
-const formatIso8601UtcFromFiletimeMicros = util.formatIso8601UtcFromFiletimeMicros;
-const writeAnsiCp1252Escaped = util.writeAnsiCp1252Escaped;
 const Reader = @import("reader.zig").Reader;
 const IRModule = @import("ir.zig");
 const IR = IRModule.IR;
 const irNewElement = IRModule.irNewElement;
 const renderXmlWithContext = @import("render_xml.zig").renderXmlWithContext;
 const renderElementJson = @import("render_json.zig").renderElementJson;
+const BinXmlError = @import("err.zig").BinXmlError;
+
 // Local name writers for tracing (avoid renderer dependency)
 fn writeNameFromOffset(chunk: []const u8, name_offset: u32, w: anytype) !void {
     const off = @as(usize, name_offset);
@@ -72,12 +72,6 @@ const ENABLE_PLUS_PAD: bool = false;
 
 pub const RenderMode = enum { xml, json, jsonl };
 
-pub const BinXmlError = error{
-    UnexpectedEof,
-    BadToken,
-    OutOfBounds,
-};
-
 // Token constants (subset)
 pub const TOK_FRAGMENT_HEADER: u8 = 0x0f;
 pub const TOK_OPEN_START: u8 = 0x01; // or 0x41 with has-more flag
@@ -101,6 +95,33 @@ pub fn hasMore(flagged: u8, base: u8) bool {
 }
 pub fn isToken(flagged: u8, base: u8) bool {
     return (flagged & 0x1f) == base;
+}
+
+pub fn valueTypeFixedSize(vtype: u8) ?usize {
+    return switch (vtype) {
+        0x03, // Int8
+        0x04, // UInt8
+        => 1,
+        0x05, // Int16
+        0x06, // UInt16
+        => 2,
+        0x07, // Int32
+        0x08, // UInt32
+        0x0d, // Bool (DWORD)
+        0x14,
+        => 4, // HexInt32
+        0x09, // Int64
+        0x0a, // UInt64
+        0x0b, // Real32
+        0x0c, // Real64
+        0x11,
+        => 8, // FILETIME
+        0x15 => 8, // HexInt64
+        0x0f, // GUID
+        0x12,
+        => 16, // SYSTEMTIME
+        else => null, // 0x01 string (variable), 0x0e binary (variable), 0x13 SID (variable), others unknown
+    };
 }
 
 // Skip a 4-byte fragment header token (0x0f) if present at the current reader position.
@@ -138,33 +159,6 @@ fn parseTemplateDefFromChunk(chunk: []const u8, def_data_off: u32, allocator: st
     try skipFragmentHeaderIfPresent(&def_r);
     const parsed_def = try parseElementIRBase(chunk, &def_r, allocator, .def, data_start);
     return .{ .def = parsed_def, .data_start = data_start };
-}
-
-pub fn valueTypeFixedSize(vtype: u8) ?usize {
-    return switch (vtype) {
-        0x03, // Int8
-        0x04, // UInt8
-        => 1,
-        0x05, // Int16
-        0x06, // UInt16
-        => 2,
-        0x07, // Int32
-        0x08, // UInt32
-        0x0d, // Bool (DWORD)
-        0x14,
-        => 4, // HexInt32
-        0x09, // Int64
-        0x0a, // UInt64
-        0x0b, // Real32
-        0x0c, // Real64
-        0x11,
-        => 8, // FILETIME
-        0x15 => 8, // HexInt64
-        0x0f, // GUID
-        0x12,
-        => 16, // SYSTEMTIME
-        else => null, // 0x01 string (variable), 0x0e binary (variable), 0x13 SID (variable), others unknown
-    };
 }
 
 const Source = enum { rec, def };
@@ -404,191 +398,7 @@ pub fn parseTemplateInstanceValuesExpected(r: *Reader, allocator: std.mem.Alloca
     return values;
 }
 
-pub fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
-    switch (t) {
-        0x03 => { // Int8
-            if (data.len < 1) return;
-            const v: i8 = @bitCast(data[0]);
-            try w.print("{d}", .{v});
-        },
-        0x04 => { // UInt8
-            if (data.len < 1) return;
-            const v: u8 = data[0];
-            try w.print("{d}", .{v});
-        },
-        0x05 => { // Int16
-            if (data.len < 2) return;
-            const v = std.mem.readInt(i16, data[0..2], .little);
-            try w.print("{d}", .{v});
-        },
-        0x06 => { // UInt16
-            if (data.len < 2) return;
-            const v = std.mem.readInt(u16, data[0..2], .little);
-            try w.print("{d}", .{v});
-        },
-        0x01 => { // StringType
-            // In template substitutions the payload is sized UTF-16 bytes without a length prefix.
-            // In value tokens inside definitions we never reach here (they become Text nodes).
-            if (data.len == 0) return; // empty string
-            if ((data.len & 1) != 0) return BinXmlError.UnexpectedEof; // must be UTF-16LE bytes
-            var num = data.len / 2;
-            if (num > 0) {
-                const last = std.mem.readInt(u16, data[data.len - 2 .. data.len][0..2], .little);
-                if (last == 0) num -= 1;
-            }
-            if (num == 0) return;
-            try writeUtf16LeXmlEscaped(w, data[0 .. num * 2], num);
-        },
-        0x02 => { // AnsiStringType (codepage) - payload is exactly the descriptor-sized byte slice
-            try writeAnsiCp1252Escaped(w, data);
-        },
-        0x0b => { // Real32Type
-            if (data.len < 4) return;
-            const bits = std.mem.readInt(u32, data[0..4], .little);
-            const f: f32 = @bitCast(bits);
-            if (std.math.isNan(f)) return try w.writeAll("-1.#IND");
-            if (std.math.isInf(f)) return try w.writeAll(if (f > 0) "1.#INF" else "-1.#INF");
-            // Format with 6 fractional digits when needed
-            try w.print("{d}", .{f});
-        },
-        0x0c => { // Real64Type
-            if (data.len < 8) return;
-            const bits = std.mem.readInt(u64, data[0..8], .little);
-            const f: f64 = @bitCast(bits);
-            if (std.math.isNan(f)) return try w.writeAll("-1.#IND");
-            if (std.math.isInf(f)) return try w.writeAll(if (f > 0) "1.#INF" else "-1.#INF");
-            try w.print("{d}", .{f});
-        },
-        0x07 => { // Int32Type
-            if (data.len < 4) return;
-            const v = std.mem.readInt(i32, data[0..4], .little);
-            try w.print("{d}", .{v});
-        },
-        0x08 => { // UInt32Type
-            if (data.len < 4) return;
-            const v = std.mem.readInt(u32, data[0..4], .little);
-            try w.print("{d}", .{v});
-        },
-        0x09 => { // Int64Type
-            if (data.len < 8) return;
-            const v = std.mem.readInt(i64, data[0..8], .little);
-            try w.print("{d}", .{v});
-        },
-        0x0a => { // UInt64Type
-            if (data.len < 8) return;
-            const v = std.mem.readInt(u64, data[0..8], .little);
-            try w.print("{d}", .{v});
-        },
-        0x0d => { // BoolType - 32-bit 0/1
-            if (data.len < 4) return;
-            const v = std.mem.readInt(u32, data[0..4], .little);
-            try w.writeAll(if (v == 0) "false" else "true");
-        },
-        0x0f => { // GuidType (16 bytes, first 3 components little-endian)
-            if (data.len < 16) return;
-            const d1 = std.mem.readInt(u32, data[0..4], .little);
-            const d2 = std.mem.readInt(u16, data[4..6], .little);
-            const d3 = std.mem.readInt(u16, data[6..8], .little);
-            const d4 = data[8..16];
-            try w.print("{{{x:0>8}-{x:0>4}-{x:0>4}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}}}", .{
-                d1, d2, d3, d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7],
-            });
-        },
-        0x11 => { // FileTimeType (64-bit)
-            if (data.len < 8) return;
-            const ft = std.mem.readInt(u64, data[0..8], .little);
-            var buf: [40]u8 = undefined;
-            const out = formatIso8601UtcFromFiletimeMicros(&buf, ft) catch {
-                return try w.print("{d}", .{ft});
-            };
-            try w.writeAll(out);
-        },
-        0x12 => { // SysTimeType (128-bit)
-            if (data.len < 16) return;
-            const year = std.mem.readInt(u16, data[0..2], .little);
-            const month = std.mem.readInt(u16, data[2..4], .little);
-            // data[4..6] day of week
-            const day = std.mem.readInt(u16, data[6..8], .little);
-            const hour = std.mem.readInt(u16, data[8..10], .little);
-            const minute = std.mem.readInt(u16, data[10..12], .little);
-            const second = std.mem.readInt(u16, data[12..14], .little);
-            const millis = std.mem.readInt(u16, data[14..16], .little);
-            var buf: [32]u8 = undefined;
-            const slice = try std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
-                year, month, day, hour, minute, second, millis,
-            });
-            try w.writeAll(slice);
-        },
-        0x13 => { // SidType
-            if (data.len < 8) return BinXmlError.UnexpectedEof;
-            const rev = data[0];
-            const sub_count = data[1];
-            const ida_bytes = data[2..8];
-            var idauth: u64 = 0;
-            // IdentifierAuthority is big-endian 48-bit
-            var k: usize = 0;
-            while (k < 6) : (k += 1) {
-                idauth = (idauth << 8) | ida_bytes[k];
-            }
-            try w.print("S-{d}-{d}", .{ rev, idauth });
-            var off: usize = 8;
-            var i: usize = 0;
-            while (i < sub_count and off + 4 <= data.len) : (i += 1) {
-                const sub = std.mem.readInt(u32, data[off .. off + 4][0..4], .little);
-                off += 4;
-                try w.print("-{d}", .{sub});
-            }
-        },
-        0x0e => { // BinaryType → hex
-            if (data.len == 0) {
-                // Represent empty binary as empty element content; caller will produce <Binary></Binary>
-                return;
-            }
-            var i: usize = 0;
-            while (i < data.len) : (i += 1) {
-                try w.print("{x:0>2}", .{data[i]});
-            }
-        },
-        0x10 => { // SizeTType — represent as hex (size depends on platform; we cannot know, prefer 32-bit if length==4 else 64)
-            if (data.len >= 8) {
-                const v = std.mem.readInt(u64, data[0..8], .little);
-                try w.print("0x{X}", .{v});
-            } else if (data.len >= 4) {
-                const v = std.mem.readInt(u32, data[0..4], .little);
-                try w.print("0x{X}", .{v});
-            }
-        },
-        0x14 => { // HexInt32Type
-            if (data.len < 4) return BinXmlError.UnexpectedEof;
-            const v = std.mem.readInt(u32, data[0..4], .little);
-            try w.print("0x{X}", .{v});
-        },
-        0x15 => { // HexInt64Type
-            if (data.len < 8) return BinXmlError.UnexpectedEof;
-            const v = std.mem.readInt(u64, data[0..8], .little);
-            try w.print("0x{X}", .{v});
-        },
-        0x20 => { // EvtHandle – render as integer value length-based
-            if (data.len >= 8) {
-                const v = std.mem.readInt(u64, data[0..8], .little);
-                try w.print("{d}", .{v});
-            } else if (data.len >= 4) {
-                const v = std.mem.readInt(u32, data[0..4], .little);
-                try w.print("{d}", .{v});
-            }
-        },
-        0x23 => { // EvtXml (opaque) – provide a sane fallback as hex string
-            var i: usize = 0;
-            while (i < data.len) : (i += 1) {
-                try w.print("{x:0>2}", .{data[i]});
-            }
-        },
-        // 0x21 => EvtXml (nested binary XML) is not handled here to avoid re-entrant parsing in value writer
-        else => {
-            // TODO: implement other types; for now, no-op for unsupported
-        },
-    }
-}
+// writeValueXml moved to value_writer.zig
 
 const JoinerPolicy = enum { Attr, Text };
 
@@ -597,20 +407,6 @@ fn joinerFor(policy: JoinerPolicy, base: u8) []const u8 {
         .Attr => " ",
         .Text => if (base == 0x01 or base == 0x02) "," else " ",
     };
-}
-
-fn writeSingleWithPad(w: anytype, t: u8, bytes: []const u8, pad: usize) !void {
-    if (pad > 0 and (t == 0x07 or t == 0x08 or t == 0x09 or t == 0x0a)) {
-        switch (t) {
-            0x07 => try writePaddedInt(w, i32, std.mem.readInt(i32, bytes[0..4], .little), pad),
-            0x08 => try writePaddedInt(w, u32, std.mem.readInt(u32, bytes[0..4], .little), pad),
-            0x09 => try writePaddedInt(w, i64, std.mem.readInt(i64, bytes[0..8], .little), pad),
-            0x0a => try writePaddedInt(w, u64, std.mem.readInt(u64, bytes[0..8], .little), pad),
-            else => try writeValueXml(w, t, bytes),
-        }
-    } else {
-        try writeValueXml(w, t, bytes);
-    }
 }
 
 fn arrayItemNext(base: u8, backing_t: u8, data: []const u8, idx: *usize) ?[]const u8 {

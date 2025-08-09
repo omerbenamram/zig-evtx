@@ -5,10 +5,10 @@ const TemplateValue = @import("binxml.zig").TemplateValue;
 const logger = @import("../logger.zig");
 const log = logger.scoped("render_xml");
 const std = @import("std");
-const BinXmlError = @import("binxml.zig").BinXmlError;
+const BinXmlError = @import("err.zig").BinXmlError;
 const writeUtf16LeXmlEscaped = @import("util.zig").writeUtf16LeXmlEscaped;
 const writeAnsiCp1252Escaped = @import("util.zig").writeAnsiCp1252Escaped;
-const writeValueXml = @import("binxml.zig").writeValueXml;
+const formatIso8601UtcFromFiletimeMicros = @import("util.zig").formatIso8601UtcFromFiletimeMicros;
 
 const normalizeAndWriteSystemTimeAscii = @import("util.zig").normalizeAndWriteSystemTimeAscii;
 const writePaddedInt = @import("util.zig").writePaddedInt;
@@ -367,4 +367,195 @@ fn renderTextContentFromIR(chunk: []const u8, nodes: []const IR.Node, _: []const
     }
 }
 
-// No reader usage in renderer; all nested payloads are expanded during parse phase.
+fn writeSingleWithPad(w: anytype, t: u8, bytes: []const u8, pad: usize) !void {
+    if (pad > 0 and (t == 0x07 or t == 0x08 or t == 0x09 or t == 0x0a)) {
+        switch (t) {
+            0x07 => try writePaddedInt(w, i32, std.mem.readInt(i32, bytes[0..4], .little), pad),
+            0x08 => try writePaddedInt(w, u32, std.mem.readInt(u32, bytes[0..4], .little), pad),
+            0x09 => try writePaddedInt(w, i64, std.mem.readInt(i64, bytes[0..8], .little), pad),
+            0x0a => try writePaddedInt(w, u64, std.mem.readInt(u64, bytes[0..8], .little), pad),
+            else => try writeValueXml(w, t, bytes),
+        }
+    } else {
+        try writeValueXml(w, t, bytes);
+    }
+}
+
+// Render a single value payload to XML text according to its Binary XML type.
+// This function is intentionally kept free of any parser state and can be reused by renderers.
+pub fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
+    switch (t) {
+        0x03 => { // Int8
+            if (data.len < 1) return;
+            const v: i8 = @bitCast(data[0]);
+            try w.print("{d}", .{v});
+        },
+        0x04 => { // UInt8
+            if (data.len < 1) return;
+            const v: u8 = data[0];
+            try w.print("{d}", .{v});
+        },
+        0x05 => { // Int16
+            if (data.len < 2) return;
+            const v = std.mem.readInt(i16, data[0..2], .little);
+            try w.print("{d}", .{v});
+        },
+        0x06 => { // UInt16
+            if (data.len < 2) return;
+            const v = std.mem.readInt(u16, data[0..2], .little);
+            try w.print("{d}", .{v});
+        },
+        0x01 => { // StringType (UTF-16LE, sized, optional NUL)
+            if (data.len == 0) return; // empty string
+            if ((data.len & 1) != 0) return BinXmlError.UnexpectedEof;
+            var num = data.len / 2;
+            if (num > 0) {
+                const last = std.mem.readInt(u16, data[data.len - 2 .. data.len][0..2], .little);
+                if (last == 0) num -= 1;
+            }
+            if (num == 0) return;
+            try writeUtf16LeXmlEscaped(w, data[0 .. num * 2], num);
+        },
+        0x02 => { // AnsiStringType (codepage)
+            try writeAnsiCp1252Escaped(w, data);
+        },
+        0x0b => { // Real32Type
+            if (data.len < 4) return;
+            const bits = std.mem.readInt(u32, data[0..4], .little);
+            const f: f32 = @bitCast(bits);
+            if (std.math.isNan(f)) return try w.writeAll("-1.#IND");
+            if (std.math.isInf(f)) return try w.writeAll(if (f > 0) "1.#INF" else "-1.#INF");
+            try w.print("{d}", .{f});
+        },
+        0x0c => { // Real64Type
+            if (data.len < 8) return;
+            const bits = std.mem.readInt(u64, data[0..8], .little);
+            const f: f64 = @bitCast(bits);
+            if (std.math.isNan(f)) return try w.writeAll("-1.#IND");
+            if (std.math.isInf(f)) return try w.writeAll(if (f > 0) "1.#INF" else "-1.#INF");
+            try w.print("{d}", .{f});
+        },
+        0x07 => { // Int32Type
+            if (data.len < 4) return;
+            const v = std.mem.readInt(i32, data[0..4], .little);
+            try w.print("{d}", .{v});
+        },
+        0x08 => { // UInt32Type
+            if (data.len < 4) return;
+            const v = std.mem.readInt(u32, data[0..4], .little);
+            try w.print("{d}", .{v});
+        },
+        0x09 => { // Int64Type
+            if (data.len < 8) return;
+            const v = std.mem.readInt(i64, data[0..8], .little);
+            try w.print("{d}", .{v});
+        },
+        0x0a => { // UInt64Type
+            if (data.len < 8) return;
+            const v = std.mem.readInt(u64, data[0..8], .little);
+            try w.print("{d}", .{v});
+        },
+        0x0d => { // BoolType (DWORD)
+            if (data.len < 4) return;
+            const v = std.mem.readInt(u32, data[0..4], .little);
+            try w.writeAll(if (v == 0) "false" else "true");
+        },
+        0x0f => { // GuidType
+            if (data.len < 16) return;
+            const d1 = std.mem.readInt(u32, data[0..4], .little);
+            const d2 = std.mem.readInt(u16, data[4..6], .little);
+            const d3 = std.mem.readInt(u16, data[6..8], .little);
+            const d4 = data[8..16];
+            try w.print("{{{x:0>8}-{x:0>4}-{x:0>4}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}}}", .{
+                d1, d2, d3, d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7],
+            });
+        },
+        0x11 => { // FileTimeType
+            if (data.len < 8) return;
+            const ft = std.mem.readInt(u64, data[0..8], .little);
+            var buf: [40]u8 = undefined;
+            const out = formatIso8601UtcFromFiletimeMicros(&buf, ft) catch {
+                return try w.print("{d}", .{ft});
+            };
+            try w.writeAll(out);
+        },
+        0x12 => { // SysTimeType
+            if (data.len < 16) return;
+            const year = std.mem.readInt(u16, data[0..2], .little);
+            const month = std.mem.readInt(u16, data[2..4], .little);
+            const day = std.mem.readInt(u16, data[6..8], .little);
+            const hour = std.mem.readInt(u16, data[8..10], .little);
+            const minute = std.mem.readInt(u16, data[10..12], .little);
+            const second = std.mem.readInt(u16, data[12..14], .little);
+            const millis = std.mem.readInt(u16, data[14..16], .little);
+            var buf: [32]u8 = undefined;
+            const slice = try std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+                year, month, day, hour, minute, second, millis,
+            });
+            try w.writeAll(slice);
+        },
+        0x13 => { // SidType
+            if (data.len < 8) return BinXmlError.UnexpectedEof;
+            const rev = data[0];
+            const sub_count = data[1];
+            const ida_bytes = data[2..8];
+            var idauth: u64 = 0;
+            var k: usize = 0;
+            while (k < 6) : (k += 1) {
+                idauth = (idauth << 8) | ida_bytes[k];
+            }
+            try w.print("S-{d}-{d}", .{ rev, idauth });
+            var off: usize = 8;
+            var i: usize = 0;
+            while (i < sub_count and off + 4 <= data.len) : (i += 1) {
+                const sub = std.mem.readInt(u32, data[off .. off + 4][0..4], .little);
+                off += 4;
+                try w.print("-{d}", .{sub});
+            }
+        },
+        0x0e => { // BinaryType → hex
+            if (data.len == 0) return; // empty binary -> caller will emit <Binary></Binary>
+            var i: usize = 0;
+            while (i < data.len) : (i += 1) {
+                try w.print("{x:0>2}", .{data[i]});
+            }
+        },
+        0x10 => { // SizeTType
+            if (data.len >= 8) {
+                const v = std.mem.readInt(u64, data[0..8], .little);
+                try w.print("0x{X}", .{v});
+            } else if (data.len >= 4) {
+                const v = std.mem.readInt(u32, data[0..4], .little);
+                try w.print("0x{X}", .{v});
+            }
+        },
+        0x14 => { // HexInt32Type
+            if (data.len < 4) return BinXmlError.UnexpectedEof;
+            const v = std.mem.readInt(u32, data[0..4], .little);
+            try w.print("0x{X}", .{v});
+        },
+        0x15 => { // HexInt64Type
+            if (data.len < 8) return BinXmlError.UnexpectedEof;
+            const v = std.mem.readInt(u64, data[0..8], .little);
+            try w.print("0x{X}", .{v});
+        },
+        0x20 => { // EvtHandle
+            if (data.len >= 8) {
+                const v = std.mem.readInt(u64, data[0..8], .little);
+                try w.print("{d}", .{v});
+            } else if (data.len >= 4) {
+                const v = std.mem.readInt(u32, data[0..4], .little);
+                try w.print("{d}", .{v});
+            }
+        },
+        0x23 => { // EvtXml (opaque) – hex string
+            var i: usize = 0;
+            while (i < data.len) : (i += 1) {
+                try w.print("{x:0>2}", .{data[i]});
+            }
+        },
+        else => {
+            // Unknown/unsupported types: no-op
+        },
+    }
+}
