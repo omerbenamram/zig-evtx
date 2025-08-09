@@ -270,27 +270,40 @@ pub fn writeUnicodeStringArrayCommaSeparated(w: anytype, utf16_data: []const u8)
     }
 }
 
-pub fn formatIso8601UtcFromUnixMs(buf: []u8, unix_secs: i64, ms: u32) ![]const u8 {
-    const z0: i64 = @divFloor(unix_secs, 86400);
-    const sod: i64 = unix_secs - z0 * 86400;
-    const z = z0 + 719468;
-    const era = @divFloor(z, 146097);
-    const doe = z - era * 146097;
-    const yoe = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
-    var y = yoe + era * 400;
+const DateTimeParts = struct {
+    year: i64,
+    month: i64,
+    day: i64,
+    hour: u32,
+    minute: u32,
+    second: u32,
+};
+
+fn computeUtcFromUnixSeconds(unix_seconds: i64) DateTimeParts {
+    const z0: i64 = @divFloor(unix_seconds, 86_400);
+    const sod: i64 = unix_seconds - z0 * 86_400;
+    const z = z0 + 719_468;
+    const era = @divFloor(z, 146_097);
+    const doe = z - era * 146_097;
+    const yoe = @divFloor(doe - @divFloor(doe, 1_460) + @divFloor(doe, 36_524) - @divFloor(doe, 146_096), 365);
+    var y: i64 = yoe + era * 400;
     const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
     const mp = @divFloor(5 * doy + 2, 153);
     const d = doy - @divFloor(153 * mp + 2, 5) + 1;
     const m = mp + 3 - 12 * @as(i32, @intFromBool(mp >= 10));
     y += @as(i64, @intFromBool(m <= 2));
-    const hour = @as(i32, @intCast(@divFloor(sod, 3600)));
-    const sod_rem = sod - @as(i64, hour) * 3600;
-    const min = @as(i32, @intCast(@divFloor(sod_rem, 60)));
-    const sec = @as(i32, @intCast(sod_rem - @as(i64, min) * 60));
-    const out = try std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
-        y, m, d, hour, min, sec, ms,
+    const hour: u32 = @intCast(@divFloor(sod, 3_600));
+    const sod_rem: i64 = sod - @as(i64, hour) * 3_600;
+    const minute: u32 = @intCast(@divFloor(sod_rem, 60));
+    const second: u32 = @intCast(sod_rem - @as(i64, minute) * 60);
+    return .{ .year = y, .month = m, .day = d, .hour = hour, .minute = minute, .second = second };
+}
+
+pub fn formatIso8601UtcFromUnixMs(buf: []u8, unix_secs: i64, ms: u32) ![]const u8 {
+    const parts = computeUtcFromUnixSeconds(unix_secs);
+    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+        parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second, ms,
     });
-    return out;
 }
 
 pub fn formatIso8601UtcFromFiletimeMicros(buf: []u8, filetime: u64) ![]const u8 {
@@ -307,23 +320,8 @@ pub fn formatIso8601UtcFromFiletimeMicros(buf: []u8, filetime: u64) ![]const u8 
     const ticks_remainder: u64 = filetime % TICKS_PER_SEC;
     const micros: u32 = @intCast(ticks_remainder / TICKS_PER_MICRO);
 
-    const z0: u64 = unix_seconds / 86_400;
-    const sod: u64 = unix_seconds % 86_400;
-    const z: i64 = @as(i64, @intCast(z0)) + 719468;
-    const era: i64 = @divFloor(z, 146097);
-    const doe: i64 = z - era * 146097;
-    const yoe: i64 = @divFloor(doe - @divFloor(doe, 1460) + @divFloor(doe, 36524) - @divFloor(doe, 146096), 365);
-    var y: i64 = yoe + era * 400;
-    const doy: i64 = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
-    const mp: i64 = @divFloor(5 * doy + 2, 153);
-    const d: i64 = doy - @divFloor(153 * mp + 2, 5) + 1;
-    const m: i64 = mp + 3 - 12 * @as(i32, @intFromBool(mp >= 10));
-    y += @as(i64, @intFromBool(m <= 2));
-    const hour: u32 = @intCast(sod / 3600);
-    const sod_rem: u64 = sod - @as(u64, hour) * 3600;
-    const minute: u32 = @intCast(sod_rem / 60);
-    const second: u32 = @intCast(sod_rem - @as(u64, minute) * 60);
+    const parts = computeUtcFromUnixSeconds(@as(i64, @intCast(unix_seconds)));
     return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>6}Z", .{
-        y, m, d, hour, minute, second, micros,
+        parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second, micros,
     });
 }
