@@ -240,16 +240,21 @@ const RecordIterator = struct {
 
     fn next(self: *RecordIterator) !?EventRecordRaw {
         if (self.offset == 0 or self.offset + 8 > self.chunk.buf.len) return null;
-        if (self.offset > self.chunk.header.free_space_offset) return null;
+        // Stop when we reach or pass the free-space region
+        if (self.offset >= self.chunk.header.free_space_offset) return null;
         const slice = self.chunk.buf[self.offset..];
         if (!std.mem.eql(u8, slice[0..4], &[_]u8{ 0x2a, 0x2a, 0x00, 0x00 })) return null;
         const size = std.mem.readInt(u32, slice[4..8], .little);
-        if (size < 32 or self.offset + size > self.chunk.buf.len) return error.CorruptRecord;
+        // Treat structurally bad tail as end-of-records rather than hard error
+        if (size < 32) return null;
+        // If the record claims to run past the free-space boundary or chunk buffer, stop
+        if (self.offset + size > self.chunk.buf.len or (self.offset + size) > self.chunk.header.free_space_offset) return null;
         const identifier = std.mem.readInt(u64, slice[8..16], .little);
         const written = std.mem.readInt(u64, slice[16..24], .little);
         const end_slice = slice[size - 4 .. size][0..4];
         const end_copy = std.mem.readInt(u32, end_slice, .little);
-        if (end_copy != size) return error.SizeMismatch;
+        // Mismatched end size indicates a truncated tail; stop record iteration
+        if (end_copy != size) return null;
         const event_data = slice[24 .. size - 4];
         const rec = EventRecordRaw{ .identifier = identifier, .written_time = written, .binxml = event_data, .chunk_buf = &self.chunk.buf };
         self.offset += size;

@@ -19,6 +19,7 @@ pub fn main() !void {
     var verbosity: u8 = 0;
     var max_records: usize = 0;
     var skip_first: usize = 0;
+    var validate_checksums: bool = true;
 
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "-o")) {
@@ -36,6 +37,8 @@ pub fn main() !void {
         } else if (std.mem.eql(u8, arg, "-s")) {
             const s_str = args_iter.next() orelse return error.InvalidArgs;
             skip_first = try std.fmt.parseUnsigned(usize, s_str, 10);
+        } else if (std.mem.eql(u8, arg, "--no-checks")) {
+            validate_checksums = false;
         } else if (arg.len > 0 and arg[0] == '-') {
             return error.InvalidArgs;
         } else {
@@ -52,7 +55,7 @@ pub fn main() !void {
     var buffered = std.io.bufferedReader(reader);
     var br = buffered.reader();
 
-    var parser = try evtx.EvtxParser.init(allocator, .{ .validate_checksums = true, .verbosity = verbosity, .max_records = max_records, .skip_first = skip_first });
+    var parser = try evtx.EvtxParser.init(allocator, .{ .validate_checksums = validate_checksums, .verbosity = verbosity, .max_records = max_records, .skip_first = skip_first });
     defer parser.deinit();
 
     try parser.parse(&br, switch (output_mode) {
