@@ -20,6 +20,7 @@ pub fn main() !void {
     var max_records: usize = 0;
     var skip_first: usize = 0;
     var validate_checksums: bool = true;
+    var threads_opt: ?usize = null;
 
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "-o")) {
@@ -39,6 +40,9 @@ pub fn main() !void {
             skip_first = try std.fmt.parseUnsigned(usize, s_str, 10);
         } else if (std.mem.eql(u8, arg, "--no-checks")) {
             validate_checksums = false;
+        } else if (std.mem.eql(u8, arg, "-t")) {
+            const t_str = args_iter.next() orelse return error.InvalidArgs;
+            threads_opt = try std.fmt.parseUnsigned(usize, t_str, 10);
         } else if (arg.len > 0 and arg[0] == '-') {
             return error.InvalidArgs;
         } else {
@@ -58,18 +62,31 @@ pub fn main() !void {
     var parser = try evtx.EvtxParser.init(allocator, .{ .validate_checksums = validate_checksums, .verbosity = verbosity, .max_records = max_records, .skip_first = skip_first });
     defer parser.deinit();
 
-    var output = switch (output_mode) {
-        .xml => evtx.Output.xml(std.io.getStdOut().writer()),
-        .json => evtx.Output.json(std.io.getStdOut().writer(), .single),
-        .jsonl => evtx.Output.json(std.io.getStdOut().writer(), .lines),
-    };
-    try parser.parse(&br, &output);
-    output.flush();
+    const cpu_count = try std.Thread.getCpuCount();
+    var num_threads: usize = threads_opt orelse cpu_count;
+    if (num_threads == 0) num_threads = 1;
+
+    if (num_threads <= 1) {
+        var output = switch (output_mode) {
+            .xml => evtx.Output.xml(std.io.getStdOut().writer()),
+            .json => evtx.Output.json(std.io.getStdOut().writer(), .single),
+            .jsonl => evtx.Output.json(std.io.getStdOut().writer(), .lines),
+        };
+        try parser.parse(&br, &output);
+        output.flush();
+    } else {
+        const out_kind: evtx.EvtxParser.OutKind = switch (output_mode) {
+            .xml => .xml,
+            .json => .json_single,
+            .jsonl => .json_lines,
+        };
+        try parser.parseConcurrent(&br, out_kind, num_threads);
+    }
 }
 
 fn usage() noreturn {
     const w = std.io.getStdErr().writer();
-    w.print("Usage: evtx_dump_zig [-v|-vv|-vvv] [-o xml|json|jsonl] [-s N] [-n N] <file.evtx>\n", .{}) catch {};
+    w.print("Usage: evtx_dump_zig [-v|-vv|-vvv] [-o xml|json|jsonl] [-s N] [-n N] [-t NUM_THREADS] <file.evtx>\n", .{}) catch {};
     std.process.exit(2);
 }
 

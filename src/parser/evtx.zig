@@ -125,6 +125,53 @@ pub fn OutputImpl(comptime W: type) type {
             }
         }
 
+        pub fn serializeRecord(self: *@This(), record: EventRecordView) ![]const u8 {
+            try self.reserveScratch();
+            var bw = self.scratch.writer();
+            switch (self.mode) {
+                .xml => {
+                    if (self.ctx) |ctx| {
+                        try binxml.renderWithContext(ctx, record.chunk_buf, record.raw_xml, .xml, bw);
+                    } else {
+                        var local_ctx = try binxml.Context.init(std.heap.page_allocator);
+                        defer local_ctx.deinit();
+                        try binxml.renderWithContext(&local_ctx, record.chunk_buf, record.raw_xml, .xml, bw);
+                    }
+                    try bw.writeByte('\n');
+                },
+                .json_single => {
+                    const body_mode: binxml.RenderMode = .json;
+                    try bw.writeAll("{");
+                    try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
+                    if (self.ctx) |ctx| {
+                        try binxml.renderWithContext(ctx, record.chunk_buf, record.raw_xml, body_mode, bw);
+                    } else {
+                        var local_ctx = try binxml.Context.init(std.heap.page_allocator);
+                        defer local_ctx.deinit();
+                        try binxml.renderWithContext(&local_ctx, record.chunk_buf, record.raw_xml, body_mode, bw);
+                    }
+                    try bw.writeAll("}\n");
+                },
+                .json_lines => {
+                    const body_mode: binxml.RenderMode = .jsonl;
+                    try bw.writeAll("{");
+                    try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
+                    if (self.ctx) |ctx| {
+                        try binxml.renderWithContext(ctx, record.chunk_buf, record.raw_xml, body_mode, bw);
+                    } else {
+                        var local_ctx = try binxml.Context.init(std.heap.page_allocator);
+                        defer local_ctx.deinit();
+                        try binxml.renderWithContext(&local_ctx, record.chunk_buf, record.raw_xml, body_mode, bw);
+                    }
+                    try bw.writeAll("}\n");
+                },
+            }
+            self.last_size_hint = self.scratch.items.len;
+            const cur_len_f: f64 = @floatFromInt(self.scratch.items.len);
+            if (self.ema_size == 0.0) self.ema_size = cur_len_f else self.ema_size = self.ema_size + self.ema_alpha * (cur_len_f - self.ema_size);
+            return self.scratch.items;
+        }
+
         pub fn flush(self: *@This()) void {
             self.bufw.flush() catch {};
         }
@@ -216,6 +263,235 @@ pub const EvtxParser = struct {
             }
         }
         if (self.opts.verbosity >= 1) log.info("done. emitted={d} failed={d}", .{ emitted, failed });
+    }
+
+    // Concurrent parsing entry point: read chunks sequentially, parse in a thread pool, and stream outputs to stdout
+    pub const OutKind = enum { xml, json_single, json_lines };
+
+    const WorkItem = struct {
+        index: usize,
+        chunk: Chunk,
+    };
+
+    const WorkQueue = struct {
+        mutex: std.Thread.Mutex = .{},
+        not_empty: std.Thread.Condition = .{},
+        not_full: std.Thread.Condition = .{},
+        buf: []WorkItem,
+        head: usize = 0,
+        tail: usize = 0,
+        count: usize = 0,
+        closed: bool = false,
+
+        fn init(alloc: std.mem.Allocator, capacity: usize) !WorkQueue {
+            const arr = try alloc.alloc(WorkItem, capacity);
+            return .{ .buf = arr };
+        }
+
+        fn deinit(self: *WorkQueue, alloc: std.mem.Allocator) void {
+            alloc.free(self.buf);
+        }
+
+        fn push(self: *WorkQueue, item: WorkItem) void {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            while (self.count == self.buf.len and !self.closed) self.not_full.wait(&self.mutex);
+            if (self.closed) return; // drop silently if closed
+            self.buf[self.tail] = item;
+            self.tail = (self.tail + 1) % self.buf.len;
+            self.count += 1;
+            self.not_empty.signal();
+        }
+
+        fn close(self: *WorkQueue) void {
+            self.mutex.lock();
+            self.closed = true;
+            self.mutex.unlock();
+            self.not_empty.broadcast();
+            self.not_full.broadcast();
+        }
+
+        fn pop(self: *WorkQueue) ?WorkItem {
+            self.mutex.lock();
+            defer self.mutex.unlock();
+            while (self.count == 0) {
+                if (self.closed) return null;
+                self.not_empty.wait(&self.mutex);
+            }
+            const item = self.buf[self.head];
+            self.head = (self.head + 1) % self.buf.len;
+            self.count -= 1;
+            self.not_full.signal();
+            return item;
+        }
+    };
+
+    pub fn parseConcurrent(self: *EvtxParser, reader: anytype, out_kind: OutKind, num_threads: usize) !void {
+        // Logging levels as in sequential parse
+        switch (self.opts.verbosity) {
+            0 => {},
+            1 => {
+                logger.setModuleLevel("evtx", .info);
+                logger.setModuleLevel("binxml", .warn);
+                log.info("reading file header...", .{});
+            },
+            2 => {
+                logger.setModuleLevel("evtx", .debug);
+                logger.setModuleLevel("binxml", .debug);
+                log.info("reading file header...", .{});
+            },
+            else => {
+                logger.setModuleLevel("evtx", .trace);
+                logger.setModuleLevel("binxml", .trace);
+                log.info("reading file header...", .{});
+            },
+        }
+
+        var hdr: FileHeader = try FileHeader.read(reader);
+        if (self.opts.validate_checksums) try hdr.validateChecksum();
+
+        // Bounded queue, modest multiple of threads to limit memory
+        const q_cap: usize = @max(num_threads * 2, 4);
+        var queue = try WorkQueue.init(self.allocator, q_cap);
+        defer queue.deinit(self.allocator);
+
+        var stdout_file = std.io.getStdOut();
+        var write_mutex: std.Thread.Mutex = .{};
+
+        // Shared counters for skip and max limits
+        var emitted_count: usize = 0;
+        var skipped_count: usize = 0;
+
+        // Worker function
+        const Worker = struct {
+            parser: *EvtxParser,
+            out_kind: OutKind,
+            queue: *WorkQueue,
+            stdout_writer: @TypeOf(stdout_file.writer()),
+            write_mutex: *std.Thread.Mutex,
+            emitted: *usize,
+            skipped: *usize,
+
+            fn run(self_: *@This()) void {
+                // Per-thread output and context
+                var output = switch (self_.out_kind) {
+                    .xml => Output.xml(self_.stdout_writer),
+                    .json_single => Output.json(self_.stdout_writer, .single),
+                    .json_lines => Output.json(self_.stdout_writer, .lines),
+                };
+                var ctx = binxml.Context.init(self_.parser.allocator) catch return;
+                defer ctx.deinit();
+                var emitting: bool = true;
+                while (true) {
+                    const opt_item = self_.queue.pop();
+                    if (opt_item == null) break;
+                    var item = opt_item.?;
+                    // Per-chunk parse
+                    if (self_.parser.opts.verbosity >= 1) log.info("chunk {d}: free_off=0x{x}, last_rec_off=0x{x}", .{ item.index, item.chunk.header.free_space_offset, item.chunk.header.last_event_record_offset });
+                    if (self_.parser.opts.validate_checksums) {
+                        if (item.chunk.validateChecksums()) |_| {} else |e| {
+                            log.err("chunk {d} checksum error: {s}", .{ item.index, @errorName(e) });
+                            continue;
+                        }
+                    }
+                    ctx.resetPerChunk();
+                    ctx.verbose = (self_.parser.opts.verbosity >= 3);
+                    output.setContext(&ctx);
+                    var rec_iter = item.chunk.records();
+                    const has_limits = (self_.parser.opts.max_records != 0) or (self_.parser.opts.skip_first > 0);
+                    if (!has_limits) {
+                        // Fast path: no global limits, render the whole chunk to a local buffer, then single write
+                        var chunk_out = std.ArrayList(u8).init(std.heap.c_allocator);
+                        defer chunk_out.deinit();
+                        _ = chunk_out.ensureTotalCapacityPrecise(96 * 1024) catch {};
+                        while (rec_iter.next() catch null) |rec| {
+                            if (self_.parser.opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
+                            const view = EventRecordView{ .id = rec.identifier, .timestamp_filetime = rec.written_time, .raw_xml = rec.binxml, .chunk_buf = rec.chunk_buf };
+                            const bytes = output.serializeRecord(view) catch |e| {
+                                log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
+                                continue;
+                            };
+                            chunk_out.appendSlice(bytes) catch {
+                                continue;
+                            };
+                        }
+                        self_.write_mutex.lock();
+                        _ = self_.stdout_writer.writeAll(chunk_out.items) catch {};
+                        self_.write_mutex.unlock();
+                    } else {
+                        var selected_including_skips: usize = 0;
+                        while (rec_iter.next() catch null) |rec| {
+                            if (self_.parser.opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
+                            if (self_.parser.opts.skip_first > 0) {
+                                self_.write_mutex.lock();
+                                const should_skip = (self_.skipped.* < self_.parser.opts.skip_first);
+                                if (should_skip) self_.skipped.* += 1;
+                                self_.write_mutex.unlock();
+                                if (should_skip) continue;
+                            }
+                            selected_including_skips += 1;
+                            const view = EventRecordView{ .id = rec.identifier, .timestamp_filetime = rec.written_time, .raw_xml = rec.binxml, .chunk_buf = rec.chunk_buf };
+                            const bytes2 = output.serializeRecord(view) catch |e| {
+                                log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
+                                continue;
+                            };
+                            self_.write_mutex.lock();
+                            defer self_.write_mutex.unlock();
+                            if (self_.parser.opts.max_records != 0 and self_.emitted.* >= self_.parser.opts.max_records) {
+                                emitting = false;
+                                continue;
+                            }
+                            _ = self_.stdout_writer.writeAll(bytes2) catch {
+                                continue;
+                            };
+                            if (self_.parser.opts.max_records != 0) {
+                                self_.emitted.* += 1;
+                                if (self_.emitted.* >= self_.parser.opts.max_records) emitting = false;
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        // Spawn workers
+        var threads = try self.allocator.alloc(std.Thread, num_threads);
+        defer self.allocator.free(threads);
+
+        var worker_ctx = try self.allocator.alloc(Worker, num_threads);
+        defer self.allocator.free(worker_ctx);
+        var i: usize = 0;
+        while (i < num_threads) : (i += 1) {
+            worker_ctx[i] = .{
+                .parser = self,
+                .out_kind = out_kind,
+                .queue = &queue,
+                .stdout_writer = stdout_file.writer(),
+                .write_mutex = &write_mutex,
+                .emitted = &emitted_count,
+                .skipped = &skipped_count,
+            };
+            threads[i] = try std.Thread.spawn(.{}, Worker.run, .{&worker_ctx[i]});
+        }
+
+        // Producer: read chunks sequentially and enqueue
+        var chunk_index: usize = 0;
+        while (chunk_index < hdr.num_chunks) : (chunk_index += 1) {
+            const chunk = Chunk.read(reader) catch |e| {
+                log.err("failed to read chunk {d}: {s}", .{ chunk_index, @errorName(e) });
+                break;
+            };
+            queue.push(.{ .index = chunk_index, .chunk = chunk });
+            // Early stop if max_records reached
+            if (self.opts.max_records != 0 and emitted_count >= self.opts.max_records) break;
+        }
+        queue.close();
+
+        // Join
+        i = 0;
+        while (i < num_threads) : (i += 1) threads[i].join();
+
+        if (self.opts.verbosity >= 1) log.info("done. emitted~={d}", .{emitted_count});
     }
 };
 
