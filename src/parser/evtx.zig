@@ -34,21 +34,66 @@ pub fn OutputImpl(comptime W: type) type {
     return struct {
         w: W,
         mode: enum { xml, json_single, json_lines },
+        scratch: std.ArrayList(u8),
+        last_size_hint: usize,
+        bufw: std.io.BufferedWriter(4096, W),
 
         pub fn initXml(w: W) @This() {
-            return .{ .w = w, .mode = .xml };
+            return .{ .w = w, .mode = .xml, .scratch = std.ArrayList(u8).init(std.heap.page_allocator), .last_size_hint = 4096, .bufw = std.io.bufferedWriter(w) };
         }
 
         pub fn initJson(w: W, json_mode: Output.JsonMode) @This() {
-            return .{ .w = w, .mode = if (json_mode == .single) .json_single else .json_lines };
+            return .{ .w = w, .mode = if (json_mode == .single) .json_single else .json_lines, .scratch = std.ArrayList(u8).init(std.heap.page_allocator), .last_size_hint = 4096, .bufw = std.io.bufferedWriter(w) };
         }
 
-        pub fn writeRecord(self: *const @This(), record: EventRecordView) !void {
+        fn reserveScratch(self: *@This()) !void {
+            // Reserve based on last serialized size with a small slack and a hard cap
+            const slack: usize = 512;
+            const growth: usize = self.last_size_hint / 4; // +25%
+            var target: usize = self.last_size_hint + growth + slack;
+            const max_cap: usize = 4 * 1024 * 1024; // clamp to 4 MiB retained capacity
+            if (target > max_cap) target = max_cap;
+            self.scratch.clearRetainingCapacity();
+            try self.scratch.ensureTotalCapacityPrecise(target);
+        }
+
+        pub fn writeRecord(self: *@This(), record: EventRecordView) !void {
+            try self.reserveScratch();
+            var bw = self.scratch.writer();
             switch (self.mode) {
-                .xml => try record.writeXml(self.w),
-                .json_single => try record.writeJson(self.w, .single),
-                .json_lines => try record.writeJson(self.w, .lines),
+                .xml => {
+                    var ctx = try binxml.Context.init(std.heap.page_allocator);
+                    defer ctx.deinit();
+                    try binxml.renderWithContext(&ctx, record.chunk_buf, record.raw_xml, .xml, bw);
+                    try bw.writeByte('\n');
+                },
+                .json_single => {
+                    const body_mode: binxml.RenderMode = .json;
+                    try bw.writeAll("{");
+                    try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
+                    var ctx = try binxml.Context.init(std.heap.page_allocator);
+                    defer ctx.deinit();
+                    try binxml.renderWithContext(&ctx, record.chunk_buf, record.raw_xml, body_mode, bw);
+                    try bw.writeAll("}\n");
+                },
+                .json_lines => {
+                    const body_mode: binxml.RenderMode = .jsonl;
+                    try bw.writeAll("{");
+                    try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
+                    var ctx = try binxml.Context.init(std.heap.page_allocator);
+                    defer ctx.deinit();
+                    try binxml.renderWithContext(&ctx, record.chunk_buf, record.raw_xml, body_mode, bw);
+                    try bw.writeAll("}\n");
+                },
             }
+            // Emit once to the buffered underlying writer and update size hint
+            var outw = self.bufw.writer();
+            try outw.writeAll(self.scratch.items);
+            self.last_size_hint = self.scratch.items.len;
+        }
+
+        pub fn flush(self: *@This()) void {
+            self.bufw.flush() catch {};
         }
     };
 }
@@ -94,6 +139,8 @@ pub const EvtxParser = struct {
         var failed: usize = 0;
         var ctx = try binxml.Context.init(self.allocator);
         defer ctx.deinit();
+        // We need a mutable output to retain and reuse scratch capacity across records
+        var out_mut = out;
         while (chunk_index < hdr.num_chunks) : (chunk_index += 1) {
             var chunk = try Chunk.read(reader);
             if (self.opts.verbosity >= 1) log.info("chunk {d}: free_off=0x{x}, last_rec_off=0x{x}", .{ chunk_index, chunk.header.free_space_offset, chunk.header.last_event_record_offset });
@@ -112,7 +159,7 @@ pub const EvtxParser = struct {
                 }
                 selected_including_skips += 1;
                 const view = EventRecordView{ .id = rec.identifier, .timestamp_filetime = rec.written_time, .raw_xml = rec.binxml, .chunk_buf = rec.chunk_buf };
-                out.writeRecord(view) catch |e| {
+                out_mut.writeRecord(view) catch |e| {
                     failed += 1;
                     log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
                     // If isolating with skip_first, respect -n even when the selected record fails

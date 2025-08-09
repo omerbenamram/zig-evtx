@@ -58,11 +58,13 @@ pub fn main() !void {
     var parser = try evtx.EvtxParser.init(allocator, .{ .validate_checksums = validate_checksums, .verbosity = verbosity, .max_records = max_records, .skip_first = skip_first });
     defer parser.deinit();
 
-    try parser.parse(&br, switch (output_mode) {
+    var output = switch (output_mode) {
         .xml => evtx.Output.xml(std.io.getStdOut().writer()),
         .json => evtx.Output.json(std.io.getStdOut().writer(), .single),
         .jsonl => evtx.Output.json(std.io.getStdOut().writer(), .lines),
-    });
+    };
+    try parser.parse(&br, &output);
+    output.flush();
 }
 
 fn usage() noreturn {

@@ -46,6 +46,17 @@ fn ensureMap() *std.StringHashMap(Level) {
 var module_levels_inited: bool = false;
 var module_levels: std.StringHashMap(Level) = undefined;
 
+fn cacheModuleLevel(module: []const u8, lvl: Level) void {
+    var map = ensureMap();
+    const mod_copy = std.heap.page_allocator.dupe(u8, module) catch return;
+    map.put(mod_copy, lvl) catch {};
+}
+
+pub fn clearModuleLevelCache() void {
+    if (!module_levels_inited) return;
+    module_levels.clearRetainingCapacity();
+}
+
 fn upperModuleName(buf: []u8, module: []const u8) []const u8 {
     var n: usize = 0;
     while (n < module.len and n < buf.len) : (n += 1) {
@@ -83,15 +94,13 @@ fn getModuleLevel(module: []const u8) Level {
         if (std.process.getEnvVarOwned(std.heap.page_allocator, key)) |val| {
             defer std.heap.page_allocator.free(val);
             if (parseLevel(std.mem.trim(u8, val, " \t\r\n"))) |lvl| {
-                // Cache in map
-                // Store module key as owned copy to make map key stable
-                const mod_copy = std.heap.page_allocator.dupe(u8, module) catch return lvl;
-                map.put(mod_copy, lvl) catch {};
+                cacheModuleLevel(module, lvl);
                 return lvl;
             }
         } else |_| {}
     }
-    // Fallback to global
+    // Fallback to global; cache this decision to avoid repeated getenv calls
+    cacheModuleLevel(module, global_level);
     return global_level;
 }
 
@@ -158,6 +167,8 @@ pub fn scoped(module: []const u8) Logger {
 pub fn setGlobalLevel(lvl: Level) void {
     global_level = lvl;
     global_level_loaded = true;
+    // Changing the global level should invalidate per-module cached levels
+    clearModuleLevelCache();
 }
 
 pub fn setModuleLevel(module: []const u8, lvl: Level) void {
