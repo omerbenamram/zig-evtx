@@ -3,3 +3,5 @@ out
 zig-out/
 
 *.pyc
+.DS_Store
+repomix-output.xml

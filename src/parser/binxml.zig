@@ -528,6 +528,9 @@ pub const Context = struct {
     cache: std.AutoHashMap(DefKey, *IR.Element),
     verbose: bool = false,
     name_cache: std.AutoHashMap(u32, NameCacheEntry),
+    // Cached UTF-16 separators for joining arrays (arena-owned)
+    sep_space_utf16: ?[]u8 = null,
+    sep_comma_utf16: ?[]u8 = null,
 
     pub fn init(allocator: std.mem.Allocator) !Context {
         return .{ .allocator = allocator, .arena = std.heap.ArenaAllocator.init(allocator), .cache = std.AutoHashMap(DefKey, *IR.Element).init(allocator), .verbose = false, .name_cache = std.AutoHashMap(u32, NameCacheEntry).init(allocator) };
@@ -545,6 +548,25 @@ pub const Context = struct {
         self.name_cache.clearRetainingCapacity();
         self.arena.deinit();
         self.arena = std.heap.ArenaAllocator.init(self.allocator);
+    }
+
+    fn getSepUtf16(self: *Context, ascii: []const u8) !struct { bytes: []u8, num_chars: usize } {
+        if (ascii.len == 0) return .{ .bytes = &[_]u8{}, .num_chars = 0 };
+        if (ascii.len == 1 and ascii[0] == ' ') {
+            if (self.sep_space_utf16 == null) {
+                self.sep_space_utf16 = try utf16FromAscii(self.arena.allocator(), ascii);
+            }
+            return .{ .bytes = self.sep_space_utf16.?, .num_chars = 1 };
+        }
+        if (ascii.len == 1 and ascii[0] == ',') {
+            if (self.sep_comma_utf16 == null) {
+                self.sep_comma_utf16 = try utf16FromAscii(self.arena.allocator(), ascii);
+            }
+            return .{ .bytes = self.sep_comma_utf16.?, .num_chars = 1 };
+        }
+        // Fallback (should not happen with current joiner policy)
+        const dyn = try utf16FromAscii(self.arena.allocator(), ascii);
+        return .{ .bytes = dyn, .num_chars = ascii.len };
     }
 };
 
@@ -619,7 +641,7 @@ fn utf16FromAscii(alloc: std.mem.Allocator, ascii: []const u8) ![]u8 {
 
 // Clone a node list while replacing `.Subst` nodes with concrete `.Text`/`.Value` nodes.
 // The `policy` controls joining for string arrays in text vs attribute contexts.
-fn cloneNodesReplacingSubstWithPolicy(policy: JoinerPolicy, alloc: std.mem.Allocator, nodes: []const IR.Node, values: []const TemplateValue) anyerror!std.ArrayList(IR.Node) {
+fn cloneNodesReplacingSubstWithPolicy(ctx: *Context, policy: JoinerPolicy, alloc: std.mem.Allocator, nodes: []const IR.Node, values: []const TemplateValue) anyerror!std.ArrayList(IR.Node) {
     var out = std.ArrayList(IR.Node).init(alloc);
     if (nodes.len > 0) try out.ensureTotalCapacityPrecise(nodes.len);
     var i: usize = 0;
@@ -638,10 +660,17 @@ fn cloneNodesReplacingSubstWithPolicy(policy: JoinerPolicy, alloc: std.mem.Alloc
                     var idx: usize = 0;
                     var first = true;
                     const sep_ascii = joinerFor(policy, base);
+                    // Compute the UTF-16 separator once via context arena and reuse its buffer
+                    const sep_utf16_opt = blk: {
+                        if (sep_ascii.len == 0) break :blk null;
+                        const gg = try ctx.getSepUtf16(sep_ascii);
+                        break :blk gg;
+                    };
                     while (arrayItemNext(base, vv.t, vv.data, &idx)) |seg| {
-                        if (!first and sep_ascii.len > 0) {
-                            const sep_utf16 = try utf16FromAscii(alloc, sep_ascii);
-                            try out.append(.{ .tag = .Text, .text_utf16 = sep_utf16, .text_num_chars = sep_ascii.len });
+                        if (!first) {
+                            if (sep_utf16_opt) |sep| {
+                                try out.append(.{ .tag = .Text, .text_utf16 = sep.bytes, .text_num_chars = sep.num_chars });
+                            }
                         }
                         first = false;
                         if (base == 0x01) {
@@ -664,7 +693,7 @@ fn cloneNodesReplacingSubstWithPolicy(policy: JoinerPolicy, alloc: std.mem.Alloc
             .Element => {
                 const child = nd.elem.?;
                 const eff_vals: []const TemplateValue = if (child.local_values.len > 0) child.local_values else values;
-                const repl = try expandElementWithValues(child, eff_vals, alloc);
+                const repl = try expandElementWithValues(ctx, child, eff_vals, alloc);
                 try out.append(.{ .tag = .Element, .elem = repl });
             },
             else => try out.append(nd),
@@ -678,17 +707,20 @@ fn cloneNodesReplacingSubstWithPolicy(policy: JoinerPolicy, alloc: std.mem.Alloc
 // This is the only place where `.Subst` nodes are resolved. For nested TemplateInstances the
 // child element will carry its own `local_values`; in that case we recurse with that array and do
 // not use the parent `values`. This guarantees substitutions are evaluated in the correct scope.
-pub fn expandElementWithValues(src: *const IR.Element, values: []const TemplateValue, alloc: std.mem.Allocator) anyerror!*IR.Element {
+pub fn expandElementWithValues(ctx: *Context, src: *const IR.Element, values: []const TemplateValue, alloc: std.mem.Allocator) anyerror!*IR.Element {
     const dst = try IRModule.irNewElement(alloc, src.name);
+    // Pre-size destination containers based on source sizes
+    if (src.attrs.items.len > 0) try dst.attrs.ensureTotalCapacityPrecise(src.attrs.items.len);
     // attributes
     var ai: usize = 0;
     while (ai < src.attrs.items.len) : (ai += 1) {
         const a = src.attrs.items[ai];
-        const expanded = try cloneNodesReplacingSubstWithPolicy(.Attr, alloc, a.value.items, values);
+        const expanded = try cloneNodesReplacingSubstWithPolicy(ctx, .Attr, alloc, a.value.items, values);
         try dst.attrs.append(.{ .name = a.name, .value = expanded });
     }
     // children
-    const expanded_children = try cloneNodesReplacingSubstWithPolicy(.Text, alloc, src.children.items, values);
+    const expanded_children = try cloneNodesReplacingSubstWithPolicy(ctx, .Text, alloc, src.children.items, values);
+    if (expanded_children.items.len > 0) try dst.children.ensureTotalCapacityPrecise(expanded_children.items.len);
     var ci: usize = 0;
     while (ci < expanded_children.items.len) : (ci += 1) try dst.children.append(expanded_children.items[ci]);
     // flags (conservative)
@@ -1020,16 +1052,42 @@ pub fn appendEvtXmlPayloadChildrenIR(ctx: *Context, chunk: []const u8, data: []c
             const child_def = parsed.def;
             const expected = expectedValuesFromTemplate(child_def);
             const vals = try parseTemplateInstanceValuesExpected(&r, alloc, expected);
-            const expanded_child = try expandElementWithValues(child_def, vals, alloc);
+            const expanded_child = try expandElementWithValues(ctx, child_def, vals, alloc);
             try parent.children.append(.{ .tag = .Element, .elem = expanded_child });
         } else break;
+    }
+}
+
+// Collect EvtXml payload children as IR nodes into an output list (no mutation of parent during iteration)
+fn collectEvtXmlPayloadChildren(ctx: *Context, chunk: []const u8, data: []const u8, alloc: std.mem.Allocator, out: *std.ArrayList(IR.Node)) anyerror!void {
+    if (data.len == 0) return;
+    var r = Reader.init(data);
+    try skipFragmentHeaderIfPresent(&r);
+    while (r.rem() > 0) {
+        const pk = r.buf[r.pos];
+        if (pk != TOK_TEMPLATE_INSTANCE) break;
+        _ = try r.readU8();
+        if (r.rem() < 1 + 4 + 4) break;
+        _ = try r.readU8(); // unknown
+        _ = try r.readU32le(); // template id
+        const def_data_off = try r.readU32le();
+        // Skip any inline cached template definition blocks deterministically
+        skipInlineCachedTemplateDefs(&r);
+        // Use chunk-stored definition to parse expected substitutions
+        const parsed = try parseTemplateDefFromChunk(ctx, chunk, def_data_off, alloc);
+        const child_def = parsed.def;
+        const expected = expectedValuesFromTemplate(child_def);
+        const vals = try parseTemplateInstanceValuesExpected(&r, alloc, expected);
+        const expanded_child = try expandElementWithValues(ctx, child_def, vals, alloc);
+        try out.append(.{ .tag = .Element, .elem = expanded_child });
     }
 }
 
 // --- Build a fully expanded IR element tree (no reader usage during render) ---
 
 fn spliceEvtXmlAll(ctx: *Context, chunk: []const u8, el: *IR.Element, alloc: std.mem.Allocator) anyerror!void {
-    // Splice any nested EvtXml payloads that appeared inside attribute value token streams
+    // Stage any nested EvtXml payloads that appeared inside attribute value token streams
+    var staged_attr_children = std.ArrayList(IR.Node).init(alloc);
     var ai: usize = 0;
     while (ai < el.attrs.items.len) : (ai += 1) {
         const a = el.attrs.items[ai];
@@ -1037,12 +1095,13 @@ fn spliceEvtXmlAll(ctx: *Context, chunk: []const u8, el: *IR.Element, alloc: std
         while (vi < a.value.items.len) : (vi += 1) {
             const nd = a.value.items[vi];
             if (nd.tag == .Value and (nd.vtype & 0x7f) == 0x21 and nd.vbytes.len > 0) {
-                try appendEvtXmlPayloadChildrenIR(ctx, chunk, nd.vbytes, alloc, el);
+                try collectEvtXmlPayloadChildren(ctx, chunk, nd.vbytes, alloc, &staged_attr_children);
             }
         }
     }
     // Rebuild children, splicing Value 0x21 and recursing into elements
     var new_children = std.ArrayList(IR.Node).init(alloc);
+    if (el.children.items.len > 0) try new_children.ensureTotalCapacityPrecise(el.children.items.len + staged_attr_children.items.len);
     var ci: usize = 0;
     while (ci < el.children.items.len) : (ci += 1) {
         const nd = el.children.items[ci];
@@ -1053,8 +1112,8 @@ fn spliceEvtXmlAll(ctx: *Context, chunk: []const u8, el: *IR.Element, alloc: std
             },
             .Value => {
                 if ((nd.vtype & 0x7f) == 0x21 and nd.vbytes.len > 0) {
-                    try appendEvtXmlPayloadChildrenIR(ctx, chunk, nd.vbytes, alloc, el);
-                    // drop this node
+                    // splice payload into the rebuilt list at this position
+                    try collectEvtXmlPayloadChildren(ctx, chunk, nd.vbytes, alloc, &new_children);
                 } else {
                     try new_children.append(nd);
                 }
@@ -1062,6 +1121,9 @@ fn spliceEvtXmlAll(ctx: *Context, chunk: []const u8, el: *IR.Element, alloc: std
             else => try new_children.append(nd),
         }
     }
+    // Append any staged children discovered in attributes at the end (preserve previous behavior)
+    var k: usize = 0;
+    while (k < staged_attr_children.items.len) : (k += 1) try new_children.append(staged_attr_children.items[k]);
     el.children = new_children;
 }
 
@@ -1107,14 +1169,14 @@ pub fn buildExpandedElementTree(ctx: *Context, chunk: []const u8, bin: []const u
         const got = try ctx.cache.getOrPut(key);
         if (!got.found_existing) got.value_ptr.* = parsed_def;
         // Expand
-        const expanded = try expandElementWithValues(got.value_ptr.*, values, ctx.arena.allocator());
+        const expanded = try expandElementWithValues(ctx, got.value_ptr.*, values, ctx.arena.allocator());
         // Splice nested payloads
         try spliceEvtXmlAll(ctx, chunk, expanded, ctx.arena.allocator());
         return expanded;
     }
     // Non-template record path
     const root = try parseElementIR(ctx, chunk, &r, ctx.arena.allocator(), .rec);
-    const expanded_root = try expandElementWithValues(root, &[_]TemplateValue{}, ctx.arena.allocator());
+    const expanded_root = try expandElementWithValues(ctx, root, &[_]TemplateValue{}, ctx.arena.allocator());
     try spliceEvtXmlAll(ctx, chunk, expanded_root, ctx.arena.allocator());
     return expanded_root;
 }
