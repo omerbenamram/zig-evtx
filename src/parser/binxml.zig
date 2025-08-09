@@ -8,10 +8,39 @@ const writeUtf16LeRawToUtf8 = util.writeUtf16LeRawToUtf8;
 const utf16EqualsAscii = util.utf16EqualsAscii;
 const normalizeAndWriteSystemTimeAscii = util.normalizeAndWriteSystemTimeAscii;
 const writePaddedInt = util.writePaddedInt;
-const writeUnicodeStringArrayCommaSeparated = util.writeUnicodeStringArrayCommaSeparated;
 const formatIso8601UtcFromUnixMs = util.formatIso8601UtcFromUnixMs;
 const formatIso8601UtcFromFiletimeMicros = util.formatIso8601UtcFromFiletimeMicros;
 const writeAnsiCp1252Escaped = util.writeAnsiCp1252Escaped;
+
+// EVTX Binary XML parsing and rendering.
+//
+// Substitution scoping and template expansion (important design notes):
+// - Each TemplateInstance (token 0x0C) contains its own substitution descriptor table and data area.
+// - Template definitions referenced by offset contain SubstitutionDescriptor tokens which index into
+//   the substitution array of the TemplateInstance that is currently being expanded.
+// - Templates can be nested (including inside EvtXml/BinXml payloads, token 0x21). Each nested
+//   TemplateInstance introduces a new substitution scope. Substitution resolution must always use
+//   the substitution array associated with the TemplateInstance that owns the definition being
+//   expanded; parent scopes must not leak.
+//
+// Implementation strategy:
+// - We parse a template definition into an IR element tree (see IR types below).
+// - Before rendering, we expand substitutions in the IR using the correct scope via
+//   `expandElementWithValues`. This function clones the element and replaces `.Subst` nodes with
+//   concrete `.Text`/`.Value` nodes. For nested elements that carry their own `local_values`
+//   (i.e., child TemplateInstances), we recurse with those values, ensuring proper scoping.
+// - Arrays are expanded deterministically into multiple nodes. In text contexts, string arrays are
+//   joined with commas; in attribute contexts, items are separated by spaces (see `joinerFor`).
+// - String substitutions are sized UTF-16 (no length prefix); NullType still consumes the declared
+//   size bytes in the data area but resolves to no content.
+// - This expansion removes the need for late substitution resolution during render and eliminates
+//   any heuristics that attempt to “search” for child blocks after the root.
+//
+// Other correctness details:
+// - The TemplateInstance descriptor’s third byte is reserved and must be consumed.
+// - Inline cached template definition blocks (header + fragment) are skipped deterministically
+//   based on their `data_size` and a fragment header check.
+// - Empty BinaryType values render as `<Binary></Binary>` to match `evtx_dump` output.
 
 // Gate non-spec "+" integer padding sentinel behind build flag
 const ENABLE_PLUS_PAD: bool = false;
@@ -731,50 +760,7 @@ fn arrayItemNext(base: u8, backing_t: u8, data: []const u8, idx: *usize) ?[]cons
     }
 }
 
-fn writeArrayItemsJoined(w: anytype, policy: JoinerPolicy, base: u8, backing_t: u8, data: []const u8, pad: usize) !bool {
-    var first = true;
-    var idx: usize = 0;
-    const sep = joinerFor(policy, base);
-    var any_item = false;
-    while (arrayItemNext(base, backing_t, data, &idx)) |seg| {
-        if (!first) try w.writeAll(sep) else first = false;
-        any_item = true;
-        // For string items, seg is raw (no length prefix)
-        if (base == 0x01) {
-            try writeUtf16LeXmlEscaped(w, seg, seg.len / 2);
-        } else if (base == 0x02) {
-            try writeAnsiCp1252Escaped(w, seg);
-        } else if (base == 0x10) {
-            try writeSingleWithPad(w, 0x10, seg, pad);
-        } else {
-            try writeSingleWithPad(w, base, seg, pad);
-        }
-    }
-    return any_item;
-}
-
-fn writeSubstAsText(w: anytype, policy: JoinerPolicy, nd: IR.Node, vv: TemplateValue) !void {
-    // Skip EvtXml in textual contexts; caller handles splicing
-    if ((vv.t & 0x7f) == 0x21) return;
-    if (log.enabled(.trace)) {
-        const is_arr = (nd.subst_vtype & 0x80) != 0;
-        const base: u8 = nd.subst_vtype & 0x7f;
-        log.trace("subst_text id={d} base=0x{x} arr={any} val_t=0x{x} len={d}", .{ nd.subst_id, base, is_arr, vv.t, vv.data.len });
-    }
-    if ((nd.subst_vtype & 0x80) != 0) {
-        const base = nd.subst_vtype & 0x7f;
-        // size_t array must have 0x94/0x95 backing
-        if (base == 0x10 and !(vv.t == 0x94 or vv.t == 0x95)) {
-            log.warn("size array backing mismatch: expected 0x94/0x95, got 0x{x}", .{vv.t});
-            // Skip instead of error to tolerate dirty logs
-            return;
-        }
-        _ = try writeArrayItemsJoined(w, policy, base, vv.t, vv.data, nd.pad_width);
-        return;
-    }
-    // scalar
-    try writeSingleWithPad(w, vv.t, vv.data, nd.pad_width);
-}
+// writeArrayItemsJoined and writeSubstAsText are no longer needed after IR expansion
 
 // (removed) legacy streaming substitution renderer `renderSubstitutionXml`
 
@@ -1076,6 +1062,8 @@ fn utf16FromAscii(alloc: std.mem.Allocator, ascii: []const u8) ![]u8 {
     return buf;
 }
 
+// Clone a node list while replacing `.Subst` nodes with concrete `.Text`/`.Value` nodes.
+// The `policy` controls joining for string arrays in text vs attribute contexts.
 fn cloneNodesReplacingSubstWithPolicy(policy: JoinerPolicy, alloc: std.mem.Allocator, nodes: []const IR.Node, values: []const TemplateValue) anyerror!std.ArrayList(IR.Node) {
     var out = std.ArrayList(IR.Node).init(alloc);
     var i: usize = 0;
@@ -1129,6 +1117,11 @@ fn cloneNodesReplacingSubstWithPolicy(policy: JoinerPolicy, alloc: std.mem.Alloc
     return out;
 }
 
+// Expand substitutions inside a template definition IR using a specific substitution array (scope).
+//
+// This is the only place where `.Subst` nodes are resolved. For nested TemplateInstances the
+// child element will carry its own `local_values`; in that case we recurse with that array and do
+// not use the parent `values`. This guarantees substitutions are evaluated in the correct scope.
 fn expandElementWithValues(src: *const IR.Element, values: []const TemplateValue, alloc: std.mem.Allocator) anyerror!*IR.Element {
     const dst = try irNewElement(alloc, src.name);
     // attributes
@@ -1469,7 +1462,7 @@ fn attrNameIsSystemTime(name: IR.Name, chunk: []const u8) bool {
     };
 }
 
-fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, values: []const TemplateValue, w: anytype) !void {
+fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, _: []const TemplateValue, w: anytype) !void {
     var buf: [2048]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const aw = fbs.writer();
@@ -1491,12 +1484,7 @@ fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, values: []co
                 try writeValueXml(aw, nd.vtype, nd.vbytes);
             }
         },
-        .Subst => {
-            if (nd.subst_id >= values.len) continue;
-            const vv = values[nd.subst_id];
-            if (nd.subst_optional and (vv.t == 0x00 or vv.data.len == 0)) continue;
-            try writeSubstAsText(aw, .Attr, nd, vv);
-        },
+        .Subst => {}, // no Subst nodes remain post-expansion
         .CharRef => try aw.print("&#{d};", .{nd.charref_value}),
         .EntityRef => {
             try aw.writeByte('&');
@@ -1525,19 +1513,9 @@ fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, values: []co
     }
 }
 
-fn hasNestedEvtXmlSubst(nodes: []const IR.Node, values: []const TemplateValue) bool {
-    var i: usize = 0;
-    while (i < nodes.len) : (i += 1) {
-        const nd = nodes[i];
-        if (nd.tag == .Subst and nd.subst_id < values.len) {
-            const vv = values[nd.subst_id];
-            if ((vv.t & 0x7f) == 0x21 and vv.data.len > 0) return true;
-        }
-    }
-    return false;
-}
+// hasNestedEvtXmlSubst obsolete after IR expansion
 
-fn renderTextContentFromIR(chunk: []const u8, nodes: []const IR.Node, values: []const TemplateValue, w: anytype) !void {
+fn renderTextContentFromIR(chunk: []const u8, nodes: []const IR.Node, _: []const TemplateValue, w: anytype) !void {
     var pending_pad: usize = 0;
     var i: usize = 0;
     while (i < nodes.len) : (i += 1) {
@@ -1559,12 +1537,7 @@ fn renderTextContentFromIR(chunk: []const u8, nodes: []const IR.Node, values: []
                     try writeValueXml(w, nd.vtype, nd.vbytes);
                 }
             },
-            .Subst => {
-                if (nd.subst_id >= values.len) continue;
-                const vv = values[nd.subst_id];
-                if (nd.subst_optional and (vv.t == 0x00 or vv.data.len == 0)) continue;
-                try writeSubstAsText(w, .Text, nd, vv);
-            },
+            .Subst => {}, // no Subst nodes remain post-expansion
             .CharRef => try w.print("&#{d};", .{nd.charref_value}),
             .EntityRef => {
                 try w.writeByte('&');
@@ -1785,31 +1758,7 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
         }
     }
 
-    // Debug: trace EventData children composition
-    if (log.enabled(.trace)) {
-        if (nameEqualsAscii(chunk, el.name, "EventData")) {
-            log.trace("EventData has {d} children, attr_evtxml={any}", .{ el.children.items.len, el.has_attr_evtxml_value });
-            var di: usize = 0;
-            while (di < el.children.items.len) : (di += 1) {
-                const nd = el.children.items[di];
-                switch (nd.tag) {
-                    .Element => {
-                        if (nd.elem) |child| {
-                            if (nameEqualsAscii(chunk, child.name, "Data")) {
-                                log.trace("  child: <Data>", .{});
-                            }
-                            if (nameEqualsAscii(chunk, child.name, "Binary")) {
-                                log.trace("  child: <Binary>", .{});
-                            }
-                        }
-                    },
-                    .Subst => log.trace("  text subst id={d} vtype=0x{x}", .{ nd.subst_id, nd.subst_vtype }),
-                    .Value => log.trace("  text value vtype=0x{x} len={d}", .{ nd.vtype, nd.vbytes.len }),
-                    else => {},
-                }
-            }
-        }
-    }
+    // Debug: trace block removed after expansion; retain normal logging elsewhere
 
     // Write opening tag and attributes (after early structural decisions)
     var i: usize = 0;
