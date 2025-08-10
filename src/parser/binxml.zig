@@ -542,6 +542,9 @@ pub const Context = struct {
         // EVTX template definitions are chunk-local. Reset arena and clear cache buckets.
         self.cache.clearRetainingCapacity();
         self.name_cache.clearRetainingCapacity();
+        // Invalidate any arena-backed cached slices
+        self.sep_space_utf16 = null;
+        self.sep_comma_utf16 = null;
         self.arena.deinit();
         self.arena = std.heap.ArenaAllocator.init(self.allocator);
     }
