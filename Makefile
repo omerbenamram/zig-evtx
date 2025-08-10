@@ -223,3 +223,60 @@ record:
 	  $(PYTHON) scripts/record_diff.py --rs "$${rs_raw}" --zig "$${zig_raw}" --index "$(N)" --out-dir "$(OUT_DIR)" --name "$${name}"; \
 	fi'
 
+
+.PHONY: compare-time
+compare-time: install-evtx time-zig time-rust
+	@set -euo pipefail; \
+	zig_file="$(OUT_DIR)/time-zig.txt"; \
+\trs_file="$(OUT_DIR)/time-rs.txt"; \
+\tnorm_z="$(OUT_DIR)/time-zig.norm.tsv"; \
+\tnorm_r="$(OUT_DIR)/time-rs.norm.tsv"; \
+\t# Normalize both time outputs into TAB-separated "Metric<TAB>Value" lines; \
+\t# handle both the real/user/sys line and the macOS -l resource lines. \
+\tawk 'function emit(k,v){ printf "%s\t%s\n", k, v } { if ($0 ~ /[0-9.]+[[:space:]]+real/ && $0 ~ /user/ && $0 ~ /sys/) { for (i=1;i<=NF;i+=2){ v=$(i); k=$(i+1); if (k=="real"||k=="user"||k=="sys") emit(k,v) } } else if (match($0,/^([0-9.]+)[[:space:]]+(.*)$$/,m)) { emit(m[2], m[1]) } }' "$$zig_file" | sort > "$$norm_z"; \
+\tawk 'function emit(k,v){ printf "%s\t%s\n", k, v } { if ($0 ~ /[0-9.]+[[:space:]]+real/ && $0 ~ /user/ && $0 ~ /sys/) { for (i=1;i<=NF;i+=2){ v=$(i); k=$(i+1); if (k=="real"||k=="user"||k=="sys") emit(k,v) } } else if (match($0,/^([0-9.]+)[[:space:]]+(.*)$$/,m)) { emit(m[2], m[1]) } }' "$$rs_file" | sort > "$$norm_r"; \
+\tout_tsv="$(OUT_DIR)/time-compare.tsv"; \
+\t{ echo -e "Metric\tZig\tRust"; \
+\t  join -t $$'\t' -a1 -a2 -e '-' -o '0,1.2,2.2' "$$norm_z" "$$norm_r" | sort; \
+\t} > "$$out_tsv"; \
+\techo "--- time comparison ---"; \
+\tif command -v column >/dev/null 2>&1; then column -t -s $$'\t' "$$out_tsv" | sed 's/^/  /'; else cat "$$out_tsv"; fi; \
+\techo "Wrote $$out_tsv"
+
+.PHONY: time-zig time-rust
+time-zig:
+	@set -euo pipefail; \
+	if [ -z "$(FILE)" ]; then echo "Usage: make time-zig FILE=path/to/file.evtx [OPT=ReleaseFast]"; exit 1; fi; \
+	mkdir -p $(OUT_DIR); \
+	echo "Building Zig ($(OPT))..."; \
+	$(ZIG) build -Dtarget=$(TARGET) -Doptimize=$(OPT) >/dev/null; \
+	echo "Timing Zig..."; \
+	/usr/bin/time -l zig-out/bin/evtx_dump_zig --no-checks -t 1 -o xml "$(FILE)" >/dev/null 2> "$(OUT_DIR)/time-zig.txt"; \
+	echo "--- tail(time-zig) ---"; tail -n 8 "$(OUT_DIR)/time-zig.txt" | cat; \
+	echo "Output written to $(OUT_DIR)/time-zig.txt"
+
+time-rust: install-evtx
+	@set -euo pipefail; \
+	if [ -z "$(FILE)" ]; then echo "Usage: make time-rust FILE=path/to/file.evtx"; exit 1; fi; \
+	mkdir -p $(OUT_DIR); \
+	echo "Timing Rust (evtx_dump)..."; \
+	/usr/bin/time -l $(EVTX_DUMP) -t 1 -o xml "$(FILE)" >/dev/null 2> "$(OUT_DIR)/time-rs.txt"; \
+	echo "--- tail(time-rs) ---"; tail -n 8 "$(OUT_DIR)/time-rs.txt" | cat; \
+	echo "Output written to $(OUT_DIR)/time-rs.txt"
+
+# --- LLDB helpers (auto-exiting batch mode) ---
+.PHONY: lldb
+lldb:
+		@set -u; \
+		if ! command -v lldb >/dev/null 2>&1; then echo "lldb not found"; exit 1; fi; \
+		$(MAKE) build OPT=Debug >/dev/null; \
+		args="$(ARGS)"; \
+		if [ -z "$$args" ]; then args="-vv -t 1 -o xml ./samples/system.evtx"; fi; \
+		lldb --batch \
+		  -o "settings set auto-confirm true" \
+		  -k "bt all" \
+		  -k "thread list" \
+		  -k "register read" \
+		  -k "quit" \
+		  -o "run" \
+		  -- zig-out/bin/evtx_dump_zig $$args 2>&1 | cat || true
