@@ -4,9 +4,8 @@ const fs = std.fs;
 const evtx = @import("parser/evtx.zig");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // Use libc malloc-backed allocator to minimize per-alloc syscalls/page faults
+    const allocator = std.heap.c_allocator;
 
     var args_iter = try std.process.argsWithAllocator(allocator);
     defer args_iter.deinit();

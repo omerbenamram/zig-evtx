@@ -21,7 +21,7 @@ const TRACE_ENABLED: bool = builtin.mode == .Debug;
 fn loadGlobalLevel() void {
     if (global_level_loaded) return;
     global_level_loaded = true;
-    const allocator = std.heap.page_allocator;
+    const allocator = std.heap.c_allocator;
     const key_list = [_][]const u8{ "EVTX_LOG_LEVEL", "EVTX_LOG" };
     var i: usize = 0;
     while (i < key_list.len) : (i += 1) {
@@ -37,7 +37,7 @@ fn loadGlobalLevel() void {
 
 fn ensureMap() *std.StringHashMap(Level) {
     if (!module_levels_inited) {
-        module_levels = std.StringHashMap(Level).init(std.heap.page_allocator);
+        module_levels = std.StringHashMap(Level).init(std.heap.c_allocator);
         module_levels_inited = true;
     }
     return &module_levels;
@@ -48,7 +48,7 @@ var module_levels: std.StringHashMap(Level) = undefined;
 
 fn cacheModuleLevel(module: []const u8, lvl: Level) void {
     var map = ensureMap();
-    const mod_copy = std.heap.page_allocator.dupe(u8, module) catch return;
+    const mod_copy = std.heap.c_allocator.dupe(u8, module) catch return;
     map.put(mod_copy, lvl) catch {};
 }
 
@@ -91,8 +91,8 @@ fn getModuleLevel(module: []const u8) Level {
     var key_buf: [128]u8 = undefined;
     const key = envKeyForModule(&key_buf, module);
     if (key.len > 0) {
-        if (std.process.getEnvVarOwned(std.heap.page_allocator, key)) |val| {
-            defer std.heap.page_allocator.free(val);
+        if (std.process.getEnvVarOwned(std.heap.c_allocator, key)) |val| {
+            defer std.heap.c_allocator.free(val);
             if (parseLevel(std.mem.trim(u8, val, " \t\r\n"))) |lvl| {
                 cacheModuleLevel(module, lvl);
                 return lvl;
@@ -174,6 +174,6 @@ pub fn setGlobalLevel(lvl: Level) void {
 pub fn setModuleLevel(module: []const u8, lvl: Level) void {
     var map = ensureMap();
     // Store owned key to make it stable
-    const mod_copy = std.heap.page_allocator.dupe(u8, module) catch return;
+    const mod_copy = std.heap.c_allocator.dupe(u8, module) catch return;
     map.put(mod_copy, lvl) catch {};
 }

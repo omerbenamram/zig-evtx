@@ -482,18 +482,18 @@ fn arrayItemNext(base: u8, backing_t: u8, data: []const u8, idx: *usize) ?[]cons
 }
 
 pub fn render(chunk: []const u8, bin: []const u8, mode: RenderMode, w: anytype) !void {
-    var ctx = try Context.init(std.heap.page_allocator);
+    var ctx = try Context.init(std.heap.c_allocator);
     defer ctx.deinit();
     switch (mode) {
         .xml => try renderXmlWithContext(&ctx, chunk, bin, w),
         .json => {
-            var ctx2 = try Context.init(std.heap.page_allocator);
+            var ctx2 = try Context.init(std.heap.c_allocator);
             defer ctx2.deinit();
             const root = try buildExpandedElementTree(&ctx2, chunk, bin);
             try renderElementJson(chunk, root, ctx2.arena.allocator(), w);
         },
         .jsonl => {
-            var ctx2 = try Context.init(std.heap.page_allocator);
+            var ctx2 = try Context.init(std.heap.c_allocator);
             defer ctx2.deinit();
             const root = try buildExpandedElementTree(&ctx2, chunk, bin);
             try renderElementJson(chunk, root, ctx2.arena.allocator(), w);
@@ -545,8 +545,7 @@ pub const Context = struct {
         // Invalidate any arena-backed cached slices
         self.sep_space_utf16 = null;
         self.sep_comma_utf16 = null;
-        self.arena.deinit();
-        self.arena = std.heap.ArenaAllocator.init(self.allocator);
+        _ = self.arena.reset(.retain_capacity);
     }
 
     fn getSepUtf16(self: *Context, ascii: []const u8) !struct { bytes: []u8, num_chars: usize } {
