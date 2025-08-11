@@ -8,21 +8,6 @@ const BinXmlError = @import("../err.zig").BinXmlError;
 const logger = @import("../../logger.zig");
 const log = logger.scoped("binxml");
 const tokens = @import("tokens.zig");
-const hasMore = tokens.hasMore;
-const isToken = tokens.isToken;
-const TOK_FRAGMENT_HEADER: u8 = tokens.TOK_FRAGMENT_HEADER;
-const TOK_OPEN_START: u8 = tokens.TOK_OPEN_START;
-const TOK_CLOSE_START: u8 = tokens.TOK_CLOSE_START;
-const TOK_CLOSE_EMPTY: u8 = tokens.TOK_CLOSE_EMPTY;
-const TOK_END_ELEMENT: u8 = tokens.TOK_END_ELEMENT;
-const TOK_VALUE: u8 = tokens.TOK_VALUE;
-const TOK_ATTRIBUTE: u8 = tokens.TOK_ATTRIBUTE;
-const TOK_TEMPLATE_INSTANCE: u8 = tokens.TOK_TEMPLATE_INSTANCE;
-const TOK_CDATA: u8 = tokens.TOK_CDATA;
-const TOK_CHARREF: u8 = tokens.TOK_CHARREF;
-const TOK_ENTITYREF: u8 = tokens.TOK_ENTITYREF;
-const TOK_PITARGET: u8 = tokens.TOK_PITARGET;
-const TOK_PIDATA: u8 = tokens.TOK_PIDATA;
 const util = @import("../util.zig");
 const utf16EqualsAscii = util.utf16EqualsAscii;
 const binxml_name = @import("name.zig");
@@ -357,12 +342,12 @@ fn parseElementIRBase(ctx: *Context, chunk: []const u8, r: *Reader, allocator: s
         }, r.pos, std.fmt.fmtSliceHexLower(tmp[0..take]) });
     }
     const start = try r.readU8();
-    if (!isToken(start, TOK_OPEN_START)) return BinXmlError.BadToken;
+    if (!tokens.isToken(start, tokens.TOK_OPEN_START)) return BinXmlError.BadToken;
     const hdr = try parseElementHeaderAndEnd(ctx, chunk, r, allocator, src, chunk_base, element_start);
     const name = hdr.name;
     const element_end = hdr.element_end;
     const el = try IRModule.irNewElement(allocator, name);
-    if (hasMore(start, TOK_OPEN_START)) {
+    if (tokens.hasMore(start, tokens.TOK_OPEN_START)) {
         el.attrs = try parseAttributeListIR(ctx, chunk, r, allocator, src, element_end, chunk_base);
         var ai_h: usize = 0;
         while (ai_h < el.attrs.items.len) : (ai_h += 1) updateHintsFromNodes(el, el.attrs.items[ai_h].value.items, true);
@@ -373,8 +358,8 @@ fn parseElementIRBase(ctx: *Context, chunk: []const u8, r: *Reader, allocator: s
     const prev_pos = r.pos;
     const nxt = try r.readU8();
     if (log.enabled(.trace)) log.trace("parseElementIR nxt=0x{x} pos=0x{x} end=0x{x}", .{ nxt, r.pos, element_end });
-    if (isToken(nxt, TOK_CLOSE_EMPTY)) return el;
-    if (!isToken(nxt, TOK_CLOSE_START)) {
+    if (tokens.isToken(nxt, tokens.TOK_CLOSE_EMPTY)) return el;
+    if (!tokens.isToken(nxt, tokens.TOK_CLOSE_START)) {
         if (log.enabled(.trace)) {
             var tmp2: [64]u8 = undefined;
             const win_start = if (prev_pos >= 16) prev_pos - 16 else 0;
@@ -390,14 +375,14 @@ fn parseElementIRBase(ctx: *Context, chunk: []const u8, r: *Reader, allocator: s
         if (r.pos >= element_end or r.rem() == 0) break;
         const t = r.buf[r.pos];
         if (log.enabled(.trace)) log.trace("content token 0x{x} at 0x{x}/0x{x}", .{ t, r.pos, element_end });
-        if (isToken(t, TOK_END_ELEMENT)) {
+        if (tokens.isToken(t, tokens.TOK_END_ELEMENT)) {
             _ = try r.readU8();
             break;
-        } else if (isToken(t, TOK_OPEN_START)) {
+        } else if (tokens.isToken(t, tokens.TOK_OPEN_START)) {
             const child = try parseElementIRBase(ctx, chunk, r, allocator, src, chunk_base);
             try el.children.append(.{ .tag = .Element, .elem = child });
             el.has_element_child = true;
-        } else if (isToken(t, TOK_VALUE) or isToken(t, tokens.TOK_NORMAL_SUBST) or isToken(t, tokens.TOK_OPTIONAL_SUBST) or isToken(t, TOK_CDATA) or isToken(t, TOK_CHARREF) or isToken(t, TOK_ENTITYREF) or isToken(t, TOK_PITARGET) or isToken(t, TOK_PIDATA)) {
+        } else if (tokens.isToken(t, tokens.TOK_VALUE) or tokens.isToken(t, tokens.TOK_NORMAL_SUBST) or tokens.isToken(t, tokens.TOK_OPTIONAL_SUBST) or tokens.isToken(t, tokens.TOK_CDATA) or tokens.isToken(t, tokens.TOK_CHARREF) or tokens.isToken(t, tokens.TOK_ENTITYREF) or tokens.isToken(t, tokens.TOK_PITARGET) or tokens.isToken(t, tokens.TOK_PIDATA)) {
             var seq = std.ArrayList(IR.Node).init(allocator);
             try collectValueTokensIRWithCtx(ctx, chunk, r, &seq, src, element_end, allocator, chunk_base);
             if (r.pos > element_end) r.pos = element_end;
@@ -417,12 +402,12 @@ fn parseAttributeListIR(ctx: *Context, chunk: []const u8, r: *Reader, allocator:
     var out = std.ArrayList(IR.Attr).init(allocator);
     var scan_pos = r.pos;
     var attr_count: usize = 0;
-    while (scan_pos < list_end and scan_pos < r.buf.len and isToken(r.buf[scan_pos], TOK_ATTRIBUTE)) : (scan_pos += 1) {
+    while (scan_pos < list_end and scan_pos < r.buf.len and tokens.isToken(r.buf[scan_pos], tokens.TOK_ATTRIBUTE)) : (scan_pos += 1) {
         attr_count += 1;
         break;
     }
     if (attr_count > 0) try out.ensureTotalCapacityPrecise(attr_count);
-    while (r.pos < list_end and r.rem() > 0 and isToken(r.buf[r.pos], TOK_ATTRIBUTE)) {
+    while (r.pos < list_end and r.rem() > 0 and tokens.isToken(r.buf[r.pos], tokens.TOK_ATTRIBUTE)) {
         _ = try r.readU8();
         var name: IR.Name = undefined;
         name = try readNameIRBounded(ctx, chunk, r, allocator, src, list_end, chunk_base);
@@ -441,8 +426,8 @@ fn collectValueTokensIRWithCtx(ctx: *Context, chunk: []const u8, r: *Reader, out
         if (r.rem() == 0 or r.pos >= end_pos) break;
         const pk = r.buf[r.pos];
         if (log.enabled(.trace)) log.trace("valtok pk=0x{x} at 0x{x}", .{ pk, r.pos });
-        if (isToken(pk, TOK_ATTRIBUTE) or isToken(pk, TOK_CLOSE_START) or isToken(pk, TOK_CLOSE_EMPTY)) break;
-        if (isToken(pk, TOK_VALUE)) {
+        if (tokens.isToken(pk, tokens.TOK_ATTRIBUTE) or tokens.isToken(pk, tokens.TOK_CLOSE_START) or tokens.isToken(pk, tokens.TOK_CLOSE_EMPTY)) break;
+        if (tokens.isToken(pk, tokens.TOK_VALUE)) {
             _ = try r.readU8();
             const vtype = try r.readU8();
             if (log.enabled(.trace)) log.trace("  vtype=0x{x}", .{vtype});
@@ -478,8 +463,8 @@ fn collectValueTokensIRWithCtx(ctx: *Context, chunk: []const u8, r: *Reader, out
                 return BinXmlError.BadToken;
             }
             continue;
-        } else if (isToken(pk, tokens.TOK_NORMAL_SUBST) or isToken(pk, tokens.TOK_OPTIONAL_SUBST)) {
-            const optional = isToken(pk, tokens.TOK_OPTIONAL_SUBST);
+        } else if (tokens.isToken(pk, tokens.TOK_NORMAL_SUBST) or tokens.isToken(pk, tokens.TOK_OPTIONAL_SUBST)) {
+            const optional = tokens.isToken(pk, tokens.TOK_OPTIONAL_SUBST);
             _ = try r.readU8();
             if (r.pos + 2 + 1 > end_pos) return BinXmlError.UnexpectedEof;
             const id = try r.readU16le();
@@ -487,28 +472,28 @@ fn collectValueTokensIRWithCtx(ctx: *Context, chunk: []const u8, r: *Reader, out
             try out.append(.{ .tag = .Subst, .subst_id = id, .subst_vtype = vtype, .subst_optional = optional, .pad_width = if (want_pad2) 2 else 0 });
             want_pad2 = false;
             continue;
-        } else if (isToken(pk, TOK_CHARREF)) {
+        } else if (tokens.isToken(pk, tokens.TOK_CHARREF)) {
             _ = try r.readU8();
             if (r.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
             const v = try r.readU16le();
             try out.append(.{ .tag = .CharRef, .charref_value = v });
             continue;
-        } else if (isToken(pk, TOK_ENTITYREF)) {
+        } else if (tokens.isToken(pk, tokens.TOK_ENTITYREF)) {
             _ = try r.readU8();
             const nm = try readNameIRBounded(ctx, chunk, r, allocator, src, end_pos, chunk_base);
             try out.append(.{ .tag = .EntityRef, .entity_name = nm });
             continue;
-        } else if (isToken(pk, TOK_CDATA)) {
+        } else if (tokens.isToken(pk, tokens.TOK_CDATA)) {
             _ = try r.readU8();
             const data = try r.readUnicodeTextStringBounded(end_pos);
             try out.append(.{ .tag = .CData, .text_utf16 = data, .text_num_chars = data.len / 2 });
             continue;
-        } else if (isToken(pk, TOK_PITARGET)) {
+        } else if (tokens.isToken(pk, tokens.TOK_PITARGET)) {
             _ = try r.readU8();
             const nm = try readNameIRBounded(ctx, chunk, r, allocator, src, end_pos, chunk_base);
             try out.append(.{ .tag = .PITarget, .pi_target = nm });
             continue;
-        } else if (isToken(pk, TOK_PIDATA)) {
+        } else if (tokens.isToken(pk, tokens.TOK_PIDATA)) {
             _ = try r.readU8();
             const data = try r.readUnicodeTextStringBounded(end_pos);
             try out.append(.{ .tag = .PIData, .text_utf16 = data, .text_num_chars = data.len / 2 });
