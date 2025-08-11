@@ -290,6 +290,23 @@ lldb:
 		  -o "run" \
 		  -- zig-out/bin/evtx_dump_zig $$args 2>&1 | cat || true
 
+.PHONY: lldb-py
+lldb-py:
+	@set -u; \
+	if ! command -v lldb >/dev/null 2>&1; then echo "lldb not found"; exit 1; fi; \
+	$(MAKE) build OPT=Debug >/dev/null; \
+	exe="$(PYTHON_EXE)"; \
+	if [ ! -x "$$exe" ]; then exe=".venv/bin/python"; fi; \
+	script="$(PWD)/scripts/py_iter_from_io.py"; \
+	lldb --batch \
+	  -o "settings set auto-confirm true" \
+	  -k "bt all" \
+	  -k "thread list" \
+	  -k "register read" \
+	  -k "quit" \
+	  -o "run" \
+	  -- $$exe $$script 2>&1 | cat || true
+
 .PHONY: py-wheel py-sdist py-install py-editable py-uv-venv py-ensure-pydust
 
 UV ?= uv
@@ -308,6 +325,36 @@ py-ensure-pydust: py-uv-venv
 	@set -euo pipefail; \
 	$(UV) pip install "ziggy-pydust==0.25.1" >/dev/null; \
 	echo "pydust ready in $(VENV)"
+
+# ----- Cross-build convenience -----
+.PHONY: build-all package-all
+
+# Default multi-target set; override from CLI if needed
+TARGETS ?= x86_64-linux aarch64-linux x86_64-windows aarch64-windows x86_64-macos aarch64-macos
+
+# Build all targets sequentially, copying binaries after each build to avoid clobber
+build-all: py-ensure-pydust
+	@set -euo pipefail; \
+	mkdir -p artifacts; \
+	for t in $(TARGETS); do \
+	  echo "==> Building for $$t"; \
+	  $(ZIG) build -Dtarget=$$t -Doptimize=$(OPT) -Dpython-exe=$(PYTHON_EXE); \
+	  out_dir="artifacts/$$t"; \
+	  mkdir -p "$$out_dir"; \
+	  cp -a zig-out/bin/* "$$out_dir/"; \
+	done; \
+	echo "All targets built into ./artifacts/<target>"
+
+# Package each target dir into a tarball
+package-all:
+	@set -euo pipefail; \
+	shopt -s nullglob; \
+	for d in artifacts/*; do \
+	  [ -d "$$d" ] || continue; \
+	  base=$$(basename "$$d"); \
+	  (cd artifacts && tar -czf evtx-zig-$$base.tar.gz $$base); \
+	done; \
+	echo "Artifacts packaged under ./artifacts/*.tar.gz"
 
 py-wheel: py-uv-venv
 	@set -euo pipefail; \
