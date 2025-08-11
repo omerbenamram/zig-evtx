@@ -28,7 +28,8 @@ pub const Builder = struct {
             return try IRMod.irNewElement(self.ctx.arena.allocator(), IR.Name{ .InlineUtf16 = .{ .bytes = bytes, .num_chars = 5 } });
         }
         const first = try r.peekU8();
-        var parser = Parser.init(self.ctx, self.allocator);
+        // Parse using the per-chunk arena for all IR allocations
+        var parser = Parser.init(self.ctx, self.ctx.arena.allocator());
         if (first == tokens.TOK_TEMPLATE_INSTANCE) {
             _ = try r.readU8();
             if (r.rem() < 1 + 4 + 4) return error.UnexpectedEof;
@@ -54,13 +55,14 @@ pub const Builder = struct {
             const key: Context.DefKey = .{ .def_data_off = def_data_off, .guid = guid };
             const got = try self.ctx.cache.getOrPut(key);
             if (!got.found_existing) got.value_ptr.* = parsed_def;
-            var expander = Expander.init(self.ctx, self.allocator);
+            // Expand into arena-owned IR to avoid libc allocation churn
+            var expander = Expander.init(self.ctx, self.ctx.arena.allocator());
             const expanded = try expander.expandElementWithValues(got.value_ptr.*, values);
             try spliceEvtXmlAll(self.ctx, chunk, expanded, self.ctx.arena.allocator());
             return expanded;
         }
         const root = try parser.parseElementIR(chunk, &r, .rec);
-        var expander = Expander.init(self.ctx, self.allocator);
+        var expander = Expander.init(self.ctx, self.ctx.arena.allocator());
         const expanded_root = try expander.expandElementWithValues(root, &[_]types.TemplateValue{});
         try spliceEvtXmlAll(self.ctx, chunk, expanded_root, self.ctx.arena.allocator());
         return expanded_root;
