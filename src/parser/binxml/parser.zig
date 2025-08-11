@@ -102,7 +102,18 @@ pub fn parseTemplateInstanceValuesExpected(r: *Reader, allocator: std.mem.Alloca
     if (log.enabled(.trace)) log.trace("tmpl values declared={d}", .{declared});
     if (declared == 0) return allocator.alloc(types.TemplateValue, 0);
     if (r.rem() < 4 * declared) return BinXmlError.UnexpectedEof;
-    // Read descriptor table
+    // Read descriptor table then payloads using small helpers for clarity
+    const desc = try readTemplateValueDescriptorTable(r, allocator, declared);
+    defer allocator.free(desc.sizes);
+    defer allocator.free(desc.vtypes);
+    defer allocator.free(desc.reserved);
+    return try readTemplateValuesFromDescriptors(r, allocator, desc.sizes, desc.vtypes);
+}
+fn readTemplateValueDescriptorTable(r: *Reader, allocator: std.mem.Allocator, declared: usize) !struct {
+    sizes: []u16,
+    vtypes: []u8,
+    reserved: []u8,
+} {
     var sizes = try allocator.alloc(u16, declared);
     errdefer allocator.free(sizes);
     var vtypes = try allocator.alloc(u8, declared);
@@ -116,9 +127,13 @@ pub fn parseTemplateInstanceValuesExpected(r: *Reader, allocator: std.mem.Alloca
         reserved[i] = try r.readU8();
         if (log.enabled(.trace)) log.trace("  desc[{d}]: size={d} type=0x{x} reserved={d}", .{ i, sizes[i], vtypes[i], reserved[i] });
     }
-    // Payloads
+    return .{ .sizes = sizes, .vtypes = vtypes, .reserved = reserved };
+}
+
+fn readTemplateValuesFromDescriptors(r: *Reader, allocator: std.mem.Allocator, sizes: []const u16, vtypes: []const u8) ![]types.TemplateValue {
+    const declared = sizes.len;
     var values = try allocator.alloc(types.TemplateValue, declared);
-    i = 0;
+    var i: usize = 0;
     while (i < declared) : (i += 1) {
         const need: usize = @intCast(sizes[i]);
         if (r.rem() < need) return BinXmlError.UnexpectedEof;
@@ -131,9 +146,6 @@ pub fn parseTemplateInstanceValuesExpected(r: *Reader, allocator: std.mem.Alloca
         }
         if (log.enabled(.trace)) log.trace("  payload[{d}]: t=0x{x} len={d}", .{ i, vtypes[i], need });
     }
-    allocator.free(sizes);
-    allocator.free(vtypes);
-    allocator.free(reserved);
     return values;
 }
 
@@ -167,70 +179,21 @@ fn parseDefNameIR(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.m
     if (log.enabled(.trace)) log.trace("def name_off=0x{x} cur_after_off=0x{x}", .{ name_off, r.pos });
     const abs_after_off: usize = chunk_base + r.pos;
     if (name_off == @as(u32, @intCast(abs_after_off))) {
-        const inl_start = r.pos;
-        if (r.rem() < 6) return BinXmlError.UnexpectedEof;
-        const next_string = try r.readU32le();
-        const name_hash = try r.readU16le();
-        if (log.enabled(.trace)) log.trace("inline NameLink next=0x{x} hash=0x{x} inl_start=0x{x}", .{ next_string, name_hash, inl_start });
-        if (r.rem() < 2) return BinXmlError.UnexpectedEof;
-        const num = try r.readU16le();
-        const bytes = @as(usize, num) * 2;
-        if (log.enabled(.trace)) log.trace("inline name num={d} r.pos=0x{x}", .{ num, r.pos });
-        if (r.rem() < bytes) return BinXmlError.UnexpectedEof;
-        const slice_src = r.buf[r.pos .. r.pos + bytes];
-        r.pos += bytes;
-        const want_end = inl_start + 6 + @as(usize, num) * 2 + 4;
-        if (log.enabled(.trace)) log.trace("inline name end want=0x{x} now=0x{x}", .{ want_end, r.pos });
-        if (r.pos < want_end and want_end <= r.buf.len) r.pos = want_end;
+        const view = try r.readTemplateNameLinkInlineView();
+        if (log.enabled(.trace)) log.trace("inline NameLink next+hash read inl_start to end; num={d}", .{view.num_chars});
+        const bytes = view.utf16.len;
         const buf = try allocator.alloc(u8, bytes);
-        @memcpy(buf, slice_src);
-        return IR.Name{ .InlineUtf16 = .{ .bytes = buf, .num_chars = @intCast(num) } };
+        @memcpy(buf, view.utf16);
+        return IR.Name{ .InlineUtf16 = .{ .bytes = buf, .num_chars = view.num_chars } };
     }
     return materializeNameFromChunkOffset(ctx, chunk, name_off);
 }
 
-fn readInlineNameDefFlexibleAlloc(r: *Reader, alloc: std.mem.Allocator) !struct { bytes: []u8, num_chars: usize } {
-    if (r.rem() >= 4) {
-        const saveA = r.pos;
-        _ = try r.readU16le();
-        const numA = try r.readU16le();
-        const bytesA = @as(usize, numA) * 2;
-        if (numA > 0 and r.rem() >= bytesA and r.pos + bytesA <= r.buf.len) {
-            const sliceA_src = r.buf[r.pos .. r.pos + bytesA];
-            r.pos += bytesA;
-            if (r.rem() >= 2) {
-                const eos = std.mem.readInt(u16, r.buf[r.pos .. r.pos + 2][0..2], .little);
-                if (eos == 0) r.pos += 2;
-            }
-            const buf = try alloc.alloc(u8, bytesA);
-            @memcpy(buf, sliceA_src);
-            return .{ .bytes = buf, .num_chars = numA };
-        }
-        r.pos = saveA;
-    }
-    if (r.rem() >= 2) {
-        const saveB = r.pos;
-        const numB = try r.readU16le();
-        const bytesB = @as(usize, numB) * 2;
-        if (numB > 0 and r.rem() >= bytesB and r.pos + bytesB <= r.buf.len) {
-            const sliceB_src = r.buf[r.pos .. r.pos + bytesB];
-            r.pos += bytesB;
-            if (r.rem() >= 2) {
-                const eos = std.mem.readInt(u16, r.buf[r.pos .. r.pos + 2][0..2], .little);
-                if (eos == 0) r.pos += 2;
-            }
-            const buf = try alloc.alloc(u8, bytesB);
-            @memcpy(buf, sliceB_src);
-            return .{ .bytes = buf, .num_chars = numB };
-        }
-        r.pos = saveB;
-    }
-    return BinXmlError.UnexpectedEof;
-}
-
 fn parseInlineNameFlexibleIR(r: *Reader, alloc: std.mem.Allocator) !IR.Name {
-    const nm = try readInlineNameDefFlexibleAlloc(r, alloc);
-    return IR.Name{ .InlineUtf16 = .{ .bytes = nm.bytes, .num_chars = nm.num_chars } };
+    const view = try r.readValueNameInlineView();
+    const buf = try alloc.alloc(u8, view.utf16.len);
+    @memcpy(buf, view.utf16);
+    return IR.Name{ .InlineUtf16 = .{ .bytes = buf, .num_chars = view.num_chars } };
 }
 
 fn readNameIRBounded(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, end_pos: usize, chunk_base: usize) !IR.Name {
