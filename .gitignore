@@ -1,7 +1,10 @@
 .zig-cache
 out
 zig-out/
+binaries/
 
 *.pyc
 .DS_Store
 repomix-output.xml
+
+*.so
