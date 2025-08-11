@@ -47,6 +47,11 @@ clean:
 bench:
 	@echo "Benchmark harness TBD. Use: make run ARGS='-o json sample.evtx'"
 
+.PHONY: bench-zbench
+bench-zbench:
+	@mkdir -p out
+	$(ZIG) build bench-zbench -Dtarget=$(TARGET) -Doptimize=$(OPT) | tee out/bench-zbench.txt
+
 .PHONY: todo
 todo:
 	@echo "Open TODOs:" && rg -n "TODO|FIXME" -S || true

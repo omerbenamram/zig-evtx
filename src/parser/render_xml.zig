@@ -6,8 +6,8 @@ const logger = @import("../logger.zig");
 const log = logger.scoped("render_xml");
 const std = @import("std");
 const BinXmlError = @import("err.zig").BinXmlError;
-const writeUtf16LeXmlEscaped = @import("util.zig").writeUtf16LeXmlEscaped;
-const writeAnsiCp1252Escaped = @import("util.zig").writeAnsiCp1252Escaped;
+const util = @import("util.zig");
+const writeAnsiCp1252Escaped = util.writeAnsiCp1252Escaped;
 const formatIso8601UtcFromFiletimeMicros = @import("util.zig").formatIso8601UtcFromFiletimeMicros;
 
 const normalizeAndWriteSystemTimeAscii = @import("util.zig").normalizeAndWriteSystemTimeAscii;
@@ -23,7 +23,7 @@ const attrNameIsSystemTime = @import("binxml/name.zig").attrNameIsSystemTime;
 fn renderAttrValueFromIRStream(chunk: []const u8, nodes: []const IR.Node, _: []const TemplateValue, w: anytype) !void {
     var pending_pad: usize = 0;
     for (nodes) |nd| switch (nd.tag) {
-        .Text => try writeUtf16LeXmlEscaped(w, nd.text_utf16, nd.text_num_chars),
+        .Text => try util.writeUtf16LeXmlEscaped(w, nd.text_utf16, nd.text_num_chars),
         .Pad => pending_pad = nd.pad_width,
         .Value => {
             if (pending_pad > 0 and (nd.vtype == 0x07 or nd.vtype == 0x08 or nd.vtype == 0x09 or nd.vtype == 0x0a)) {
@@ -46,7 +46,7 @@ fn renderAttrValueFromIRStream(chunk: []const u8, nodes: []const IR.Node, _: []c
             try writeNameXml(chunk, nd.entity_name, w);
             try w.writeByte(';');
         },
-        .CData => try writeUtf16LeXmlEscaped(w, nd.text_utf16, nd.text_num_chars),
+        .CData => try util.writeUtf16LeXmlEscaped(w, nd.text_utf16, nd.text_num_chars),
         .PITarget => {
             try w.writeAll("<?");
             try writeNameXml(chunk, nd.pi_target, w);
@@ -190,7 +190,7 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
                         if (std.mem.readInt(u16, vv.data[end .. end + 2][0..2], .little) == 0) break;
                     }
                     try write_open.go(chunk, el, w, indent);
-                    if (end > start) try writeUtf16LeXmlEscaped(w, vv.data[start..end], (end - start) / 2);
+                    if (end > start) try util.writeUtf16LeXmlEscaped(w, vv.data[start..end], (end - start) / 2);
                     try write_close.go(chunk, el, w, indent);
                     any_item = true;
                     if (end + 1 < vv.data.len) j = end + 2 else break;
@@ -338,16 +338,16 @@ pub fn writeNameFromOffset(chunk: []const u8, name_offset: u32, w: anytype) !voi
         const last = std.mem.readInt(u16, chunk[str_start + byte_len - 2 .. str_start + byte_len][0..2], .little);
         if (last == 0 and num > 0) num -= 1;
     }
-    try writeUtf16LeXmlEscaped(w, chunk[str_start .. str_start + num * 2], num);
+    try util.writeUtf16LeXmlEscaped(w, chunk[str_start .. str_start + num * 2], num);
 }
 
 pub fn writeNameFromUtf16(w: anytype, utf16le: []const u8, num_chars: usize) !void {
-    try writeUtf16LeXmlEscaped(w, utf16le, num_chars);
+    try util.writeUtf16LeXmlEscaped(w, utf16le, num_chars);
 }
 
 pub fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w: anytype) anyerror!void {
     if (ctx.verbose) logger.setModuleLevel("binxml", .trace);
-        // Build expanded IR using the new binxml facade (preserves previous behavior)
+    // Build expanded IR using the new binxml facade (preserves previous behavior)
     var builder = binxml.Builder.init(ctx, ctx.allocator);
     const root = try builder.buildExpandedElementTree(chunk, bin);
     if (ctx.verbose) {
@@ -362,7 +362,7 @@ fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, _: []const T
     const aw = fbs.writer();
     var pending_pad: usize = 0;
     for (nodes) |nd| switch (nd.tag) {
-        .Text => try writeUtf16LeXmlEscaped(aw, nd.text_utf16, nd.text_num_chars),
+        .Text => try util.writeUtf16LeXmlEscaped(aw, nd.text_utf16, nd.text_num_chars),
         .Pad => pending_pad = nd.pad_width,
         .Value => {
             if (pending_pad > 0 and (nd.vtype == 0x07 or nd.vtype == 0x08 or nd.vtype == 0x09 or nd.vtype == 0x0a)) {
@@ -385,7 +385,7 @@ fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, _: []const T
             try writeNameXml(chunk, nd.entity_name, aw);
             try aw.writeByte(';');
         },
-        .CData => try writeUtf16LeXmlEscaped(aw, nd.text_utf16, nd.text_num_chars),
+        .CData => try util.writeUtf16LeXmlEscaped(aw, nd.text_utf16, nd.text_num_chars),
         .PITarget => {
             try aw.writeAll("<?");
             try writeNameXml(chunk, nd.pi_target, aw);
@@ -407,7 +407,7 @@ fn renderTextContentFromIR(chunk: []const u8, nodes: []const IR.Node, _: []const
     while (i < nodes.len) : (i += 1) {
         const nd = nodes[i];
         switch (nd.tag) {
-            .Text => try writeUtf16LeXmlEscaped(w, nd.text_utf16, nd.text_num_chars),
+            .Text => try util.writeUtf16LeXmlEscaped(w, nd.text_utf16, nd.text_num_chars),
             .Pad => pending_pad = nd.pad_width,
             .Value => {
                 if (pending_pad > 0 and (nd.vtype == 0x07 or nd.vtype == 0x08 or nd.vtype == 0x09 or nd.vtype == 0x0a)) {
@@ -492,7 +492,7 @@ pub fn writeValueXml(w: anytype, t: u8, data: []const u8) !void {
                 if (last == 0) num -= 1;
             }
             if (num == 0) return;
-            try writeUtf16LeXmlEscaped(w, data[0 .. num * 2], num);
+            try util.writeUtf16LeXmlEscaped(w, data[0 .. num * 2], num);
         },
         0x02 => { // AnsiStringType (codepage)
             try writeAnsiCp1252Escaped(w, data);

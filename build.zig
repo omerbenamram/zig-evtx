@@ -4,6 +4,9 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const dep_opts = .{ .target = target, .optimize = optimize };
+    const zbench_mod = b.dependency("zbench", dep_opts).module("zbench");
+
     const exe = b.addExecutable(.{
         .name = "evtx_dump_zig",
         .root_source_file = .{ .cwd_relative = "src/main.zig" },
@@ -28,4 +31,18 @@ pub fn build(b: *std.Build) void {
     const test_run = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&test_run.step);
+
+    // zBench microbench executable
+
+    const zbench_exe = b.addExecutable(.{
+        .name = "bench_utf_zbench",
+        .root_source_file = .{ .cwd_relative = "src/bench_utf_zbench.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
+    zbench_exe.root_module.addImport("zbench", zbench_mod);
+    b.installArtifact(zbench_exe);
+    const zbench_run = b.addRunArtifact(zbench_exe);
+    const zbench_step = b.step("bench-zbench", "Run zBench microbenchmarks");
+    zbench_step.dependOn(&zbench_run.step);
 }
