@@ -1,5 +1,6 @@
 // Reader drives Binary XML token parsing for one buffer slice (record or template definition).
 const BinXmlError = @import("err.zig").BinXmlError;
+const tokens = @import("binxml/tokens.zig");
 
 const std = @import("std");
 
@@ -132,5 +133,26 @@ pub const Reader = struct {
         const slice = self.buf[start .. start + needed];
         self.pos = start + needed;
         return slice;
+    }
+
+    pub const TemplateInstanceHeader = struct { def_data_off: u32 };
+
+    pub fn readTemplateInstanceHeader(self: *Reader) !TemplateInstanceHeader {
+        // Caller should have peeked TOK_TEMPLATE_INSTANCE; be tolerant and just consume
+        const tag = try self.readU8();
+        if ((tag & 0x1f) != tokens.TOK_TEMPLATE_INSTANCE) return BinXmlError.BadToken;
+        if (self.rem() < 1 + 4 + 4) return BinXmlError.UnexpectedEof;
+        _ = try self.readU8(); // unknown
+        _ = try self.readU32le(); // template id
+        const def_data_off = try self.readU32le();
+        if (def_data_off == @as(u32, @intCast(self.pos))) {
+            if (self.rem() < 24) return BinXmlError.UnexpectedEof;
+            _ = try self.readU32le();
+            _ = try self.readGuid();
+            const data_size_inline = try self.readU32le();
+            if (self.rem() < data_size_inline) return BinXmlError.UnexpectedEof;
+            self.pos += @as(usize, data_size_inline);
+        }
+        return .{ .def_data_off = def_data_off };
     }
 };

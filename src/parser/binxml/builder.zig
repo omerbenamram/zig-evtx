@@ -24,50 +24,58 @@ pub const Builder = struct {
     pub fn buildExpandedElementTree(self: *Builder, chunk: []const u8, bin: []const u8) !*IR.Element {
         var r = Reader.init(bin);
         try common.skipFragmentHeaderIfPresent(&r);
-        if (r.rem() == 0) {
-            // Build minimal <Event/> IR
-            const bytes: []u8 = try util.utf16FromAscii(self.ctx.arena.allocator(), "Event");
-            return try IRMod.irNewElement(self.ctx.arena.allocator(), IR.Name{ .InlineUtf16 = .{ .bytes = bytes, .num_chars = 5 } });
+        if (r.rem() == 0) return try self.buildEmptyEventElement();
+
+        if (try self.isTemplateInstance(&r)) {
+            return try self.parseAndExpandTemplateInstance(chunk, &r);
         }
+
+        return try self.parseAndExpandRegularElement(chunk, &r);
+    }
+
+    fn buildEmptyEventElement(self: *Builder) !*IR.Element {
+        // Build minimal <Event/> IR
+        const bytes: []u8 = try util.utf16FromAscii(self.ctx.arena.allocator(), "Event");
+        return try IRMod.irNewElement(self.ctx.arena.allocator(), IR.Name{ .InlineUtf16 = .{ .bytes = bytes, .num_chars = 5 } });
+    }
+
+    fn isTemplateInstance(_: *Builder, r: *Reader) !bool {
+        if (r.rem() == 0) return false;
         const first = try r.peekU8();
+        return first == tokens.TOK_TEMPLATE_INSTANCE;
+    }
+
+    fn parseAndExpandRegularElement(self: *Builder, chunk: []const u8, r: *Reader) !*IR.Element {
         // Parse using the per-chunk arena for all IR allocations
         var parser = Parser.init(self.ctx, self.ctx.arena.allocator());
-        if (first == tokens.TOK_TEMPLATE_INSTANCE) {
-            _ = try r.readU8();
-            if (r.rem() < 1 + 4 + 4) return error.UnexpectedEof;
-            _ = try r.readU8(); // unknown
-            _ = try r.readU32le(); // template id
-            const def_data_off = try r.readU32le();
-            if (def_data_off == @as(u32, @intCast(r.pos))) {
-                if (r.rem() < 24) return error.UnexpectedEof;
-                _ = try r.readU32le();
-                _ = try r.readGuid();
-                const data_size_inline = try r.readU32le();
-                if (r.rem() < data_size_inline) return error.UnexpectedEof;
-                r.pos += @as(usize, data_size_inline);
-            }
-            common.skipInlineCachedTemplateDefs(&r);
-            const parsed = try parseTemplateDefFromChunk(self.ctx, chunk, def_data_off, self.ctx.arena.allocator());
-            const parsed_def = parsed.def;
-            const expected = @import("parser.zig").expectedValuesFromTemplate(parsed_def);
-            const values = try @import("parser.zig").parseTemplateInstanceValuesExpected(&r, self.ctx.arena.allocator(), expected);
-            var guid: [16]u8 = undefined;
-            const def_off_usize2: usize = @intCast(def_data_off);
-            std.mem.copyForwards(u8, guid[0..], chunk[def_off_usize2 + 4 .. def_off_usize2 + 20]);
-            const key: Context.DefKey = .{ .def_data_off = def_data_off, .guid = guid };
-            const got = try self.ctx.cache.getOrPut(key);
-            if (!got.found_existing) got.value_ptr.* = parsed_def;
-            // Expand into arena-owned IR to avoid libc allocation churn
-            var expander = Expander.init(self.ctx, self.ctx.arena.allocator());
-            const expanded = try expander.expandElementWithValues(got.value_ptr.*, values);
-            try spliceEvtXmlAll(self.ctx, chunk, expanded, self.ctx.arena.allocator());
-            return expanded;
-        }
-        const root = try parser.parseElementIR(chunk, &r, .rec);
+        const root = try parser.parseElementIR(chunk, r, .rec);
         var expander = Expander.init(self.ctx, self.ctx.arena.allocator());
         const expanded_root = try expander.expandElementWithValues(root, &[_]types.TemplateValue{});
         try spliceEvtXmlAll(self.ctx, chunk, expanded_root, self.ctx.arena.allocator());
         return expanded_root;
+    }
+
+    fn parseAndExpandTemplateInstance(self: *Builder, chunk: []const u8, r: *Reader) !*IR.Element {
+        const header = try r.readTemplateInstanceHeader();
+        common.skipInlineCachedTemplateDefs(r);
+        const parsed = try parseTemplateDefFromChunk(self.ctx, chunk, header.def_data_off, self.ctx.arena.allocator());
+        const parsed_def = parsed.def;
+        const expected = @import("parser.zig").expectedValuesFromTemplate(parsed_def);
+        const values = try @import("parser.zig").parseTemplateInstanceValuesExpected(r, self.ctx.arena.allocator(), expected);
+        const key = defCacheKeyFromChunkOffset(chunk, header.def_data_off);
+        const got = try self.ctx.cache.getOrPut(key);
+        if (!got.found_existing) got.value_ptr.* = parsed_def;
+        var expander = Expander.init(self.ctx, self.ctx.arena.allocator());
+        const expanded = try expander.expandElementWithValues(got.value_ptr.*, values);
+        try spliceEvtXmlAll(self.ctx, chunk, expanded, self.ctx.arena.allocator());
+        return expanded;
+    }
+
+    fn defCacheKeyFromChunkOffset(chunk: []const u8, def_data_off: u32) Context.DefKey {
+        var guid: [16]u8 = undefined;
+        const base: usize = @intCast(def_data_off);
+        std.mem.copyForwards(u8, guid[0..], chunk[base + 4 .. base + 20]);
+        return .{ .def_data_off = def_data_off, .guid = guid };
     }
 
     // Local copies removed; use common.zig
@@ -91,13 +99,9 @@ pub const Builder = struct {
         while (r.rem() > 0) {
             const pk = r.buf[r.pos];
             if (pk != tokens.TOK_TEMPLATE_INSTANCE) break;
-            _ = try r.readU8();
-            if (r.rem() < 1 + 4 + 4) break;
-            _ = try r.readU8();
-            _ = try r.readU32le();
-            const def_data_off = try r.readU32le();
+            const header = r.readTemplateInstanceHeader() catch break;
             common.skipInlineCachedTemplateDefs(&r);
-            const parsed = try parseTemplateDefFromChunk(ctx, chunk, def_data_off, alloc);
+            const parsed = try parseTemplateDefFromChunk(ctx, chunk, header.def_data_off, alloc);
             const child_def = parsed.def;
             const expected = @import("parser.zig").expectedValuesFromTemplate(child_def);
             const vals = try @import("parser.zig").parseTemplateInstanceValuesExpected(&r, alloc, expected);
