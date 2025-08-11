@@ -25,7 +25,8 @@ const TOK_PITARGET: u8 = tokens.TOK_PITARGET;
 const TOK_PIDATA: u8 = tokens.TOK_PIDATA;
 const util = @import("../util.zig");
 const utf16EqualsAscii = util.utf16EqualsAscii;
-const name_helpers = @import("name.zig");
+const binxml_name = @import("name.zig");
+const common = @import("common.zig");
 
 // Temporary wrapper Parser that forwards to existing functions in binxml.zig.
 // This allows incremental migration without breaking call sites or logs.
@@ -153,25 +154,7 @@ pub fn parseTemplateInstanceValuesExpected(r: *Reader, allocator: std.mem.Alloca
 
 // --- Parsing helpers (local copies for incremental migration) ---
 
-fn skipFragmentHeaderIfPresent(r: *Reader) !void {
-    if (r.rem() >= 4 and r.buf[r.pos] == TOK_FRAGMENT_HEADER) {
-        _ = try r.readU8(); // token
-        _ = try r.readU8(); // major
-        _ = try r.readU8(); // minor
-        _ = try r.readU8(); // flags
-    }
-}
-
-fn skipInlineCachedTemplateDefs(r: *Reader) void {
-    while (r.rem() >= 28) {
-        const data_size_peek = std.mem.readInt(u32, r.buf[r.pos + 20 .. r.pos + 24][0..4], .little);
-        const block_end = r.pos + 24 + @as(usize, data_size_peek);
-        if (block_end > r.buf.len) break;
-        const payload_first = r.buf[r.pos + 24];
-        if (payload_first != TOK_FRAGMENT_HEADER) break;
-        r.pos = block_end;
-    }
-}
+// helpers moved to common.zig
 
 fn materializeNameFromChunkOffset(ctx: *Context, chunk: []const u8, off_u32: u32) !IR.Name {
     const off_usize: usize = @intCast(off_u32);
@@ -443,7 +426,7 @@ fn parseAttributeListIR(ctx: *Context, chunk: []const u8, r: *Reader, allocator:
         _ = try r.readU8();
         var name: IR.Name = undefined;
         name = try readNameIRBounded(ctx, chunk, r, allocator, src, list_end, chunk_base);
-        if (log.enabled(.trace)) try name_helpers.logNameTrace(chunk, name, "attr");
+        if (log.enabled(.trace)) try binxml_name.logNameTrace(chunk, name, "attr");
         var value_tokens = std.ArrayList(IR.Node).init(allocator);
         try collectValueTokensIRWithCtx(ctx, chunk, r, &value_tokens, src, list_end, allocator, chunk_base);
         try out.append(.{ .name = name, .value = value_tokens });

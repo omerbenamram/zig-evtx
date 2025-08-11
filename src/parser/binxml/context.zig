@@ -1,6 +1,7 @@
 const std = @import("std");
 const IRModule = @import("../ir.zig");
 const IR = IRModule.IR;
+const util = @import("../util.zig");
 
 // --- Context and template cache (IR) ---
 // Keep this file renderer-free to avoid cycles. Lifetime: per parser/run, with resetPerChunk().
@@ -63,30 +64,18 @@ pub const Context = struct {
         if (ascii.len == 0) return .{ .bytes = &[_]u8{}, .num_chars = 0 };
         if (ascii.len == 1 and ascii[0] == ' ') {
             if (self.sep_space_utf16 == null) {
-                self.sep_space_utf16 = try utf16FromAscii(self.arena.allocator(), ascii);
+                self.sep_space_utf16 = try util.utf16FromAscii(self.arena.allocator(), ascii);
             }
             return .{ .bytes = self.sep_space_utf16.?, .num_chars = 1 };
         }
         if (ascii.len == 1 and ascii[0] == ',') {
             if (self.sep_comma_utf16 == null) {
-                self.sep_comma_utf16 = try utf16FromAscii(self.arena.allocator(), ascii);
+                self.sep_comma_utf16 = try util.utf16FromAscii(self.arena.allocator(), ascii);
             }
             return .{ .bytes = self.sep_comma_utf16.?, .num_chars = 1 };
         }
         // Fallback (should not happen with current joiner policy)
-        const dyn = try utf16FromAscii(self.arena.allocator(), ascii);
+        const dyn = try util.utf16FromAscii(self.arena.allocator(), ascii);
         return .{ .bytes = dyn, .num_chars = ascii.len };
     }
 };
-
-fn utf16FromAscii(alloc: std.mem.Allocator, ascii: []const u8) ![]u8 {
-    if (ascii.len == 0) return try alloc.alloc(u8, 0);
-    var buf = try alloc.alloc(u8, ascii.len * 2);
-    var i: usize = 0;
-    while (i < ascii.len) : (i += 1) {
-        buf[i * 2] = ascii[i];
-        buf[i * 2 + 1] = 0;
-    }
-    return buf;
-}
-

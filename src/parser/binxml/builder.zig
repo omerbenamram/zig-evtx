@@ -7,6 +7,8 @@ const Parser = @import("parser.zig").Parser;
 const Expander = @import("expander.zig").Expander;
 const types = @import("types.zig");
 const tokens = @import("tokens.zig");
+const common = @import("common.zig");
+const util = @import("../util.zig");
 
 // Thin convenience facade: parse + expand to a fully expanded IR tree.
 // For now this forwards to core functions in binxml.zig via Parser/Expander wrappers.
@@ -21,10 +23,10 @@ pub const Builder = struct {
 
     pub fn buildExpandedElementTree(self: *Builder, chunk: []const u8, bin: []const u8) !*IR.Element {
         var r = Reader.init(bin);
-        try skipFragmentHeaderIfPresent(&r);
+        try common.skipFragmentHeaderIfPresent(&r);
         if (r.rem() == 0) {
             // Build minimal <Event/> IR
-            const bytes: []u8 = try utf16FromAscii(self.ctx.arena.allocator(), "Event");
+            const bytes: []u8 = try util.utf16FromAscii(self.ctx.arena.allocator(), "Event");
             return try IRMod.irNewElement(self.ctx.arena.allocator(), IR.Name{ .InlineUtf16 = .{ .bytes = bytes, .num_chars = 5 } });
         }
         const first = try r.peekU8();
@@ -44,7 +46,7 @@ pub const Builder = struct {
                 if (r.rem() < data_size_inline) return error.UnexpectedEof;
                 r.pos += @as(usize, data_size_inline);
             }
-            skipInlineCachedTemplateDefs(&r);
+            common.skipInlineCachedTemplateDefs(&r);
             const parsed = try parseTemplateDefFromChunk(self.ctx, chunk, def_data_off, self.ctx.arena.allocator());
             const parsed_def = parsed.def;
             const expected = @import("parser.zig").expectedValuesFromTemplate(parsed_def);
@@ -68,25 +70,7 @@ pub const Builder = struct {
         return expanded_root;
     }
 
-    // Local copies for now
-    fn skipFragmentHeaderIfPresent(r: *Reader) !void {
-        if (r.rem() >= 4 and r.buf[r.pos] == tokens.TOK_FRAGMENT_HEADER) {
-            _ = try r.readU8();
-            _ = try r.readU8();
-            _ = try r.readU8();
-            _ = try r.readU8();
-        }
-    }
-    fn skipInlineCachedTemplateDefs(r: *Reader) void {
-        while (r.rem() >= 28) {
-            const data_size_peek = std.mem.readInt(u32, r.buf[r.pos + 20 .. r.pos + 24][0..4], .little);
-            const block_end = r.pos + 24 + @as(usize, data_size_peek);
-            if (block_end > r.buf.len) break;
-            const payload_first = r.buf[r.pos + 24];
-            if (payload_first != tokens.TOK_FRAGMENT_HEADER) break;
-            r.pos = block_end;
-        }
-    }
+    // Local copies removed; use common.zig
     fn parseTemplateDefFromChunk(ctx: *Context, chunk: []const u8, def_data_off: u32, allocator: std.mem.Allocator) !struct { def: *IR.Element, data_start: usize } {
         const def_off_usize: usize = @intCast(def_data_off);
         if (def_off_usize + 24 > chunk.len) return error.OutOfBounds;
@@ -95,7 +79,7 @@ pub const Builder = struct {
         const data_end = data_start + @as(usize, td_data_size);
         if (data_end > chunk.len or data_start >= chunk.len) return error.OutOfBounds;
         var def_r = Reader.init(chunk[data_start..data_end]);
-        try skipFragmentHeaderIfPresent(&def_r);
+        try common.skipFragmentHeaderIfPresent(&def_r);
         var p = Parser.init(ctx, allocator);
         const parsed_def = try p.parseElementIRWithBase(chunk, &def_r, .def, data_start);
         return .{ .def = parsed_def, .data_start = data_start };
@@ -103,7 +87,7 @@ pub const Builder = struct {
     fn collectEvtXmlPayloadChildren(ctx: *Context, chunk: []const u8, data: []const u8, alloc: std.mem.Allocator, out: *std.ArrayList(IR.Node)) !void {
         if (data.len == 0) return;
         var r = Reader.init(data);
-        try skipFragmentHeaderIfPresent(&r);
+        try common.skipFragmentHeaderIfPresent(&r);
         while (r.rem() > 0) {
             const pk = r.buf[r.pos];
             if (pk != tokens.TOK_TEMPLATE_INSTANCE) break;
@@ -112,7 +96,7 @@ pub const Builder = struct {
             _ = try r.readU8();
             _ = try r.readU32le();
             const def_data_off = try r.readU32le();
-            skipInlineCachedTemplateDefs(&r);
+            common.skipInlineCachedTemplateDefs(&r);
             const parsed = try parseTemplateDefFromChunk(ctx, chunk, def_data_off, alloc);
             const child_def = parsed.def;
             const expected = @import("parser.zig").expectedValuesFromTemplate(child_def);
@@ -159,14 +143,5 @@ pub const Builder = struct {
         while (k < staged_attr_children.items.len) : (k += 1) try new_children.append(staged_attr_children.items[k]);
         el.children = new_children;
     }
-    fn utf16FromAscii(alloc: std.mem.Allocator, ascii: []const u8) ![]u8 {
-        if (ascii.len == 0) return try alloc.alloc(u8, 0);
-        var buf = try alloc.alloc(u8, ascii.len * 2);
-        var i: usize = 0;
-        while (i < ascii.len) : (i += 1) {
-            buf[i * 2] = ascii[i];
-            buf[i * 2 + 1] = 0;
-        }
-        return buf;
-    }
+    // utf16FromAscii moved to util.zig
 };

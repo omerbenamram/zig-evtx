@@ -405,3 +405,14 @@ pub fn formatIso8601UtcFromFiletimeMicros(buf: []u8, filetime: u64) ![]const u8 
         parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second, micros,
     });
 }
+
+pub fn utf16FromAscii(alloc: std.mem.Allocator, ascii: []const u8) ![]u8 {
+    if (ascii.len == 0) return try alloc.alloc(u8, 0);
+    var buf = try alloc.alloc(u8, ascii.len * 2);
+    var i: usize = 0;
+    while (i < ascii.len) : (i += 1) {
+        buf[i * 2] = ascii[i];
+        buf[i * 2 + 1] = 0;
+    }
+    return buf;
+}
