@@ -33,6 +33,8 @@ var g_dev: DevNullWriter = .{};
 var g_writer: DevNullWriter.Writer = undefined;
 var g_utf: []u8 = &[_]u8{};
 var g_num_chars: usize = 0;
+var g_utf_mixed: []u8 = &[_]u8{};
+var g_num_chars_mixed: usize = 0;
 
 fn beforeAll() void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -45,6 +47,13 @@ fn beforeAll() void {
     for (0..16384) |_| list.appendSlice(ascii_text) catch @panic("alloc");
     g_utf = makeUtf16FromAscii(alloc, list.items) catch @panic("alloc");
     g_num_chars = g_utf.len / 2;
+
+    // Mixed BMP/surrogates sequence to stress non-ASCII path
+    const mixed = "© α β γ Ω 中文 😀 emojis & < > \" ' more";
+    var list2 = std.ArrayList(u8).init(alloc);
+    for (0..8192) |_| list2.appendSlice(mixed) catch @panic("alloc");
+    g_utf_mixed = makeUtf16FromAscii(alloc, list2.items) catch @panic("alloc");
+    g_num_chars_mixed = g_utf_mixed.len / 2;
 }
 
 fn afterAll() void {
@@ -53,7 +62,7 @@ fn afterAll() void {
 }
 
 fn bench_new_ascii(_: std.mem.Allocator) void {
-    util.writeUtf16LeXmlEscaped(g_writer, g_utf, g_num_chars) catch unreachable;
+    util.writeUtf16LeXmlEscaped_scalar(g_writer, g_utf, g_num_chars) catch unreachable;
 }
 
 fn bench_old_ascii(_: std.mem.Allocator) void {
@@ -61,7 +70,15 @@ fn bench_old_ascii(_: std.mem.Allocator) void {
 }
 
 fn bench_simd_ascii(_: std.mem.Allocator) void {
-    util.writeUtf16LeXmlEscaped_simd(g_writer, g_utf, g_num_chars) catch unreachable;
+    util.writeUtf16LeXmlEscaped(g_writer, g_utf, g_num_chars) catch unreachable;
+}
+
+fn bench_simd_ascii_2(_: std.mem.Allocator) void {
+    util.writeUtf16LeXmlEscaped_simd_2(g_writer, g_utf, g_num_chars) catch unreachable;
+}
+
+fn bench_simd_utf16_mixed(_: std.mem.Allocator) void {
+    util.writeUtf16LeXmlEscaped_simd_utf16(g_writer, g_utf_mixed, g_num_chars_mixed) catch unreachable;
 }
 
 pub fn main() !void {
@@ -75,5 +92,7 @@ pub fn main() !void {
     try bench.add("utf16 xml escaped new ascii", bench_new_ascii, .{});
     try bench.add("utf16 xml escaped old ascii", bench_old_ascii, .{});
     try bench.add("utf16 xml escaped simd ascii", bench_simd_ascii, .{});
+    try bench.add("utf16 xml escaped simd ascii (more)", bench_simd_ascii_2, .{});
+    try bench.add("utf16 xml escaped simd utf16 mixed", bench_simd_utf16_mixed, .{});
     try bench.run(std.io.getStdOut().writer());
 }

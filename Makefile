@@ -1,6 +1,7 @@
 ZIG ?= zig
 TARGET ?= native
 OPT ?= ReleaseFast
+TEST_OPT ?= Debug
 FORMAT ?= xml
 VERBOSE ?= 0
 PYTHON ?= python3
@@ -36,7 +37,7 @@ jsonl:
 	@$(MAKE) sample FILE="$(FILE)" FORMAT=jsonl VERBOSE=$(VERBOSE)
 
 test:
-	$(ZIG) build test -Dtarget=$(TARGET) -Doptimize=$(MODE)
+	$(ZIG) build test -Dtarget=$(TARGET) -Doptimize=$(TEST_OPT)
 
 fmt:
 	$(ZIG) fmt src/**/*.zig

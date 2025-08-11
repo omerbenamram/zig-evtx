@@ -115,12 +115,12 @@ pub fn writeUtf16LeXmlEscaped(w: anytype, utf16le: []const u8, num_chars: usize)
     // measurable wins for ASCII-heavy inputs. Fallback preserves behavior.
     const builtin = @import("builtin");
     if (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64) {
-        return writeUtf16LeXmlEscaped_simd(w, utf16le, num_chars);
+        return writeUtf16LeXmlEscaped_simd_utf16(w, utf16le, num_chars);
     }
     return writeUtf16LeXmlEscaped_scalar(w, utf16le, num_chars);
 }
 
-fn writeUtf16LeXmlEscaped_scalar(w: anytype, utf16le: []const u8, num_chars: usize) !void {
+pub fn writeUtf16LeXmlEscaped_scalar(w: anytype, utf16le: []const u8, num_chars: usize) !void {
     // Aggregate into a single stack buffer to minimize writer calls. This reduces
     // ArrayList growth and per-call overhead significantly on hot paths.
     var out_buf: [2048]u8 = undefined;
@@ -396,6 +396,322 @@ test "writeUtf16LeXmlEscaped_simd matches scalar on mixed inputs" {
         try writeUtf16LeXmlEscaped_simd(w2, utf16, num_chars);
         try std.testing.expectEqualSlices(u8, buf1.items, buf2.items);
     }
+}
+
+// Experimental SIMD-assisted variant: accelerates ASCII, non-escaping runs by
+// scanning 8 UTF-16 code units at a time. Falls back to scalar for mixed blocks.
+pub fn writeUtf16LeXmlEscaped_simd_2(w: anytype, utf16le: []const u8, num_chars: usize) !void {
+    var out_buf: [2048]u8 = undefined;
+    var out_len: usize = 0;
+
+    const esc_table = blk: {
+        var t: [128]u8 = [_]u8{0} ** 128;
+        t['&'] = 1;
+        t['<'] = 1;
+        t['>'] = 1;
+        t['"'] = 1;
+        t['\''] = 1;
+        break :blk t;
+    };
+
+    const max_chars: usize = @min(num_chars, utf16le.len / 2);
+    if (max_chars == 0) return;
+
+    var i: usize = 0;
+    var p: usize = 0; // byte index
+    // Block process in groups of 8 u16 (16 bytes)
+    while (i + 8 <= max_chars) {
+        var blk: [16]u8 = undefined;
+        @memcpy(blk[0..], utf16le[p .. p + 16]);
+        const vec_u16: @Vector(8, u16) = @bitCast(blk);
+        const ascii_mask: @Vector(8, bool) = vec_u16 <= @as(@Vector(8, u16), @splat(0x7f));
+        const m_amp: @Vector(8, bool) = vec_u16 == @as(@Vector(8, u16), @splat(38));
+        const m_lt: @Vector(8, bool) = vec_u16 == @as(@Vector(8, u16), @splat(60));
+        const m_gt: @Vector(8, bool) = vec_u16 == @as(@Vector(8, u16), @splat(62));
+        const m_quot: @Vector(8, bool) = vec_u16 == @as(@Vector(8, u16), @splat(34));
+        const m_apos: @Vector(8, bool) = vec_u16 == @as(@Vector(8, u16), @splat(39));
+        const all_ascii = @reduce(.And, ascii_mask);
+        const esc_mask_u1: @Vector(8, u1) =
+            @as(@Vector(8, u1), @bitCast(m_amp)) |
+            @as(@Vector(8, u1), @bitCast(m_lt)) |
+            @as(@Vector(8, u1), @bitCast(m_gt)) |
+            @as(@Vector(8, u1), @bitCast(m_quot)) |
+            @as(@Vector(8, u1), @bitCast(m_apos));
+        const any_escape = @reduce(.Or, @as(@Vector(8, bool), @bitCast(esc_mask_u1)));
+        if (all_ascii and !any_escape) {
+            if (out_len + 8 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+            const vbytes: @Vector(16, u8) = @bitCast(blk);
+            const mask: @Vector(8, i32) = .{ 0, 2, 4, 6, 8, 10, 12, 14 };
+            const evens: @Vector(8, u8) = @shuffle(u8, vbytes, vbytes, mask);
+            const evens_arr: [8]u8 = @bitCast(evens);
+            std.mem.copyForwards(u8, out_buf[out_len .. out_len + 8], &evens_arr);
+            out_len += 8;
+            p += 16;
+            i += 8;
+            continue;
+        }
+        // Deterministic fallback: fully consume this 8-code-unit block with scalar logic
+        var k: usize = 0;
+        var extra_bytes: usize = 0; // bytes consumed beyond this 16-byte block when needed
+        var extra_chars: usize = 0; // code units consumed beyond the 8 in this block
+        while (k < 8) : (k += 1) {
+            const b0: u8 = blk[k * 2];
+            const b1: u8 = blk[k * 2 + 1];
+            if (b1 == 0) {
+                const c: u8 = b0;
+                if (c < 0x80) {
+                    if (esc_table[c] != 0) {
+                        const e: []const u8 = switch (c) {
+                            '&' => "&amp;",
+                            '<' => "&lt;",
+                            '>' => "&gt;",
+                            '"' => "&quot;",
+                            '\'' => "&apos;",
+                            else => unreachable,
+                        };
+                        if (out_len + e.len > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                        std.mem.copyForwards(u8, out_buf[out_len .. out_len + e.len], e);
+                        out_len += e.len;
+                    } else {
+                        if (out_len == out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                        out_buf[out_len] = c;
+                        out_len += 1;
+                    }
+                } else {
+                    if (out_len + 2 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                    out_buf[out_len] = 0xC0 | (c >> 6);
+                    out_buf[out_len + 1] = 0x80 | (c & 0x3F);
+                    out_len += 2;
+                }
+                continue;
+            }
+            const u: u16 = @as(u16, b0) | (@as(u16, b1) << 8);
+            if (u < 0xD800 or u > 0xDFFF) {
+                const cp: u21 = u;
+                if (cp <= 0x07FF) {
+                    if (out_len + 2 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                    out_buf[out_len] = 0xC0 | (@as(u8, @truncate(cp >> 6)));
+                    out_buf[out_len + 1] = 0x80 | (@as(u8, @truncate(cp & 0x3F)));
+                    out_len += 2;
+                } else {
+                    if (out_len + 3 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                    out_buf[out_len] = 0xE0 | (@as(u8, @truncate(cp >> 12)));
+                    out_buf[out_len + 1] = 0x80 | (@as(u8, @truncate((cp >> 6) & 0x3F)));
+                    out_buf[out_len + 2] = 0x80 | (@as(u8, @truncate(cp & 0x3F)));
+                    out_len += 3;
+                }
+                continue;
+            }
+            // surrogate handling
+            if (u >= 0xD800 and u <= 0xDBFF) {
+                // High surrogate; prefer using the next code unit inside this block if available
+                if (k + 1 < 8) {
+                    const sb0: u8 = blk[(k + 1) * 2];
+                    const sb1: u8 = blk[(k + 1) * 2 + 1];
+                    const lo_sur: u16 = @as(u16, sb0) | (@as(u16, sb1) << 8);
+                    if (lo_sur < 0xDC00 or lo_sur > 0xDFFF) {
+                        // invalid pair, skip emitting
+                        continue;
+                    }
+                    const high_ten: u21 = @as(u21, u - 0xD800);
+                    const low_ten: u21 = @as(u21, lo_sur - 0xDC00);
+                    const cp: u21 = 0x10000 + (high_ten << 10) + low_ten;
+                    if (out_len + 4 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                    out_buf[out_len] = 0xF0 | (@as(u8, @truncate(cp >> 18)));
+                    out_buf[out_len + 1] = 0x80 | (@as(u8, @truncate((cp >> 12) & 0x3F)));
+                    out_buf[out_len + 2] = 0x80 | (@as(u8, @truncate((cp >> 6) & 0x3F)));
+                    out_buf[out_len + 3] = 0x80 | (@as(u8, @truncate(cp & 0x3F)));
+                    out_len += 4;
+                    k += 1; // consumed the next unit inside the block
+                    continue;
+                } else {
+                    // Need to reach beyond this 16-byte block for the low surrogate.
+                    // Ensure there is another code unit available in the overall input
+                    if (i + 9 > max_chars) {
+                        // Incomplete pair at end; stop processing further
+                        k = 8; // break
+                        break;
+                    }
+                    const sb0 = utf16le[p + 16 + extra_bytes];
+                    const sb1 = utf16le[p + 16 + extra_bytes + 1];
+                    const lo_sur: u16 = @as(u16, sb0) | (@as(u16, sb1) << 8);
+                    if (lo_sur < 0xDC00 or lo_sur > 0xDFFF) {
+                        // invalid pair, skip
+                        continue;
+                    }
+                    const high_ten: u21 = @as(u21, u - 0xD800);
+                    const low_ten: u21 = @as(u21, lo_sur - 0xDC00);
+                    const cp: u21 = 0x10000 + (high_ten << 10) + low_ten;
+                    if (out_len + 4 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                    out_buf[out_len] = 0xF0 | (@as(u8, @truncate(cp >> 18)));
+                    out_buf[out_len + 1] = 0x80 | (@as(u8, @truncate((cp >> 12) & 0x3F)));
+                    out_buf[out_len + 2] = 0x80 | (@as(u8, @truncate((cp >> 6) & 0x3F)));
+                    out_buf[out_len + 3] = 0x80 | (@as(u8, @truncate(cp & 0x3F)));
+                    out_len += 4;
+                    // Account for the extra code unit consumed beyond this block
+                    extra_bytes += 2;
+                    extra_chars += 1;
+                    continue;
+                }
+            }
+            // Lone low surrogate or other invalid case: skip
+        }
+        p += 16 + extra_bytes;
+        i += 8 + extra_chars;
+        continue;
+    }
+    // Tail (less than 8 code units): reuse scalar path for correctness
+    if (i < max_chars) {
+        try writeUtf16LeXmlEscaped_scalar(w, utf16le[p..], max_chars - i);
+        // writeUtf16LeXmlEscaped flushes its own buffer; but we still need to flush ours
+    }
+    try flushOut2048(w, &out_buf, &out_len);
+}
+
+// SIMD classification per block without an ASCII-only fast path.
+// Processes all 8 lanes with scalar emission guided by vector masks.
+pub fn writeUtf16LeXmlEscaped_simd_utf16(w: anytype, utf16le: []const u8, num_chars: usize) !void {
+    var out_buf: [2048]u8 = undefined;
+    var out_len: usize = 0;
+
+    const max_chars: usize = @min(num_chars, utf16le.len / 2);
+    if (max_chars == 0) return;
+
+    var i: usize = 0;
+    var p: usize = 0; // byte index
+    while (i + 8 <= max_chars) {
+        var blk: [16]u8 = undefined;
+        @memcpy(blk[0..], utf16le[p .. p + 16]);
+        const v: @Vector(8, u16) = @bitCast(blk);
+
+        const is_ascii: @Vector(8, bool) = v <= @as(@Vector(8, u16), @splat(0x7F));
+        const m_amp: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(38));
+        const m_lt: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(60));
+        const m_gt: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(62));
+        const m_quot: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(34));
+        const m_apos: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(39));
+        const esc_any_u1: @Vector(8, u1) =
+            @as(@Vector(8, u1), @bitCast(m_amp)) |
+            @as(@Vector(8, u1), @bitCast(m_lt)) |
+            @as(@Vector(8, u1), @bitCast(m_gt)) |
+            @as(@Vector(8, u1), @bitCast(m_quot)) |
+            @as(@Vector(8, u1), @bitCast(m_apos));
+        const esc_mask: @Vector(8, bool) = @as(@Vector(8, bool), @bitCast(@as(@Vector(8, u1), @bitCast(is_ascii)) & esc_any_u1));
+
+        const ge_d800: @Vector(8, bool) = v >= @as(@Vector(8, u16), @splat(0xD800));
+        const le_dbff: @Vector(8, bool) = v <= @as(@Vector(8, u16), @splat(0xDBFF));
+        const ge_dc00: @Vector(8, bool) = v >= @as(@Vector(8, u16), @splat(0xDC00));
+        const le_dfff: @Vector(8, bool) = v <= @as(@Vector(8, u16), @splat(0xDFFF));
+        const is_hi_sur: @Vector(8, bool) = @as(@Vector(8, bool), @bitCast(@as(@Vector(8, u1), @bitCast(ge_d800)) & @as(@Vector(8, u1), @bitCast(le_dbff))));
+        const is_lo_sur: @Vector(8, bool) = @as(@Vector(8, bool), @bitCast(@as(@Vector(8, u1), @bitCast(ge_dc00)) & @as(@Vector(8, u1), @bitCast(le_dfff))));
+        const not_sur_u1: @Vector(8, u1) = ~@as(@Vector(8, u1), @bitCast(is_hi_sur)) & ~@as(@Vector(8, u1), @bitCast(is_lo_sur));
+        const not_sur: @Vector(8, bool) = @as(@Vector(8, bool), @bitCast(not_sur_u1));
+
+        const gt_7f: @Vector(8, bool) = v > @as(@Vector(8, u16), @splat(0x7F));
+        const le_07ff: @Vector(8, bool) = v <= @as(@Vector(8, u16), @splat(0x07FF));
+        const is_two: @Vector(8, bool) = @as(@Vector(8, bool), @bitCast(@as(@Vector(8, u1), @bitCast(not_sur)) &
+            @as(@Vector(8, u1), @bitCast(gt_7f)) &
+            @as(@Vector(8, u1), @bitCast(le_07ff))));
+        const is_three: @Vector(8, bool) = @as(@Vector(8, bool), @bitCast(@as(@Vector(8, u1), @bitCast(not_sur)) &
+            ~@as(@Vector(8, u1), @bitCast(is_ascii)) &
+            ~@as(@Vector(8, u1), @bitCast(is_two))));
+
+        var k: usize = 0;
+        var extra_bytes: usize = 0;
+        var extra_chars: usize = 0;
+        while (k < 8) : (k += 1) {
+            const b0: u8 = blk[k * 2];
+            const b1: u8 = blk[k * 2 + 1];
+            if (is_ascii[k]) {
+                const c: u8 = b0;
+                if (esc_mask[k]) {
+                    const e: []const u8 = switch (c) {
+                        '&' => "&amp;",
+                        '<' => "&lt;",
+                        '>' => "&gt;",
+                        '"' => "&quot;",
+                        '\'' => "&apos;",
+                        else => unreachable,
+                    };
+                    if (out_len + e.len > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                    std.mem.copyForwards(u8, out_buf[out_len .. out_len + e.len], e);
+                    out_len += e.len;
+                } else {
+                    if (out_len == out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                    out_buf[out_len] = c;
+                    out_len += 1;
+                }
+                continue;
+            }
+            const u: u16 = @as(u16, b0) | (@as(u16, b1) << 8);
+            if (is_two[k]) {
+                if (out_len + 2 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                out_buf[out_len] = 0xC0 | (@as(u8, @truncate(u >> 6)));
+                out_buf[out_len + 1] = 0x80 | (@as(u8, @truncate(u & 0x3F)));
+                out_len += 2;
+                continue;
+            }
+            if (is_three[k]) {
+                if (out_len + 3 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                out_buf[out_len] = 0xE0 | (@as(u8, @truncate(u >> 12)));
+                out_buf[out_len + 1] = 0x80 | (@as(u8, @truncate((u >> 6) & 0x3F)));
+                out_buf[out_len + 2] = 0x80 | (@as(u8, @truncate(u & 0x3F)));
+                out_len += 3;
+                continue;
+            }
+            if (is_hi_sur[k]) {
+                if (k + 1 < 8) {
+                    const sb0: u8 = blk[(k + 1) * 2];
+                    const sb1: u8 = blk[(k + 1) * 2 + 1];
+                    const lo_sur: u16 = @as(u16, sb0) | (@as(u16, sb1) << 8);
+                    if (lo_sur >= 0xDC00 and lo_sur <= 0xDFFF) {
+                        const high_ten: u21 = @as(u21, u - 0xD800);
+                        const low_ten: u21 = @as(u21, lo_sur - 0xDC00);
+                        const cp: u21 = 0x10000 + (high_ten << 10) + low_ten;
+                        if (out_len + 4 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                        out_buf[out_len] = 0xF0 | (@as(u8, @truncate(cp >> 18)));
+                        out_buf[out_len + 1] = 0x80 | (@as(u8, @truncate((cp >> 12) & 0x3F)));
+                        out_buf[out_len + 2] = 0x80 | (@as(u8, @truncate((cp >> 6) & 0x3F)));
+                        out_buf[out_len + 3] = 0x80 | (@as(u8, @truncate(cp & 0x3F)));
+                        out_len += 4;
+                        k += 1;
+                        continue;
+                    } else {
+                        // invalid pair; skip
+                        continue;
+                    }
+                } else {
+                    if (i + 9 > max_chars) break; // incomplete at end
+                    const sb0 = utf16le[p + 16 + extra_bytes];
+                    const sb1 = utf16le[p + 16 + extra_bytes + 1];
+                    const lo_sur: u16 = @as(u16, sb0) | (@as(u16, sb1) << 8);
+                    if (lo_sur < 0xDC00 or lo_sur > 0xDFFF) {
+                        // invalid pair; skip
+                        continue;
+                    }
+                    const high_ten: u21 = @as(u21, u - 0xD800);
+                    const low_ten: u21 = @as(u21, lo_sur - 0xDC00);
+                    const cp: u21 = 0x10000 + (high_ten << 10) + low_ten;
+                    if (out_len + 4 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                    out_buf[out_len] = 0xF0 | (@as(u8, @truncate(cp >> 18)));
+                    out_buf[out_len + 1] = 0x80 | (@as(u8, @truncate((cp >> 12) & 0x3F)));
+                    out_buf[out_len + 2] = 0x80 | (@as(u8, @truncate((cp >> 6) & 0x3F)));
+                    out_buf[out_len + 3] = 0x80 | (@as(u8, @truncate(cp & 0x3F)));
+                    out_len += 4;
+                    extra_bytes += 2;
+                    extra_chars += 1;
+                    continue;
+                }
+            }
+            // lone low surrogate: skip
+        }
+        p += 16 + extra_bytes;
+        i += 8 + extra_chars;
+    }
+    if (i < max_chars) {
+        try writeUtf16LeXmlEscaped_scalar(w, utf16le[p..], max_chars - i);
+    }
+    try flushOut2048(w, &out_buf, &out_len);
 }
 
 // Baseline implementation kept for microbench comparison
