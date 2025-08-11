@@ -95,7 +95,7 @@ pub const Builder = struct {
         var def_r = Reader.init(chunk[data_start..data_end]);
         try skipFragmentHeaderIfPresent(&def_r);
         var p = Parser.init(ctx, allocator);
-        const parsed_def = try p.parseElementIR(chunk, &def_r, .def);
+        const parsed_def = try p.parseElementIRWithBase(chunk, &def_r, .def, data_start);
         return .{ .def = parsed_def, .data_start = data_start };
     }
     fn collectEvtXmlPayloadChildren(ctx: *Context, chunk: []const u8, data: []const u8, alloc: std.mem.Allocator, out: *std.ArrayList(IR.Node)) !void {

@@ -44,6 +44,10 @@ pub const Parser = struct {
         return parseElementIRBase(self.ctx, chunk, r, self.allocator, src, 0);
     }
 
+    pub fn parseElementIRWithBase(self: *Parser, chunk: []const u8, r: *Reader, src: Source, chunk_base: usize) !*IR.Element {
+        return parseElementIRBase(self.ctx, chunk, r, self.allocator, src, chunk_base);
+    }
+
     pub fn parseTemplateInstanceValues(self: *Parser, r: *Reader, expected: usize) ![]types.TemplateValue {
         _ = self;
         // Forward to core function for now
