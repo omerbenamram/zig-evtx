@@ -1,0 +1,26 @@
+[build-system]
+requires = ["poetry-core", "ziggy-pydust==0.25.1"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "zig-evtx"
+version = "0.1.0"
+description = "Python bindings for the Zig EVTX parser"
+authors = ["gpt5-codex <devnull@example.com>"]
+readme = "README.md"
+packages = [{ include = "evtxzig" }]
+include = [
+    { path = "src/", format = "sdist" },
+    { path = "evtxzig/*.so", format = "wheel" },
+    "evtxzig/*.pyi"
+]
+
+[tool.poetry.build]
+script = "build.py"
+
+[tool.pydust]
+zig_exe = "zig"
+
+[[tool.pydust.ext_module]]
+name = "evtxzig._lib"
+root = "src/evtx_pydust.zig"

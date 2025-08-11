@@ -6,6 +6,9 @@ FORMAT ?= xml
 VERBOSE ?= 0
 PYTHON ?= python3
 
+# Always clear venvs non-interactively when using uv
+export UV_VENV_CLEAR=1
+
 # Use bash for complex recipes (avoids fish/sh incompatibilities)
 SHELL := /bin/bash
 
@@ -13,11 +16,11 @@ SHELL := /bin/bash
 
 all: build
 
-build:
-	$(ZIG) build -Dtarget=$(TARGET) -Doptimize=$(OPT)
+build: py-ensure-pydust
+	$(ZIG) build -Dtarget=$(TARGET) -Doptimize=$(OPT) -Dpython-exe=$(PYTHON_EXE)
 
-run:
-	$(ZIG) build run -Dtarget=$(TARGET) -Doptimize=$(OPT) -- $(ARGS)
+run: py-ensure-pydust
+	$(ZIG) build run -Dtarget=$(TARGET) -Doptimize=$(OPT) -Dpython-exe=$(PYTHON_EXE) -- $(ARGS)
 
 .PHONY: sample xml json jsonl
 sample:
@@ -36,8 +39,8 @@ json:
 jsonl:
 	@$(MAKE) sample FILE="$(FILE)" FORMAT=jsonl VERBOSE=$(VERBOSE)
 
-test:
-	$(ZIG) build test -Dtarget=$(TARGET) -Doptimize=$(TEST_OPT)
+test: py-ensure-pydust
+	$(ZIG) build test -Dtarget=$(TARGET) -Doptimize=$(TEST_OPT) -Dpython-exe=$(PYTHON_EXE)
 
 fmt:
 	$(ZIG) fmt src/**/*.zig
@@ -51,7 +54,7 @@ bench:
 .PHONY: bench-zbench
 bench-zbench:
 	@mkdir -p out
-	$(ZIG) build bench-zbench -Dtarget=$(TARGET) -Doptimize=$(OPT) | tee out/bench-zbench.txt
+	$(ZIG) build bench-zbench -Dtarget=$(TARGET) -Doptimize=$(OPT) -Dpython-exe=$(PYTHON_EXE) | tee out/bench-zbench.txt
 
 .PHONY: todo
 todo:
@@ -151,11 +154,11 @@ xml-rs: install-evtx
 	rm -f "$(OUT_DIR)/$$name.rs.xml"; \
 	$(EVTX_DUMP) -t 1 -o xml -f "$(OUT_DIR)/$$name.rs.xml" "$(FILE)"
 
-xml-zig:
+xml-zig: py-ensure-pydust
 	@if [ -z "$(FILE)" ]; then echo "Usage: make xml-zig FILE=path/to/file.evtx"; exit 1; fi; \
 	mkdir -p $(OUT_DIR); \
 	name=$$(basename "$(FILE)"); \
-	$(ZIG) build -Dtarget=$(TARGET) -Doptimize=$(OPT); \
+	$(ZIG) build -Dtarget=$(TARGET) -Doptimize=$(OPT) -Dpython-exe=$(PYTHON_EXE); \
 	zig-out/bin/evtx_dump_zig -o xml -n 1 "$(FILE)" > "$(OUT_DIR)/$$name.zig.xml"
 
 compare-first: xml-rs xml-zig
@@ -172,11 +175,11 @@ xml-all-rs: install-evtx
 	rm -f "$(OUT_DIR)/$$name.rs.xml"; \
 	$(EVTX_DUMP) -t 1 -o xml -f "$(OUT_DIR)/$$name.rs.xml" "$(FILE)" 2> "$(OUT_DIR)/$$name.rs.log"
 
-xml-all-zig:
+xml-all-zig: py-ensure-pydust
 	@if [ -z "$(FILE)" ]; then echo "Usage: make xml-all-zig FILE=path/to/file.evtx"; exit 1; fi; \
 	mkdir -p $(OUT_DIR); \
 	name=$$(basename "$(FILE)"); \
-	$(ZIG) build -Dtarget=$(TARGET) -Doptimize=$(OPT); \
+	$(ZIG) build -Dtarget=$(TARGET) -Doptimize=$(OPT) -Dpython-exe=$(PYTHON_EXE); \
 	args="-o xml"; \
 	if [ "$(VERBOSE)" = "1" ]; then args="$$args -v"; fi; \
 	zig-out/bin/evtx_dump_zig $$args "$(FILE)" > "$(OUT_DIR)/$$name.zig.xml" 2> "$(OUT_DIR)/$$name.zig.log"
@@ -234,28 +237,28 @@ record:
 compare-time: install-evtx time-zig time-rust
 	@set -euo pipefail; \
 	zig_file="$(OUT_DIR)/time-zig.txt"; \
-\trs_file="$(OUT_DIR)/time-rs.txt"; \
-\tnorm_z="$(OUT_DIR)/time-zig.norm.tsv"; \
-\tnorm_r="$(OUT_DIR)/time-rs.norm.tsv"; \
-\t# Normalize both time outputs into TAB-separated "Metric<TAB>Value" lines; \
-\t# handle both the real/user/sys line and the macOS -l resource lines. \
-\tawk 'function emit(k,v){ printf "%s\t%s\n", k, v } { if ($0 ~ /[0-9.]+[[:space:]]+real/ && $0 ~ /user/ && $0 ~ /sys/) { for (i=1;i<=NF;i+=2){ v=$(i); k=$(i+1); if (k=="real"||k=="user"||k=="sys") emit(k,v) } } else if (match($0,/^([0-9.]+)[[:space:]]+(.*)$$/,m)) { emit(m[2], m[1]) } }' "$$zig_file" | sort > "$$norm_z"; \
-\tawk 'function emit(k,v){ printf "%s\t%s\n", k, v } { if ($0 ~ /[0-9.]+[[:space:]]+real/ && $0 ~ /user/ && $0 ~ /sys/) { for (i=1;i<=NF;i+=2){ v=$(i); k=$(i+1); if (k=="real"||k=="user"||k=="sys") emit(k,v) } } else if (match($0,/^([0-9.]+)[[:space:]]+(.*)$$/,m)) { emit(m[2], m[1]) } }' "$$rs_file" | sort > "$$norm_r"; \
-\tout_tsv="$(OUT_DIR)/time-compare.tsv"; \
-\t{ echo -e "Metric\tZig\tRust"; \
-\t  join -t $$'\t' -a1 -a2 -e '-' -o '0,1.2,2.2' "$$norm_z" "$$norm_r" | sort; \
-\t} > "$$out_tsv"; \
-\techo "--- time comparison ---"; \
-\tif command -v column >/dev/null 2>&1; then column -t -s $$'\t' "$$out_tsv" | sed 's/^/  /'; else cat "$$out_tsv"; fi; \
-\techo "Wrote $$out_tsv"
+	rs_file="$(OUT_DIR)/time-rs.txt"; \
+	norm_z="$(OUT_DIR)/time-zig.norm.tsv"; \
+	norm_r="$(OUT_DIR)/time-rs.norm.tsv"; \
+	# Normalize both time outputs into TAB-separated "Metric<TAB>Value" lines; \
+	# handle both the real/user/sys line and the macOS -l resource lines. \
+	awk 'function emit(k,v){ printf "%s\t%s\n", k, v } { if ($$0 ~ /[0-9.]+[[:space:]]+real/ && $$0 ~ /user/ && $$0 ~ /sys/) { for (i=1;i<=NF;i+=2){ v=$$(i); k=$$(i+1); if (k=="real"||k=="user"||k=="sys") emit(k,v) } } else if (match($$0,/^([0-9.]+)[[:space:]]+(.*)$$/,m)) { emit(m[2], m[1]) } }' "$$zig_file" | sort > "$$norm_z"; \
+	awk 'function emit(k,v){ printf "%s\t%s\n", k, v } { if ($$0 ~ /[0-9.]+[[:space:]]+real/ && $$0 ~ /user/ && $$0 ~ /sys/) { for (i=1;i<=NF;i+=2){ v=$$(i); k=$$(i+1); if (k=="real"||k=="user"||k=="sys") emit(k,v) } } else if (match($$0,/^([0-9.]+)[[:space:]]+(.*)$$/,m)) { emit(m[2], m[1]) } }' "$$rs_file" | sort > "$$norm_r"; \
+	out_tsv="$(OUT_DIR)/time-compare.tsv"; \
+	{ echo -e "Metric\tZig\tRust"; \
+	  join -t $$'\t' -a1 -a2 -e '-' -o '0,1.2,2.2' "$$norm_z" "$$norm_r" | sort; \
+	} > "$$out_tsv"; \
+	echo "--- time comparison ---"; \
+	if command -v column >/dev/null 2>&1; then column -t -s $$'\t' "$$out_tsv" | sed 's/^/  /'; else cat "$$out_tsv"; fi; \
+	echo "Wrote $$out_tsv"
 
 .PHONY: time-zig time-rust
-time-zig:
+time-zig: py-ensure-pydust
 	@set -euo pipefail; \
 	if [ -z "$(FILE)" ]; then echo "Usage: make time-zig FILE=path/to/file.evtx [OPT=ReleaseFast]"; exit 1; fi; \
 	mkdir -p $(OUT_DIR); \
 	echo "Building Zig ($(OPT))..."; \
-	$(ZIG) build -Dtarget=$(TARGET) -Doptimize=$(OPT) >/dev/null; \
+	$(ZIG) build -Dtarget=$(TARGET) -Doptimize=$(OPT) -Dpython-exe=$(PYTHON_EXE) >/dev/null; \
 	echo "Timing Zig..."; \
 	/usr/bin/time -l zig-out/bin/evtx_dump_zig --no-checks -t 1 -o xml "$(FILE)" >/dev/null 2> "$(OUT_DIR)/time-zig.txt"; \
 	echo "--- tail(time-zig) ---"; tail -n 8 "$(OUT_DIR)/time-zig.txt" | cat; \
@@ -286,3 +289,38 @@ lldb:
 		  -k "quit" \
 		  -o "run" \
 		  -- zig-out/bin/evtx_dump_zig $$args 2>&1 | cat || true
+
+.PHONY: py-wheel py-sdist py-install py-editable py-uv-venv py-ensure-pydust
+
+UV ?= uv
+VENV ?= .venv
+# Default to venv python; caller can override. This is used by zig build via -Dpython-exe
+PYTHON_EXE ?= $(VENV)/bin/python
+
+py-uv-venv:
+	@set -euo pipefail; \
+	if ! command -v $(UV) >/dev/null 2>&1; then echo "uv not found. Install via: brew install uv"; exit 1; fi; \
+	$(UV) venv $(VENV) >/dev/null; \
+	echo "venv ready at $(VENV)"
+
+# Ensure pydust (ziggy-pydust) is available for the Zig build script's Python discovery
+py-ensure-pydust: py-uv-venv
+	@set -euo pipefail; \
+	$(UV) pip install "ziggy-pydust==0.25.1" >/dev/null; \
+	echo "pydust ready in $(VENV)"
+
+py-wheel: py-uv-venv
+	@set -euo pipefail; \
+	$(UV) run -m build -w
+
+py-sdist: py-uv-venv
+	@set -euo pipefail; \
+	$(UV) run -m build -s
+
+py-install: py-uv-venv
+	@set -euo pipefail; \
+	$(UV) pip install .
+
+py-editable: py-uv-venv
+	@set -euo pipefail; \
+	$(UV) pip install -e .
