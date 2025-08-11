@@ -1,7 +1,7 @@
 const IRModule = @import("ir.zig");
 const IR = IRModule.IR;
 const irNewElement = IRModule.irNewElement;
-const TemplateValue = @import("binxml.zig").TemplateValue;
+const TemplateValue = @import("binxml/types.zig").TemplateValue;
 const logger = @import("../logger.zig");
 const log = logger.scoped("render_xml");
 const std = @import("std");
@@ -13,11 +13,11 @@ const formatIso8601UtcFromFiletimeMicros = @import("util.zig").formatIso8601UtcF
 const normalizeAndWriteSystemTimeAscii = @import("util.zig").normalizeAndWriteSystemTimeAscii;
 const writePaddedInt = @import("util.zig").writePaddedInt;
 const writeUtf16LeRawToUtf8 = @import("util.zig").writeUtf16LeRawToUtf8;
-const Context = @import("binxml.zig").Context;
-const logNameTrace = @import("binxml.zig").logNameTrace;
-const buildExpandedElementTree = @import("binxml.zig").buildExpandedElementTree;
-const valueTypeFixedSize = @import("binxml.zig").valueTypeFixedSize;
-const attrNameIsSystemTime = @import("binxml.zig").attrNameIsSystemTime;
+const binxml = @import("binxml/mod.zig");
+const Context = binxml.Context;
+const logNameTrace = @import("binxml/name.zig").logNameTrace;
+const valueTypeFixedSize = @import("binxml/types.zig").valueTypeFixedSize;
+const attrNameIsSystemTime = @import("binxml/name.zig").attrNameIsSystemTime;
 
 // Stream attribute value tokens directly to destination (no buffering)
 fn renderAttrValueFromIRStream(chunk: []const u8, nodes: []const IR.Node, _: []const TemplateValue, w: anytype) !void {
@@ -347,7 +347,9 @@ pub fn writeNameFromUtf16(w: anytype, utf16le: []const u8, num_chars: usize) !vo
 
 pub fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w: anytype) anyerror!void {
     if (ctx.verbose) logger.setModuleLevel("binxml", .trace);
-    const root = try buildExpandedElementTree(ctx, chunk, bin);
+        // Build expanded IR using the new binxml facade (preserves previous behavior)
+    var builder = binxml.Builder.init(ctx, ctx.allocator);
+    const root = try builder.buildExpandedElementTree(chunk, bin);
     if (ctx.verbose) {
         try logNameTrace(chunk, root.name, "root");
     }

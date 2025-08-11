@@ -8,7 +8,7 @@ const writeUtf16LeRawToUtf8 = util.writeUtf16LeRawToUtf8;
 const jsonEscapeUtf8 = util.jsonEscapeUtf8;
 const writeUtf16LeJsonEscaped = util.writeUtf16LeJsonEscaped;
 const writeAnsiCp1252JsonEscaped = util.writeAnsiCp1252JsonEscaped;
-const attrNameIsSystemTime = @import("binxml.zig").attrNameIsSystemTime;
+const attrNameIsSystemTime = @import("binxml/name.zig").attrNameIsSystemTime;
 
 fn writeNameJsonQuoted(w: anytype, name: IR.Name, chunk: []const u8) !void {
     try w.writeByte('"');

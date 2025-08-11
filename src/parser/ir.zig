@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const TemplateValue = @import("binxml.zig").TemplateValue;
+const TemplateValue = @import("binxml/types.zig").TemplateValue;
 const utf16EqualsAscii = @import("util.zig").utf16EqualsAscii;
 
 pub const IR = struct {

@@ -1,6 +1,8 @@
 const std = @import("std");
 const crc32 = std.hash.crc;
-const binxml = @import("binxml.zig");
+const binxml = @import("binxml/mod.zig");
+const render_xml = @import("render_xml.zig");
+const render_json = @import("render_json.zig");
 const logger = @import("../logger.zig");
 const log = logger.scoped("evtx");
 
@@ -77,37 +79,43 @@ pub fn OutputImpl(comptime W: type) type {
             switch (self.mode) {
                 .xml => {
                     if (self.ctx) |ctx| {
-                        try binxml.renderWithContext(ctx, record.chunk_buf, record.raw_xml, .xml, bw);
+                        try render_xml.renderXmlWithContext(ctx, record.chunk_buf, record.raw_xml, bw);
                     } else {
                         var local_ctx = try binxml.Context.init(std.heap.c_allocator);
                         defer local_ctx.deinit();
-                        try binxml.renderWithContext(&local_ctx, record.chunk_buf, record.raw_xml, .xml, bw);
+                        try render_xml.renderXmlWithContext(&local_ctx, record.chunk_buf, record.raw_xml, bw);
                     }
                     try bw.writeByte('\n');
                 },
                 .json_single => {
-                    const body_mode: binxml.RenderMode = .json;
                     try bw.writeAll("{");
                     try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
                     if (self.ctx) |ctx| {
-                        try binxml.renderWithContext(ctx, record.chunk_buf, record.raw_xml, body_mode, bw);
+                        var builder = binxml.Builder.init(ctx, ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
                         var local_ctx = try binxml.Context.init(std.heap.c_allocator);
                         defer local_ctx.deinit();
-                        try binxml.renderWithContext(&local_ctx, record.chunk_buf, record.raw_xml, body_mode, bw);
+                        var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json.renderElementJson(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
                     }
                     try bw.writeAll("}\n");
                 },
                 .json_lines => {
-                    const body_mode: binxml.RenderMode = .jsonl;
                     try bw.writeAll("{");
                     try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
                     if (self.ctx) |ctx| {
-                        try binxml.renderWithContext(ctx, record.chunk_buf, record.raw_xml, body_mode, bw);
+                        var builder = binxml.Builder.init(ctx, ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
                         var local_ctx = try binxml.Context.init(std.heap.c_allocator);
                         defer local_ctx.deinit();
-                        try binxml.renderWithContext(&local_ctx, record.chunk_buf, record.raw_xml, body_mode, bw);
+                        var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json.renderElementJson(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
                     }
                     try bw.writeAll("}\n");
                 },
@@ -131,37 +139,43 @@ pub fn OutputImpl(comptime W: type) type {
             switch (self.mode) {
                 .xml => {
                     if (self.ctx) |ctx| {
-                        try binxml.renderWithContext(ctx, record.chunk_buf, record.raw_xml, .xml, bw);
+                        try render_xml.renderXmlWithContext(ctx, record.chunk_buf, record.raw_xml, bw);
                     } else {
                         var local_ctx = try binxml.Context.init(std.heap.c_allocator);
                         defer local_ctx.deinit();
-                        try binxml.renderWithContext(&local_ctx, record.chunk_buf, record.raw_xml, .xml, bw);
+                        try render_xml.renderXmlWithContext(&local_ctx, record.chunk_buf, record.raw_xml, bw);
                     }
                     try bw.writeByte('\n');
                 },
                 .json_single => {
-                    const body_mode: binxml.RenderMode = .json;
                     try bw.writeAll("{");
                     try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
                     if (self.ctx) |ctx| {
-                        try binxml.renderWithContext(ctx, record.chunk_buf, record.raw_xml, body_mode, bw);
+                        var builder = binxml.Builder.init(ctx, ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
                         var local_ctx = try binxml.Context.init(std.heap.c_allocator);
                         defer local_ctx.deinit();
-                        try binxml.renderWithContext(&local_ctx, record.chunk_buf, record.raw_xml, body_mode, bw);
+                        var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json.renderElementJson(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
                     }
                     try bw.writeAll("}\n");
                 },
                 .json_lines => {
-                    const body_mode: binxml.RenderMode = .jsonl;
                     try bw.writeAll("{");
                     try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
                     if (self.ctx) |ctx| {
-                        try binxml.renderWithContext(ctx, record.chunk_buf, record.raw_xml, body_mode, bw);
+                        var builder = binxml.Builder.init(ctx, ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
                         var local_ctx = try binxml.Context.init(std.heap.c_allocator);
                         defer local_ctx.deinit();
-                        try binxml.renderWithContext(&local_ctx, record.chunk_buf, record.raw_xml, body_mode, bw);
+                        var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json.renderElementJson(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
                     }
                     try bw.writeAll("}\n");
                 },
@@ -669,17 +683,13 @@ pub const EventRecordView = struct {
         var buf = std.ArrayList(u8).init(std.heap.c_allocator);
         defer buf.deinit();
         var bw = buf.writer();
-        try binxml.renderWithContext(&ctx, self.chunk_buf, self.raw_xml, .xml, bw);
+        try render_xml.renderXmlWithContext(&ctx, self.chunk_buf, self.raw_xml, bw);
         try bw.writeByte('\n');
         try w.writeAll(buf.items);
     }
 
     const JsonOutMode = enum { single, lines };
-    fn writeJson(self: *const EventRecordView, w: anytype, mode: JsonOutMode) !void {
-        const body_mode: binxml.RenderMode = switch (mode) {
-            .lines => .jsonl,
-            .single => .json,
-        };
+    fn writeJson(self: *const EventRecordView, w: anytype) !void {
         // Buffer full JSON object per record to avoid corrupting stream on errors
         var buf = std.ArrayList(u8).init(std.heap.c_allocator);
         defer buf.deinit();
@@ -688,7 +698,9 @@ pub const EventRecordView = struct {
         try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ self.id, self.timestamp_filetime });
         var ctx = try binxml.Context.init(std.heap.c_allocator);
         defer ctx.deinit();
-        try binxml.renderWithContext(&ctx, self.chunk_buf, self.raw_xml, body_mode, bw);
+        var builder = binxml.Builder.init(&ctx, ctx.allocator);
+        const root = try builder.buildExpandedElementTree(self.chunk_buf, self.raw_xml);
+        try render_json.renderElementJson(self.chunk_buf, root, ctx.arena.allocator(), bw);
         try bw.writeAll("}\n");
         try w.writeAll(buf.items);
     }
