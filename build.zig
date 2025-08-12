@@ -89,4 +89,20 @@ pub fn build(b: *std.Build) void {
         pymod.library_step.root_module.addImport("alloc", alloc_mod);
         pymod.test_step.root_module.addImport("alloc", alloc_mod);
     }
+
+    // ---- Native fuzz harness ----
+    const fuzz_tests = b.addTest(.{
+        .root_source_file = .{ .cwd_relative = "src/fuzz_evtx.zig" },
+        .target = target,
+        .optimize = .Debug,
+    });
+    fuzz_tests.root_module.addImport("alloc", alloc_mod);
+    if (use_c_alloc) fuzz_tests.linkLibC();
+    // Enable fuzz instrumentation
+    fuzz_tests.root_module.fuzz = true;
+    const fuzz_run = b.addRunArtifact(fuzz_tests);
+    fuzz_run.has_side_effects = true;
+    fuzz_run.stdio = .inherit;
+    const fuzz_step = b.step("fuzz", "Run native fuzz harness (press Ctrl-C to stop)");
+    fuzz_step.dependOn(&fuzz_run.step);
 }

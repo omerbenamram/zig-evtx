@@ -60,6 +60,9 @@ bench:
 	@mkdir -p out
 	$(ZIG) build bench-zbench -Dtarget=$(TARGET) -Doptimize=$(OPT) -Duse-c-alloc=$(USE_C_ALLOC_BOOL) -Dpython-exe=$(PYTHON_EXE) | tee out/bench-zbench.txt
 
+fuzz:
+	$(ZIG) build fuzz -Dtarget=$(TARGET) -Doptimize=Debug -Duse-c-alloc=$(USE_C_ALLOC_BOOL)
+
 todo:
 	@echo "Open TODOs:" && rg -n "TODO|FIXME" -S || true
 	@echo "\nSee TODO.md for the full checklist."
