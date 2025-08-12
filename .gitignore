@@ -8,3 +8,6 @@ binaries/
 repomix-output.xml
 
 *.so
+build
+dist
+*.egg-info
