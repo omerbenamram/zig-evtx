@@ -5,7 +5,49 @@ const binxml = @import("parser/binxml/mod.zig");
 const render_xml = @import("parser/render_xml.zig");
 const render_json = @import("parser/render_json.zig");
 
+const Stats = struct {
+    iters: u64 = 0,
+    ok_full_evtx: u64 = 0,
+    ok_build_tree: u64 = 0,
+    ok_xml_ser: u64 = 0,
+    ok_jsonl_ser: u64 = 0,
+    last_log_ms: i128 = 0,
+    log_every_ms: i128 = 0,
+    log_every_iters: u64 = 0,
+};
+var g_stats: Stats = .{};
+
+fn initLoggingOnce() void {
+    if (g_stats.log_every_ms != 0 or g_stats.log_every_iters != 0) return;
+    const ms_str = std.process.getEnvVarOwned(alloc.get(), "EVTX_FUZZ_LOG_MS") catch null;
+    if (ms_str) |s| {
+        defer alloc.get().free(s);
+        g_stats.log_every_ms = std.fmt.parseInt(i128, s, 10) catch 0;
+        g_stats.last_log_ms = std.time.milliTimestamp();
+    }
+    const iters_str = std.process.getEnvVarOwned(alloc.get(), "EVTX_FUZZ_LOG_ITERS") catch null;
+    if (iters_str) |s2| {
+        defer alloc.get().free(s2);
+        g_stats.log_every_iters = std.fmt.parseInt(u64, s2, 10) catch 0;
+    }
+}
+
+fn maybeLogProgress() void {
+    if (g_stats.log_every_iters != 0 and (g_stats.iters % g_stats.log_every_iters) == 0) {
+        std.debug.print("fuzz: iters={d} ok_full={d} ok_build={d} ok_xml={d} ok_jsonl={d}\n", .{ g_stats.iters, g_stats.ok_full_evtx, g_stats.ok_build_tree, g_stats.ok_xml_ser, g_stats.ok_jsonl_ser });
+        return;
+    }
+    if (g_stats.log_every_ms != 0) {
+        const now = std.time.milliTimestamp();
+        if (now - g_stats.last_log_ms >= g_stats.log_every_ms) {
+            std.debug.print("fuzz: iters={d} ok_full={d} ok_build={d} ok_xml={d} ok_jsonl={d}\n", .{ g_stats.iters, g_stats.ok_full_evtx, g_stats.ok_build_tree, g_stats.ok_xml_ser, g_stats.ok_jsonl_ser });
+            g_stats.last_log_ms = now;
+        }
+    }
+}
+
 fn runOnce(data_in: []const u8) void {
+    initLoggingOnce();
     var data = data_in;
     if (data.len == 0) return;
     if (data.len > 60000) data = data[0..60000];
@@ -23,10 +65,14 @@ fn runOnce(data_in: []const u8) void {
     defer ctx.deinit();
 
     // 0) Full EVTX parser path with synthetic header+chunk containing fuzz payload as a single record
-    synthAndParseFullEvtx(allocator, data) catch {};
+    if (synthAndParseFullEvtx(allocator, data)) |_| {
+        g_stats.ok_full_evtx += 1;
+    } else |_| {}
 
     // 1) Try render XML directly using context (parses + expands internally)
-    render_xml.renderXmlWithContext(&ctx, &chunk_buf, data, std.io.null_writer) catch {};
+    if (render_xml.renderXmlWithContext(&ctx, &chunk_buf, data, std.io.null_writer)) |_| {
+        g_stats.ok_xml_ser += 1;
+    } else |_| {}
 
     // 2) Parse + expand explicitly, then render JSON
     const root = blk: {
@@ -34,7 +80,10 @@ fn runOnce(data_in: []const u8) void {
         break :blk b.buildExpandedElementTree(&chunk_buf, data) catch null;
     };
     if (root) |r| {
-        render_json.renderElementJson(&chunk_buf, r, ctx.arena.allocator(), std.io.null_writer) catch {};
+        g_stats.ok_build_tree += 1;
+        if (render_json.renderElementJson(&chunk_buf, r, ctx.arena.allocator(), std.io.null_writer)) |_| {
+            g_stats.ok_jsonl_ser += 1;
+        } else |_| {}
     }
 
     // 3) Exercise evtx.Output serializer paths on a fabricated record view
@@ -43,6 +92,9 @@ fn runOnce(data_in: []const u8) void {
     _ = out_xml.serializeRecord(rec) catch {};
     var out_jsonl = evtx.Output.json(std.io.null_writer, .lines);
     _ = out_jsonl.serializeRecord(rec) catch {};
+
+    g_stats.iters += 1;
+    maybeLogProgress();
 }
 
 fn synthAndParseFullEvtx(allocator: std.mem.Allocator, payload: []const u8) !void {
