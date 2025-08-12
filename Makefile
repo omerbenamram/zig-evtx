@@ -12,7 +12,8 @@ PYTHON ?= python3
 # Control libc usage and python extension via env
 # USE_C_ALLOC=1 uses std.heap.c_allocator and links libc
 # WITH_PYTHON=1 builds the pydust extension module
-USE_C_ALLOC ?= 1
+# Default CI/local to no-libc unless explicitly requested
+USE_C_ALLOC ?= 0
 WITH_PYTHON ?= 0
 # Map numeric env to Zig booleans
 ifeq ($(USE_C_ALLOC),1)

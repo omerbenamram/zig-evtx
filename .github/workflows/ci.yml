@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    env:
+      USE_C_ALLOC: '0'
+      WITH_PYTHON: '0'
+    strategy:
+      matrix:
+        target: [ aarch64-linux, x86_64-linux ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v1
+        with:
+          version: 0.14.1
+      - name: Build (matrix target)
+        run: make build TARGET=${{ matrix.target }} OPT=ReleaseFast
+      - name: Unit tests (Debug)
+        run: make test
+

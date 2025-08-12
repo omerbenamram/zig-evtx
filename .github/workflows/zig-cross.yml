@@ -8,6 +8,8 @@ on:
 
 env:
   ZIG_VERSION: 0.14.1
+  USE_C_ALLOC: '0'
+  WITH_PYTHON: '0'
 
 jobs:
   linux-and-windows:

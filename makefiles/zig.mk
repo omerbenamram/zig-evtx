@@ -2,7 +2,12 @@
 
 all: build
 
-build: build-zig build-py
+build:
+ifeq ($(WITH_PYTHON),1)
+	$(MAKE) build-zig build-py
+else
+	$(MAKE) build-zig
+endif
 
 # Only build Zig artifacts (skip Python extension)
 .PHONY: build-zig
@@ -22,7 +27,7 @@ sample:
 	fmt="$(FORMAT)"; args=""; \
 	if [ "$(VERBOSE)" = "1" ]; then args="$$args -v"; fi; \
 	args="$$args -o $$fmt $(FILE)"; \
-	$(ZIG) build run -Dtarget=$(TARGET) -Doptimize=$(OPT) -- $$args
+	$(ZIG) build run -Dtarget=$(TARGET) -Doptimize=$(OPT) -Duse-c-alloc=$(USE_C_ALLOC_BOOL) -- $$args
 
 xml:
 	@$(MAKE) sample FILE="$(FILE)" FORMAT=xml VERBOSE=$(VERBOSE)
@@ -53,7 +58,7 @@ clean:
 
 bench:
 	@mkdir -p out
-	$(ZIG) build bench-zbench -Dtarget=$(TARGET) -Doptimize=$(OPT) -Dpython-exe=$(PYTHON_EXE) | tee out/bench-zbench.txt
+	$(ZIG) build bench-zbench -Dtarget=$(TARGET) -Doptimize=$(OPT) -Duse-c-alloc=$(USE_C_ALLOC_BOOL) -Dpython-exe=$(PYTHON_EXE) | tee out/bench-zbench.txt
 
 todo:
 	@echo "Open TODOs:" && rg -n "TODO|FIXME" -S || true
