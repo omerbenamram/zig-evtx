@@ -3,6 +3,7 @@ const crc32 = std.hash.crc;
 const binxml = @import("binxml/mod.zig");
 const render_xml = @import("render_xml.zig");
 const render_json = @import("render_json.zig");
+const alloc_mod = @import("alloc");
 const logger = @import("../logger.zig");
 const log = logger.scoped("evtx");
 
@@ -46,11 +47,11 @@ pub fn OutputImpl(comptime W: type) type {
         ema_alpha: f64 = 0.25,
 
         pub fn initXml(w: W) @This() {
-            return .{ .w = w, .mode = .xml, .scratch = std.ArrayList(u8).init(std.heap.c_allocator), .last_size_hint = 4096, .bufw = std.io.BufferedWriter(1048576, W){ .unbuffered_writer = w } };
+            return .{ .w = w, .mode = .xml, .scratch = std.ArrayList(u8).init(alloc_mod.get()), .last_size_hint = 4096, .bufw = std.io.BufferedWriter(1048576, W){ .unbuffered_writer = w } };
         }
 
         pub fn initJson(w: W, json_mode: Output.JsonMode) @This() {
-            return .{ .w = w, .mode = if (json_mode == .single) .json_single else .json_lines, .scratch = std.ArrayList(u8).init(std.heap.c_allocator), .last_size_hint = 4096, .bufw = std.io.BufferedWriter(1048576, W){ .unbuffered_writer = w } };
+            return .{ .w = w, .mode = if (json_mode == .single) .json_single else .json_lines, .scratch = std.ArrayList(u8).init(alloc_mod.get()), .last_size_hint = 4096, .bufw = std.io.BufferedWriter(1048576, W){ .unbuffered_writer = w } };
         }
 
         pub fn setContext(self: *@This(), c: *binxml.Context) void {
@@ -81,7 +82,7 @@ pub fn OutputImpl(comptime W: type) type {
                     if (self.ctx) |ctx| {
                         try render_xml.renderXmlWithContext(ctx, record.chunk_buf, record.raw_xml, bw);
                     } else {
-                        var local_ctx = try binxml.Context.init(std.heap.c_allocator);
+                        var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
                         try render_xml.renderXmlWithContext(&local_ctx, record.chunk_buf, record.raw_xml, bw);
                     }
@@ -95,7 +96,7 @@ pub fn OutputImpl(comptime W: type) type {
                         const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
-                        var local_ctx = try binxml.Context.init(std.heap.c_allocator);
+                        var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
                         var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
                         const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
@@ -111,7 +112,7 @@ pub fn OutputImpl(comptime W: type) type {
                         const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
-                        var local_ctx = try binxml.Context.init(std.heap.c_allocator);
+                        var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
                         var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
                         const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
@@ -141,7 +142,7 @@ pub fn OutputImpl(comptime W: type) type {
                     if (self.ctx) |ctx| {
                         try render_xml.renderXmlWithContext(ctx, record.chunk_buf, record.raw_xml, bw);
                     } else {
-                        var local_ctx = try binxml.Context.init(std.heap.c_allocator);
+                        var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
                         try render_xml.renderXmlWithContext(&local_ctx, record.chunk_buf, record.raw_xml, bw);
                     }
@@ -155,7 +156,7 @@ pub fn OutputImpl(comptime W: type) type {
                         const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
-                        var local_ctx = try binxml.Context.init(std.heap.c_allocator);
+                        var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
                         var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
                         const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
@@ -171,7 +172,7 @@ pub fn OutputImpl(comptime W: type) type {
                         const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
-                        var local_ctx = try binxml.Context.init(std.heap.c_allocator);
+                        var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
                         var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
                         const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
@@ -422,7 +423,7 @@ pub const EvtxParser = struct {
                     const has_limits = (self_.parser.opts.max_records != 0) or (self_.parser.opts.skip_first > 0);
                     if (!has_limits) {
                         // Fast path: no global limits, render the whole chunk to a local buffer, then single write
-                        var chunk_out = std.ArrayList(u8).init(std.heap.c_allocator);
+                        var chunk_out = std.ArrayList(u8).init(alloc_mod.get());
                         defer chunk_out.deinit();
                         _ = chunk_out.ensureTotalCapacityPrecise(96 * 1024) catch {};
                         while (rec_iter.next() catch null) |rec| {
@@ -787,9 +788,9 @@ pub const EventRecordView = struct {
 
     fn writeXml(self: *const EventRecordView, w: anytype) !void {
         // Buffer per-record output to avoid leaking partial garbage on failures
-        var ctx = try binxml.Context.init(std.heap.c_allocator);
+        var ctx = try binxml.Context.init(alloc_mod.get());
         defer ctx.deinit();
-        var buf = std.ArrayList(u8).init(std.heap.c_allocator);
+        var buf = std.ArrayList(u8).init(alloc_mod.get());
         defer buf.deinit();
         var bw = buf.writer();
         try render_xml.renderXmlWithContext(&ctx, self.chunk_buf, self.raw_xml, bw);
@@ -800,12 +801,12 @@ pub const EventRecordView = struct {
     const JsonOutMode = enum { single, lines };
     fn writeJson(self: *const EventRecordView, w: anytype) !void {
         // Buffer full JSON object per record to avoid corrupting stream on errors
-        var buf = std.ArrayList(u8).init(std.heap.c_allocator);
+        var buf = std.ArrayList(u8).init(alloc_mod.get());
         defer buf.deinit();
         var bw = buf.writer();
         try bw.writeAll("{");
         try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ self.id, self.timestamp_filetime });
-        var ctx = try binxml.Context.init(std.heap.c_allocator);
+        var ctx = try binxml.Context.init(alloc_mod.get());
         defer ctx.deinit();
         var builder = binxml.Builder.init(&ctx, ctx.allocator);
         const root = try builder.buildExpandedElementTree(self.chunk_buf, self.raw_xml);

@@ -1,6 +1,7 @@
 const std = @import("std");
 const py = @import("pydust");
 const evtx = @import("parser/evtx.zig");
+const alloc_mod = @import("alloc");
 const Root = @This();
 
 pub const __doc__ = "EVTX Python bindings";
@@ -74,7 +75,7 @@ const IterDef = struct {
         validate_checksums: bool = true,
         verbosity: u8 = 0,
     }) !void {
-        const allocator = std.heap.c_allocator;
+        const allocator = alloc_mod.get();
         if (!(std.mem.eql(u8, args.format, "xml") or std.mem.eql(u8, args.format, "jsonl") or std.mem.eql(u8, args.format, "jsonlines"))) {
             return error.InvalidFormat;
         }
@@ -136,7 +137,7 @@ const IterDef = struct {
         if (!(std.mem.eql(u8, args.format, "xml") or std.mem.eql(u8, args.format, "jsonl") or std.mem.eql(u8, args.format, "jsonlines"))) {
             return error.InvalidFormat;
         }
-        const allocator = std.heap.c_allocator;
+        const allocator = alloc_mod.get();
         var self = try py.alloc(Root, IterDef);
         self.* = .{
             .stream = null,
@@ -171,7 +172,7 @@ const IterDef = struct {
         args: py.Args(Root),
         kwargs: py.Kwargs(Root),
     }) !*IterDef {
-        const allocator = std.heap.c_allocator;
+        const allocator = alloc_mod.get();
         if (args.args.len == 0) {
             return py.TypeError(Root).raise("missing required positional arg: io");
         }
@@ -252,7 +253,7 @@ pub fn dump_file_bytes(args: struct {
     validate_checksums: bool = true,
     verbosity: u8 = 0,
 }) !py.PyObject(@This()) {
-    const allocator = std.heap.c_allocator;
+    const allocator = alloc_mod.get();
     var infile = try std.fs.cwd().openFile(args.path, .{ .mode = .read_only });
     defer infile.close();
     var reader = infile.reader();
@@ -296,7 +297,7 @@ pub fn dump_file_to_file(args: struct {
     validate_checksums: bool = true,
     verbosity: u8 = 0,
 }) !void {
-    const allocator = std.heap.c_allocator;
+    const allocator = alloc_mod.get();
 
     var infile = try std.fs.cwd().openFile(args.path, .{ .mode = .read_only });
     defer infile.close();

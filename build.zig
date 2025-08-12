@@ -2,9 +2,19 @@ const std = @import("std");
 const py = @import("./pydust.build.zig");
 
 pub fn build(b: *std.Build) void {
+    // Register custom options consumed by pydust helper so the build system
+    // recognizes them when passed via -D<opt>=...
+    const _py_exe_opt = b.option([]const u8, "python-exe", "Python executable to use for Pydust (path)");
+    _ = _py_exe_opt;
+
     const target_query = b.standardTargetOptionsQueryOnly(.{});
     const target = b.resolveTargetQuery(target_query);
     const optimize = b.standardOptimizeOption(.{});
+
+    // Build options
+    const with_python = b.option(bool, "with-python", "Build the pydust Python extension module") orelse false;
+    const use_c_alloc = b.option(bool, "use-c-alloc", "Link libc and use std.heap.c_allocator via alloc module") orelse true;
+    // python-exe already declared above for CLI pass-through even if with_python=false
 
     // Original executable target
     const dep_opts = .{ .target = target_query, .optimize = optimize };
@@ -16,6 +26,12 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // Provide alloc module and optionally link libc
+    const alloc_mod = b.createModule(.{ .root_source_file = .{ .cwd_relative = "src/alloc.zig" } });
+    exe.root_module.addImport("alloc", alloc_mod);
+    if (use_c_alloc) {
+        exe.linkLibC();
+    }
     b.installArtifact(exe);
 
     const run_cmd = b.addRunArtifact(exe);
@@ -29,6 +45,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    unit_tests.root_module.addImport("alloc", alloc_mod);
+    if (use_c_alloc) {
+        unit_tests.linkLibC();
+    }
     const test_run = b.addRunArtifact(unit_tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&test_run.step);
@@ -41,18 +61,24 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     zbench_exe.root_module.addImport("zbench", zbench_mod);
+    zbench_exe.root_module.addImport("alloc", alloc_mod);
+    if (use_c_alloc) {
+        zbench_exe.linkLibC();
+    }
     b.installArtifact(zbench_exe);
     const zbench_run = b.addRunArtifact(zbench_exe);
     const zbench_step = b.step("bench-zbench", "Run zBench microbenchmarks");
     zbench_step.dependOn(&zbench_run.step);
 
     // Pydust Python extension module target (self-managed)
-    const pydust = py.addPydust(b, .{ .test_step = test_step });
-    _ = pydust.addPythonModule(.{
-        .name = "evtxzig._lib",
-        .root_source_file = b.path("src/evtx_pydust.zig"),
-        .limited_api = true,
-        .target = target_query,
-        .optimize = optimize,
-    });
+    if (with_python) {
+        const pydust = py.addPydust(b, .{ .test_step = test_step });
+        _ = pydust.addPythonModule(.{
+            .name = "evtxzig._lib",
+            .root_source_file = b.path("src/evtx_pydust.zig"),
+            .limited_api = true,
+            .target = target_query,
+            .optimize = optimize,
+        });
+    }
 }

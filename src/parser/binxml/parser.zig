@@ -7,6 +7,7 @@ const types = @import("types.zig");
 const BinXmlError = @import("../err.zig").BinXmlError;
 const logger = @import("../../logger.zig");
 const log = logger.scoped("binxml");
+const alloc_mod = @import("alloc");
 const tokens = @import("tokens.zig");
 const util = @import("../util.zig");
 const utf16EqualsAscii = util.utf16EqualsAscii;
@@ -37,7 +38,7 @@ pub const Parser = struct {
     pub fn parseTemplateInstanceValues(self: *Parser, r: *Reader, expected: usize) ![]types.TemplateValue {
         _ = self;
         // Forward to core function for now
-        return parseTemplateInstanceValuesExpected(r, std.heap.c_allocator, expected);
+        return parseTemplateInstanceValuesExpected(r, alloc_mod.get(), expected);
     }
 };
 

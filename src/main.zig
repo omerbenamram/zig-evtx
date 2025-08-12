@@ -1,11 +1,12 @@
 const std = @import("std");
+const alloc = @import("alloc");
 const fs = std.fs;
 
 const evtx = @import("parser/evtx.zig");
 
 pub fn main() !void {
-    // Use libc malloc-backed allocator to minimize per-alloc syscalls/page faults
-    const allocator = std.heap.c_allocator;
+    // Default allocator is selectable at build time (libc or GPA)
+    const allocator = alloc.get();
 
     var args_iter = try std.process.argsWithAllocator(allocator);
     defer args_iter.deinit();
