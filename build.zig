@@ -39,15 +39,22 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     const unit_tests = b.addTest(.{
-        .root_source_file = .{ .cwd_relative = "src/main.zig" },
+        .root_source_file = .{ .cwd_relative = "src/tests.zig" },
         .target = target,
         .optimize = optimize,
     });
+    // Optional filter from CLI: -Dtest-filter (unused on 0.14 runner, kept for future)
     unit_tests.root_module.addImport("alloc", alloc_mod);
     if (use_c_alloc) {
         unit_tests.linkLibC();
     }
     const test_run = b.addRunArtifact(unit_tests);
+    // Always execute the test run step even if inputs are unchanged. This ensures
+    // running `zig build test` (and thus `make test`) will re-run the unit tests
+    // and print per-test PASS/FAIL output every time.
+    test_run.has_side_effects = true;
+    // Inherit stdio so the default test runner's output is visible.
+    test_run.stdio = .inherit;
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&test_run.step);
 

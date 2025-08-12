@@ -234,7 +234,14 @@ pub fn writeUtf16LeXmlEscaped_scalar(w: anytype, utf16le: []const u8, num_chars:
 
 // SIMD classification per block without an ASCII-only fast path.
 // Processes all 8 lanes with scalar emission guided by vector masks.
-pub fn writeUtf16LeXmlEscaped_simd_utf16(w: anytype, utf16le: []const u8, num_chars: usize) !void {
+const EscapeMode = enum { xml, json };
+
+fn writeUtf16LeEscaped_simd_utf16(
+    w: anytype,
+    utf16le: []const u8,
+    num_chars: usize,
+    comptime mode: EscapeMode,
+) !void {
     var out_buf: [2048]u8 = undefined;
     var out_len: usize = 0;
 
@@ -249,18 +256,33 @@ pub fn writeUtf16LeXmlEscaped_simd_utf16(w: anytype, utf16le: []const u8, num_ch
         const v: @Vector(8, u16) = @bitCast(blk);
 
         const is_ascii: @Vector(8, bool) = v <= @as(@Vector(8, u16), @splat(0x7F));
-        const m_amp: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(38));
-        const m_lt: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(60));
-        const m_gt: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(62));
-        const m_quot: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(34));
-        const m_apos: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(39));
-        const esc_any_u1: @Vector(8, u1) =
-            @as(@Vector(8, u1), @bitCast(m_amp)) |
-            @as(@Vector(8, u1), @bitCast(m_lt)) |
-            @as(@Vector(8, u1), @bitCast(m_gt)) |
-            @as(@Vector(8, u1), @bitCast(m_quot)) |
-            @as(@Vector(8, u1), @bitCast(m_apos));
-        const esc_mask: @Vector(8, bool) = @as(@Vector(8, bool), @bitCast(@as(@Vector(8, u1), @bitCast(is_ascii)) & esc_any_u1));
+        const esc_mask: @Vector(8, bool) = switch (mode) {
+            .xml => blk_xml: {
+                const m_amp: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(38));
+                const m_lt: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(60));
+                const m_gt: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(62));
+                const m_quot: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(34));
+                const m_apos: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(39));
+                const esc_any_u1: @Vector(8, u1) =
+                    @as(@Vector(8, u1), @bitCast(m_amp)) |
+                    @as(@Vector(8, u1), @bitCast(m_lt)) |
+                    @as(@Vector(8, u1), @bitCast(m_gt)) |
+                    @as(@Vector(8, u1), @bitCast(m_quot)) |
+                    @as(@Vector(8, u1), @bitCast(m_apos));
+                break :blk_xml @as(@Vector(8, bool), @bitCast(@as(@Vector(8, u1), @bitCast(is_ascii)) & esc_any_u1));
+            },
+            .json => blk_json: {
+                // JSON: escape '"', '\\', and all ASCII < 0x20
+                const m_quote: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(34));
+                const m_bslash: @Vector(8, bool) = v == @as(@Vector(8, u16), @splat(92));
+                const le_001f: @Vector(8, bool) = v <= @as(@Vector(8, u16), @splat(0x001F));
+                const esc_any_u1: @Vector(8, u1) =
+                    @as(@Vector(8, u1), @bitCast(m_quote)) |
+                    @as(@Vector(8, u1), @bitCast(m_bslash)) |
+                    @as(@Vector(8, u1), @bitCast(le_001f));
+                break :blk_json @as(@Vector(8, bool), @bitCast(@as(@Vector(8, u1), @bitCast(is_ascii)) & esc_any_u1));
+            },
+        };
 
         const ge_d800: @Vector(8, bool) = v >= @as(@Vector(8, u16), @splat(0xD800));
         const le_dbff: @Vector(8, bool) = v <= @as(@Vector(8, u16), @splat(0xDBFF));
@@ -289,17 +311,56 @@ pub fn writeUtf16LeXmlEscaped_simd_utf16(w: anytype, utf16le: []const u8, num_ch
             if (is_ascii[k]) {
                 const c: u8 = b0;
                 if (esc_mask[k]) {
-                    const e: []const u8 = switch (c) {
-                        '&' => "&amp;",
-                        '<' => "&lt;",
-                        '>' => "&gt;",
-                        '"' => "&quot;",
-                        '\'' => "&apos;",
-                        else => unreachable,
-                    };
-                    if (out_len + e.len > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
-                    std.mem.copyForwards(u8, out_buf[out_len .. out_len + e.len], e);
-                    out_len += e.len;
+                    if (comptime mode == .xml) {
+                        const e: []const u8 = switch (c) {
+                            '&' => "&amp;",
+                            '<' => "&lt;",
+                            '>' => "&gt;",
+                            '"' => "&quot;",
+                            '\'' => "&apos;",
+                            else => unreachable,
+                        };
+                        if (out_len + e.len > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                        std.mem.copyForwards(u8, out_buf[out_len .. out_len + e.len], e);
+                        out_len += e.len;
+                    } else {
+                        // JSON escaping for ASCII
+                        if (c == '"' or c == '\\') {
+                            if (out_len + 2 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                            out_buf[out_len] = '\\';
+                            out_buf[out_len + 1] = c;
+                            out_len += 2;
+                        } else {
+                            // c < 0x20
+                            const pair: u8 = switch (c) {
+                                0x08 => 'b',
+                                0x0c => 'f',
+                                '\n' => 'n',
+                                '\r' => 'r',
+                                '\t' => 't',
+                                else => 0,
+                            };
+                            if (pair != 0) {
+                                if (out_len + 2 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                                out_buf[out_len] = '\\';
+                                out_buf[out_len + 1] = @as(u8, pair);
+                                out_len += 2;
+                            } else {
+                                // \u00XX
+                                if (out_len + 6 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                                const HEX = "0123456789ABCDEF";
+                                const hi_n: usize = @as(usize, @intCast((c >> 4) & 0xF));
+                                const lo_n: usize = @as(usize, @intCast(c & 0xF));
+                                out_buf[out_len] = '\\';
+                                out_buf[out_len + 1] = 'u';
+                                out_buf[out_len + 2] = '0';
+                                out_buf[out_len + 3] = '0';
+                                out_buf[out_len + 4] = HEX[hi_n];
+                                out_buf[out_len + 5] = HEX[lo_n];
+                                out_len += 6;
+                            }
+                        }
+                    }
                 } else {
                     if (out_len == out_buf.len) try flushOut2048(w, &out_buf, &out_len);
                     out_buf[out_len] = c;
@@ -372,16 +433,34 @@ pub fn writeUtf16LeXmlEscaped_simd_utf16(w: anytype, utf16le: []const u8, num_ch
         p += 16 + extra_bytes;
         i += 8 + extra_chars;
     }
-    if (i < max_chars) {
-        try writeUtf16LeXmlEscaped_scalar(w, utf16le[p..], max_chars - i);
-    }
+    // Ensure vector-emitted bytes are written before handling the tail using the scalar path.
+    // Writing the remainder first would reorder output (tail at the front), as seen in tests.
     try flushOut2048(w, &out_buf, &out_len);
+    if (i < max_chars) {
+        if (comptime mode == .xml) {
+            try writeUtf16LeXmlEscaped_scalar(w, utf16le[p..], max_chars - i);
+        } else {
+            try writeUtf16LeWithEscaper(w, utf16le[p..], max_chars - i, jsonEscapeUtf8);
+        }
+    }
+}
+
+pub fn writeUtf16LeXmlEscaped_simd_utf16(w: anytype, utf16le: []const u8, num_chars: usize) !void {
+    return writeUtf16LeEscaped_simd_utf16(w, utf16le, num_chars, .xml);
+}
+
+pub fn writeUtf16LeJsonEscaped_simd_utf16(w: anytype, utf16le: []const u8, num_chars: usize) !void {
+    return writeUtf16LeEscaped_simd_utf16(w, utf16le, num_chars, .json);
 }
 
 // Baseline implementation kept for microbench comparison
 
 // Write UTF-16LE input as JSON-escaped UTF-8
 pub fn writeUtf16LeJsonEscaped(w: anytype, utf16le: []const u8, num_chars: usize) !void {
+    const builtin = @import("builtin");
+    if (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64) {
+        return writeUtf16LeJsonEscaped_simd_utf16(w, utf16le, num_chars);
+    }
     return writeUtf16LeWithEscaper(w, utf16le, num_chars, jsonEscapeUtf8);
 }
 
@@ -656,4 +735,145 @@ pub fn utf16FromAscii(alloc: std.mem.Allocator, ascii: []const u8) ![]u8 {
         buf[i * 2 + 1] = 0;
     }
     return buf;
+}
+
+const CaseId = enum {
+    ascii,
+    euro,
+    e_acute,
+    two_byte_max,
+    grinning,
+    hi_only,
+    lo_only,
+    ctrl_1f,
+    newline,
+    long_ascii,
+};
+
+fn buildUtf16Case(alloc: std.mem.Allocator, id: CaseId) ![]u8 {
+    switch (id) {
+        .ascii => return utf16FromAscii(alloc, "Hello &<>\"' World"),
+        .long_ascii => return utf16FromAscii(alloc, "aaaaaaa&bbbbbbb&ccccccc<dddddd>eeeeee\"fffffff'gggggg"),
+        .euro => return alloc.dupe(u8, &[_]u8{ 0xAC, 0x20 }),
+        .e_acute => return alloc.dupe(u8, &[_]u8{ 0xE9, 0x00 }),
+        .two_byte_max => return alloc.dupe(u8, &[_]u8{ 0xFF, 0x07 }),
+        .grinning => return alloc.dupe(u8, &[_]u8{ 0x3D, 0xD8, 0x00, 0xDE }),
+        .hi_only => return alloc.dupe(u8, &[_]u8{ 0x00, 0xD8 }),
+        .lo_only => return alloc.dupe(u8, &[_]u8{ 0x00, 0xDC }),
+        .ctrl_1f => return alloc.dupe(u8, &[_]u8{ 0x1F, 0x00 }),
+        .newline => return alloc.dupe(u8, &[_]u8{ '\n', 0x00 }),
+    }
+}
+
+const Mode = enum { xml, json };
+
+fn modeName(mode: Mode) []const u8 {
+    return switch (mode) {
+        .xml => "XML",
+        .json => "JSON",
+    };
+}
+
+fn runMatrixCase(mode: Mode, id: CaseId) !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const alloc = gpa.allocator();
+
+    const bytes = try buildUtf16Case(alloc, id);
+    defer alloc.free(bytes);
+    const num_chars = bytes.len / 2;
+
+    var out_a = std.ArrayList(u8).init(alloc);
+    defer out_a.deinit();
+    var out_b = std.ArrayList(u8).init(alloc);
+    defer out_b.deinit();
+
+    switch (mode) {
+        .xml => {
+            try writeUtf16LeXmlEscaped_simd_utf16(out_a.writer(), bytes, num_chars);
+            try writeUtf16LeXmlEscaped_scalar(out_b.writer(), bytes, num_chars);
+        },
+        .json => {
+            try writeUtf16LeJsonEscaped_simd_utf16(out_a.writer(), bytes, num_chars);
+            try writeUtf16LeWithEscaper(out_b.writer(), bytes, num_chars, jsonEscapeUtf8);
+        },
+    }
+    try std.testing.expectEqualStrings(out_b.items, out_a.items);
+    const case_name = switch (id) {
+        .ascii => "ascii",
+        .euro => "euro",
+        .e_acute => "e_acute",
+        .two_byte_max => "two_byte_max",
+        .grinning => "grinning",
+        .hi_only => "hi_only",
+        .lo_only => "lo_only",
+        .ctrl_1f => "ctrl_1f",
+        .newline => "newline",
+        .long_ascii => "long_ascii",
+    };
+    std.debug.print("PASS {s} - {s}\n", .{ modeName(mode), case_name });
+}
+
+// XML cases
+test "XML - ascii" {
+    try runMatrixCase(.xml, .ascii);
+}
+test "XML - euro" {
+    try runMatrixCase(.xml, .euro);
+}
+test "XML - e_acute" {
+    try runMatrixCase(.xml, .e_acute);
+}
+test "XML - two_byte_max" {
+    try runMatrixCase(.xml, .two_byte_max);
+}
+test "XML - grinning" {
+    try runMatrixCase(.xml, .grinning);
+}
+test "XML - hi_only" {
+    try runMatrixCase(.xml, .hi_only);
+}
+test "XML - lo_only" {
+    try runMatrixCase(.xml, .lo_only);
+}
+test "XML - ctrl_1f" {
+    try runMatrixCase(.xml, .ctrl_1f);
+}
+test "XML - newline" {
+    try runMatrixCase(.xml, .newline);
+}
+test "XML - long_ascii" {
+    try runMatrixCase(.xml, .long_ascii);
+}
+
+// JSON cases
+test "JSON - ascii" {
+    try runMatrixCase(.json, .ascii);
+}
+test "JSON - euro" {
+    try runMatrixCase(.json, .euro);
+}
+test "JSON - e_acute" {
+    try runMatrixCase(.json, .e_acute);
+}
+test "JSON - two_byte_max" {
+    try runMatrixCase(.json, .two_byte_max);
+}
+test "JSON - grinning" {
+    try runMatrixCase(.json, .grinning);
+}
+test "JSON - hi_only" {
+    try runMatrixCase(.json, .hi_only);
+}
+test "JSON - lo_only" {
+    try runMatrixCase(.json, .lo_only);
+}
+test "JSON - ctrl_1f" {
+    try runMatrixCase(.json, .ctrl_1f);
+}
+test "JSON - newline" {
+    try runMatrixCase(.json, .newline);
+}
+test "JSON - long_ascii" {
+    try runMatrixCase(.json, .long_ascii);
 }

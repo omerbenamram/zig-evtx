@@ -33,8 +33,17 @@ json:
 jsonl:
 	@$(MAKE) sample FILE="$(FILE)" FORMAT=jsonl VERBOSE=$(VERBOSE)
 
+TEST_SUMMARY ?= all
+TEST_COLOR ?= on
+TEST_FILTER ?=
+TEST_FILE ?= src/tests.zig
+NO_CACHE ?= 0
+
 test:
-	$(ZIG) build test -Dtarget=$(TARGET) -Doptimize=$(TEST_OPT) -Duse-c-alloc=$(USE_C_ALLOC_BOOL)
+	@# Optionally drop caches to rerun everything fresh
+	@if [ "$(NO_CACHE)" = "1" ]; then rm -rf zig-out .zig-cache; fi
+	@# Run tests directly against aggregator to ensure summary on 0.14.1
+	$(ZIG) test -O $(TEST_OPT) $(TEST_FILE)
 
 fmt:
 	$(ZIG) fmt src/**/*.zig
