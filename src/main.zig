@@ -21,11 +21,15 @@ pub fn main() !void {
     var skip_first: usize = 0;
     var validate_checksums: bool = true;
     var threads_opt: ?usize = null;
+    var json_style_evtxrs: bool = false;
 
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "-o")) {
             const mode = args_iter.next() orelse return error.InvalidArgs;
             if (std.mem.eql(u8, mode, "xml")) output_mode = .xml else if (std.mem.eql(u8, mode, "json")) output_mode = .json else if (std.mem.eql(u8, mode, "jsonl")) output_mode = .jsonl else return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--json-style")) {
+            const style = args_iter.next() orelse return error.InvalidArgs;
+            if (std.mem.eql(u8, style, "default")) json_style_evtxrs = false else if (std.mem.eql(u8, style, "evtxrs")) json_style_evtxrs = true else return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "-v")) {
             if (verbosity < 1) verbosity = 1;
         } else if (std.mem.eql(u8, arg, "-vv")) {
@@ -67,16 +71,24 @@ pub fn main() !void {
     if (num_threads <= 1) {
         var output = switch (output_mode) {
             .xml => evtx.Output.xml(std.io.getStdOut().writer()),
-            .json => evtx.Output.json(std.io.getStdOut().writer(), .single),
-            .jsonl => evtx.Output.json(std.io.getStdOut().writer(), .lines),
+            .json => if (json_style_evtxrs) evtx.OutputImpl(@TypeOf(std.io.getStdOut().writer())).initJson(std.io.getStdOut().writer(), .single) else evtx.Output.json(std.io.getStdOut().writer(), .single),
+            .jsonl => if (json_style_evtxrs) evtx.OutputImpl(@TypeOf(std.io.getStdOut().writer())).initJson(std.io.getStdOut().writer(), .lines) else evtx.Output.json(std.io.getStdOut().writer(), .lines),
         };
+        // Patch mode if evtxrs selected (initJson does not set custom mode)
+        if (json_style_evtxrs) {
+            switch (output_mode) {
+                .json => output.mode = .json_single_evtxrs,
+                .jsonl => output.mode = .json_lines_evtxrs,
+                else => {},
+            }
+        }
         try parser.parse(&reader, &output);
         output.flush();
     } else {
         const out_kind: evtx.EvtxParser.OutKind = switch (output_mode) {
             .xml => .xml,
-            .json => .json_single,
-            .jsonl => .json_lines,
+            .json => if (json_style_evtxrs) .json_single_evtxrs else .json_single,
+            .jsonl => if (json_style_evtxrs) .json_lines_evtxrs else .json_lines,
         };
         try parser.parseConcurrent(&reader, out_kind, num_threads);
     }
@@ -84,7 +96,7 @@ pub fn main() !void {
 
 fn usage() noreturn {
     const w = std.io.getStdErr().writer();
-    w.print("Usage: evtx_dump_zig [-v|-vv|-vvv] [-o xml|json|jsonl] [-s N] [-n N] [-t NUM_THREADS] <file.evtx>\n", .{}) catch {};
+    w.print("Usage: evtx_dump_zig [-v|-vv|-vvv] [-o xml|json|jsonl] [--json-style default|evtxrs] [-s N] [-n N] [-t NUM_THREADS] <file.evtx>\n", .{}) catch {};
     std.process.exit(2);
 }
 
