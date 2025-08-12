@@ -43,6 +43,7 @@ TEST_COLOR ?= on
 TEST_FILTER ?=
 TEST_FILE ?= src/tests.zig
 NO_CACHE ?= 0
+FUZZ_TIMEOUT ?= 60
 
 test:
 	@# Optionally drop caches to rerun everything fresh
@@ -59,6 +60,9 @@ clean:
 bench:
 	@mkdir -p out
 	$(ZIG) build bench-zbench -Dtarget=$(TARGET) -Doptimize=$(OPT) -Duse-c-alloc=$(USE_C_ALLOC_BOOL) -Dpython-exe=$(PYTHON_EXE) | tee out/bench-zbench.txt
+
+fuzz:
+	/usr/bin/timeout $(FUZZ_TIMEOUT)s $(ZIG) build fuzz -Dtarget=$(TARGET) -Doptimize=Debug -Duse-c-alloc=$(USE_C_ALLOC_BOOL)
 
 todo:
 	@echo "Open TODOs:" && rg -n "TODO|FIXME" -S || true
