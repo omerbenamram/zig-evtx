@@ -1,4 +1,4 @@
-.PHONY: install-evtx xml-rs xml-zig compare-first xml-all-rs xml-all-zig compare-all record compare-time time-zig time-rust
+.PHONY: install-evtx xml-rs xml-zig compare-first xml-all-rs xml-all-zig compare-all record compare-time time-zig time-rust json-rs json-zig compare-json jsonl-rs jsonl-zig compare-jsonl
 
 EVTX_DUMP ?= evtx_dump
 OUT_DIR ?= out
@@ -124,5 +124,53 @@ time-rust: install-evtx
 	/usr/bin/time -l $(EVTX_DUMP) -t 1 -o xml "$(FILE)" >/dev/null 2> "$(OUT_DIR)/time-rs.txt"; \
 	echo "--- tail(time-rs) ---"; tail -n 8 "$(OUT_DIR)/time-rs.txt" | cat; \
 	echo "Output written to $(OUT_DIR)/time-rs.txt"
+
+json-rs: install-evtx
+	@if [ -z "$(FILE)" ]; then echo "Usage: make json-rs FILE=path/to/file.evtx"; exit 1; fi; \
+	mkdir -p $(OUT_DIR); \
+	name=$$(basename "$(FILE)"); \
+	rm -f "$(OUT_DIR)/$$name.rs.jsonl"; \
+	$(EVTX_DUMP) -t 1 -o jsonl "$(FILE)" > "$(OUT_DIR)/$$name.rs.jsonl"
+
+json-zig: build-zig
+	@if [ -z "$(FILE)" ]; then echo "Usage: make json-zig FILE=path/to/file.evtx [STYLE=default|evtxrs]"; exit 1; fi; \
+	mkdir -p $(OUT_DIR); \
+	name=$$(basename "$(FILE)"); \
+	STYLE=$${STYLE:-evtxrs}; \
+	args="-o jsonl"; \
+	if [ "$$STYLE" = "evtxrs" ]; then args="$$args --json-style evtxrs"; fi; \
+	zig-out/bin/evtx_dump_zig $$args "$(FILE)" > "$(OUT_DIR)/$$name.zig.jsonl"
+
+compare-json: json-rs json-zig
+	@set -e; \
+	name=$$(basename "$(FILE)"); \
+	jq -c . < "$(OUT_DIR)/$$name.rs.jsonl" > "$(OUT_DIR)/$$name.rs.norm.jsonl"; \
+	jq -c . < "$(OUT_DIR)/$$name.zig.jsonl" > "$(OUT_DIR)/$$name.zig.norm.jsonl"; \
+	$(DIFF) "$(OUT_DIR)/$$name.rs.norm.jsonl" "$(OUT_DIR)/$$name.zig.norm.jsonl" | tee "$(OUT_DIR)/$$name.json.diff" || true; \
+	echo "JSON diff written to $(OUT_DIR)/$$name.json.diff"
+
+jsonl-rs: install-evtx
+	@if [ -z "$(FILE)" ]; then echo "Usage: make jsonl-rs FILE=path/to/file.evtx"; exit 1; fi; \
+	mkdir -p $(OUT_DIR); \
+	name=$$(basename "$(FILE)"); \
+	rm -f "$(OUT_DIR)/$$name.rs.jsonl"; \
+	$(EVTX_DUMP) -t 1 -o jsonl "$(FILE)" > "$(OUT_DIR)/$$name.rs.jsonl"
+
+jsonl-zig: build-zig
+	@if [ -z "$(FILE)" ]; then echo "Usage: make jsonl-zig FILE=path/to/file.evtx [STYLE=default|evtxrs]"; exit 1; fi; \
+	mkdir -p $(OUT_DIR); \
+	name=$$(basename "$(FILE)"); \
+	STYLE=$${STYLE:-evtxrs}; \
+	args="-o jsonl"; \
+	if [ "$$STYLE" = "evtxrs" ]; then args="$$args --json-style evtxrs"; fi; \
+	zig-out/bin/evtx_dump_zig $$args "$(FILE)" > "$(OUT_DIR)/$$name.zig.jsonl"
+
+compare-jsonl: jsonl-rs jsonl-zig
+	@set -e; \
+	name=$$(basename "$(FILE)"); \
+	jq -c . < "$(OUT_DIR)/$$name.rs.jsonl" > "$(OUT_DIR)/$$name.rs.norm.jsonl"; \
+	jq -c . < "$(OUT_DIR)/$$name.zig.jsonl" > "$(OUT_DIR)/$$name.zig.norm.jsonl"; \
+	$(DIFF) "$(OUT_DIR)/$$name.rs.norm.jsonl" "$(OUT_DIR)/$$name.zig.norm.jsonl" | tee "$(OUT_DIR)/$$name.jsonl.diff" || true; \
+	echo "JSONL diff written to $(OUT_DIR)/$$name.jsonl.diff"
 
 

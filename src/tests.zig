@@ -5,6 +5,7 @@ const std = @import("std");
 test "aggregate module tests" {
     _ = @import("parser/util.zig");
     _ = @import("parser/render_json.zig");
+    _ = @import("parser/render_json_evtxrs.zig");
     _ = @import("parser/reader.zig");
     _ = @import("parser/evtx.zig");
     try std.testing.expect(true);

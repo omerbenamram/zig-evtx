@@ -3,6 +3,7 @@ const crc32 = std.hash.crc;
 const binxml = @import("binxml/mod.zig");
 const render_xml = @import("render_xml.zig");
 const render_json = @import("render_json.zig");
+const render_json_evtxrs = @import("render_json_evtxrs.zig");
 const alloc_mod = @import("alloc");
 const logger = @import("../logger.zig");
 const log = logger.scoped("evtx");
@@ -36,7 +37,7 @@ pub const Output = struct {
 pub fn OutputImpl(comptime W: type) type {
     return struct {
         w: W,
-        mode: enum { xml, json_single, json_lines },
+        mode: enum { xml, json_single, json_lines, json_single_evtxrs, json_lines_evtxrs },
         scratch: std.ArrayList(u8),
         last_size_hint: usize,
         bufw: std.io.BufferedWriter(1048576, W),
@@ -120,6 +121,38 @@ pub fn OutputImpl(comptime W: type) type {
                     }
                     try bw.writeAll("}\n");
                 },
+                .json_single_evtxrs => {
+                    try bw.writeAll("{");
+                    try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
+                    if (self.ctx) |ctx| {
+                        var builder = binxml.Builder.init(ctx, ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json_evtxrs.renderElementJsonEvtxRs(record.chunk_buf, root, ctx.arena.allocator(), bw);
+                    } else {
+                        var local_ctx = try binxml.Context.init(alloc_mod.get());
+                        defer local_ctx.deinit();
+                        var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json_evtxrs.renderElementJsonEvtxRs(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
+                    }
+                    try bw.writeAll("}\n");
+                },
+                .json_lines_evtxrs => {
+                    try bw.writeAll("{");
+                    try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
+                    if (self.ctx) |ctx| {
+                        var builder = binxml.Builder.init(ctx, ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json_evtxrs.renderElementJsonEvtxRs(record.chunk_buf, root, ctx.arena.allocator(), bw);
+                    } else {
+                        var local_ctx = try binxml.Context.init(alloc_mod.get());
+                        defer local_ctx.deinit();
+                        var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json_evtxrs.renderElementJsonEvtxRs(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
+                    }
+                    try bw.writeAll("}\n");
+                },
             }
             // Emit once to the buffered underlying writer and update size hint
             var outw = self.bufw.writer();
@@ -177,6 +210,38 @@ pub fn OutputImpl(comptime W: type) type {
                         var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
                         const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
+                    }
+                    try bw.writeAll("}\n");
+                },
+                .json_single_evtxrs => {
+                    try bw.writeAll("{");
+                    try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
+                    if (self.ctx) |ctx| {
+                        var builder = binxml.Builder.init(ctx, ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json_evtxrs.renderElementJsonEvtxRs(record.chunk_buf, root, ctx.arena.allocator(), bw);
+                    } else {
+                        var local_ctx = try binxml.Context.init(alloc_mod.get());
+                        defer local_ctx.deinit();
+                        var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json_evtxrs.renderElementJsonEvtxRs(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
+                    }
+                    try bw.writeAll("}\n");
+                },
+                .json_lines_evtxrs => {
+                    try bw.writeAll("{");
+                    try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
+                    if (self.ctx) |ctx| {
+                        var builder = binxml.Builder.init(ctx, ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json_evtxrs.renderElementJsonEvtxRs(record.chunk_buf, root, ctx.arena.allocator(), bw);
+                    } else {
+                        var local_ctx = try binxml.Context.init(alloc_mod.get());
+                        defer local_ctx.deinit();
+                        var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
+                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        try render_json_evtxrs.renderElementJsonEvtxRs(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
                     }
                     try bw.writeAll("}\n");
                 },
@@ -288,7 +353,7 @@ pub const EvtxParser = struct {
     }
 
     // Concurrent parsing entry point: read chunks sequentially, parse in a thread pool, and stream outputs to stdout
-    pub const OutKind = enum { xml, json_single, json_lines };
+    pub const OutKind = enum { xml, json_single, json_lines, json_single_evtxrs, json_lines_evtxrs };
 
     const WorkItem = struct {
         index: usize,
@@ -400,6 +465,16 @@ pub const EvtxParser = struct {
                     .xml => Output.xml(self_.stdout_writer),
                     .json_single => Output.json(self_.stdout_writer, .single),
                     .json_lines => Output.json(self_.stdout_writer, .lines),
+                    .json_single_evtxrs => blk: {
+                        var out = Output.json(self_.stdout_writer, .single);
+                        out.mode = .json_single_evtxrs;
+                        break :blk out;
+                    },
+                    .json_lines_evtxrs => blk: {
+                        var out = Output.json(self_.stdout_writer, .lines);
+                        out.mode = .json_lines_evtxrs;
+                        break :blk out;
+                    },
                 };
                 var ctx = binxml.Context.init(self_.parser.allocator) catch return;
                 defer ctx.deinit();
