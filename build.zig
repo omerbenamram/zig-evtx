@@ -2,10 +2,8 @@ const std = @import("std");
 const py = @import("./pydust.build.zig");
 
 pub fn build(b: *std.Build) void {
-    // Register custom options consumed by pydust helper so the build system
-    // recognizes them when passed via -D<opt>=...
-    const _py_exe_opt = b.option([]const u8, "python-exe", "Python executable to use for Pydust (path)");
-    _ = _py_exe_opt;
+    // Note: pydust helper declares and reads the 'python-exe' option itself.
+    // Avoid declaring it here to prevent duplicate option panics.
 
     const target_query = b.standardTargetOptionsQueryOnly(.{});
     const target = b.resolveTargetQuery(target_query);
@@ -73,12 +71,15 @@ pub fn build(b: *std.Build) void {
     // Pydust Python extension module target (self-managed)
     if (with_python) {
         const pydust = py.addPydust(b, .{ .test_step = test_step });
-        _ = pydust.addPythonModule(.{
+        const pymod = pydust.addPythonModule(.{
             .name = "evtxzig._lib",
             .root_source_file = b.path("src/evtx_pydust.zig"),
             .limited_api = true,
             .target = target_query,
             .optimize = optimize,
         });
+        // Ensure our Python module and its tests see the same alloc module used by the main exe
+        pymod.library_step.root_module.addImport("alloc", alloc_mod);
+        pymod.test_step.root_module.addImport("alloc", alloc_mod);
     }
 }

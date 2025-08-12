@@ -12,7 +12,7 @@ build-zig:
 # Build Python-related artifacts (requires uv/pydust). Kept separate to allow skipping.
 .PHONY: build-py
 build-py: py-ensure-pydust
-	$(ZIG) build -Dtarget=$(TARGET) -Doptimize=$(OPT) -Dpython-exe=$(PYTHON_EXE) -Duse-c-alloc=$(USE_C_ALLOC_BOOL) -Dwith-python=$(WITH_PYTHON_BOOL)
+	$(ZIG) build -Dtarget=$(TARGET) -Doptimize=$(OPT) -Dpython-exe=$(PYTHON_EXE) -Duse-c-alloc=$(USE_C_ALLOC_BOOL) -Dwith-python=true
 
 run: build-zig
 	$(ZIG) build run -Dtarget=$(TARGET) -Doptimize=$(OPT) -Duse-c-alloc=$(USE_C_ALLOC_BOOL) -- $(ARGS)

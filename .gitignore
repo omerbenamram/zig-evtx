@@ -11,3 +11,4 @@ repomix-output.xml
 build
 dist
 *.egg-info
+.venv
