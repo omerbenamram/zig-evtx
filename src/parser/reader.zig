@@ -25,10 +25,6 @@ pub const Reader = struct {
         return val;
     }
 
-    pub fn readByte(self: *Reader) !u8 {
-        return self.readInt(u8);
-    }
-
     pub fn peekByte(self: *const Reader) !u8 {
         if (self.pos >= self.buf.len) return BinXmlError.UnexpectedEof;
         return self.buf[self.pos];
@@ -62,22 +58,6 @@ pub const Reader = struct {
             },
             else => @compileError("Unsupported type in readAny: " ++ @typeName(T)),
         }
-    }
-
-    pub inline fn peekU8(self: *const Reader) !u8 {
-        return self.peekByte();
-    }
-
-    pub inline fn readU8(self: *Reader) !u8 {
-        return self.readByte();
-    }
-
-    pub inline fn readU16le(self: *Reader) !u16 {
-        return self.readInt(u16);
-    }
-
-    pub inline fn readU32le(self: *Reader) !u32 {
-        return self.readInt(u32);
     }
 
     pub fn readGuid(self: *Reader) ![16]u8 {

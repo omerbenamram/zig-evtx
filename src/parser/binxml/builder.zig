@@ -55,7 +55,7 @@ pub const Builder = struct {
     /// Checks if the next token indicates a template instance.
     fn isTemplateInstance(_: *Builder, r: *Reader) !bool {
         if (r.rem() == 0) return false;
-        const first = try r.peekU8();
+        const first = try r.peekByte();
         return first == tokens.TOK_TEMPLATE_INSTANCE;
     }
 
@@ -226,7 +226,7 @@ pub const Builder = struct {
         try common.skipFragmentHeaderIfPresent(&r);
 
         while (r.rem() > 0) {
-            const pk = r.peekU8() catch break;
+            const pk = r.peekByte() catch break;
             if (pk != tokens.TOK_TEMPLATE_INSTANCE) break;
 
             // Parse the nested template instance

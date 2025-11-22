@@ -2,6 +2,9 @@ const std = @import("std");
 const IRModule = @import("../ir.zig");
 const IR = IRModule.IR;
 const util = @import("../util.zig");
+const types = @import("types.zig");
+const BinXmlError = @import("../err.zig").BinXmlError;
+const Reader = @import("../reader.zig").Reader;
 
 // --- Context and template cache (IR) ---
 // Keep this file renderer-free to avoid cycles. Lifetime: per parser/run, with resetPerChunk().
@@ -12,17 +15,6 @@ pub const Context = struct {
     pub const DefKey = struct {
         def_data_off: u32,
         guid: [16]u8,
-
-        pub fn hash(self: @This()) u64 {
-            var h = std.hash.Wyhash.init(0);
-            h.update(std.mem.asBytes(&self.def_data_off));
-            h.update(&self.guid);
-            return h.final();
-        }
-
-        pub fn eql(a: @This(), b: @This()) bool {
-            return a.def_data_off == b.def_data_off and std.mem.eql(u8, &a.guid, &b.guid);
-        }
     };
 
     allocator: std.mem.Allocator,
@@ -77,5 +69,38 @@ pub const Context = struct {
         // Fallback (should not happen with current joiner policy)
         const dyn = try util.utf16FromAscii(self.arena.allocator(), ascii);
         return .{ .bytes = dyn, .num_chars = ascii.len };
+    }
+
+    pub fn getOrReadName(self: *Context, chunk: []const u8, off_u32: u32) !IR.Name {
+        // Check cache first
+        if (self.name_cache.get(off_u32)) |entry| {
+            return IR.Name{ .bytes = entry.bytes, .num_chars = entry.num_chars };
+        }
+
+        if (off_u32 >= chunk.len) return BinXmlError.UnexpectedEof;
+
+        var r = Reader.init(chunk);
+        r.pos = off_u32;
+
+        const h = try r.readStruct(types.NameHeader);
+        const num_chars = h.num_chars;
+        const byte_len = @as(usize, num_chars) * 2;
+
+        if (r.rem() < byte_len) return BinXmlError.UnexpectedEof;
+        const str_start = r.pos;
+
+        // Adjust length for trailing nulls if necessary
+        var take_chars = num_chars;
+        if (byte_len >= 2) {
+            const last = std.mem.readInt(u16, chunk[str_start + byte_len - 2 .. str_start + byte_len][0..2], .little);
+            if (last == 0 and take_chars > 0) take_chars -= 1;
+        }
+
+        // Allocate and cache new name
+        const buf = try self.arena.allocator().alloc(u8, take_chars * 2);
+        @memcpy(buf, chunk[str_start .. str_start + take_chars * 2]);
+        try self.name_cache.put(off_u32, NameCacheEntry{ .bytes = buf, .num_chars = take_chars });
+
+        return IR.Name{ .bytes = buf, .num_chars = take_chars };
     }
 };

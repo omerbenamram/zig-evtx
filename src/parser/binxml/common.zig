@@ -37,9 +37,9 @@ pub fn skipInlineTemplateDefinition(r: *Reader, def_data_off: u32) !void {
         //   16 bytes: GUID
         //   4 bytes : data_size
         if (r.rem() < 24) return BinXmlError.UnexpectedEof;
-        _ = try r.readU32le(); // next_offset
+        _ = try r.readInt(u32); // next_offset
         _ = try r.readGuid(); // GUID (16 bytes)
-        const data_size_inline = try r.readU32le();
+        const data_size_inline = try r.readInt(u32);
         if (r.rem() < data_size_inline) return BinXmlError.UnexpectedEof;
         r.pos += @as(usize, data_size_inline);
     }
