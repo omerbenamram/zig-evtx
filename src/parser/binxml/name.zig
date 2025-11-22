@@ -4,23 +4,31 @@ const utf16EqualsAscii = util.utf16EqualsAscii;
 const IRModule = @import("../ir.zig");
 const IR = IRModule.IR;
 const BinXmlError = @import("../err.zig").BinXmlError;
+const Reader = @import("../reader.zig").Reader;
+const types = @import("types.zig");
 const logger = @import("../../logger.zig");
 const log = logger.scoped("binxml.name");
 
 // Local name writers for tracing (avoid renderer dependency)
 pub fn writeNameFromOffset(chunk: []const u8, name_offset: u32, w: anytype) !void {
-    const off = @as(usize, name_offset);
-    if (off + 8 > chunk.len) return BinXmlError.OutOfBounds;
-    const num_chars = std.mem.readInt(u16, chunk[off + 6 .. off + 8][0..2], .little);
-    const str_start = off + 8;
+    if (name_offset >= chunk.len) return BinXmlError.OutOfBounds;
+    var reader = Reader.init(chunk);
+    reader.pos = name_offset;
+
+    const header = try reader.readStruct(types.NameHeader);
+    const num_chars = header.num_chars;
     const byte_len = @as(usize, num_chars) * 2;
-    if (str_start + byte_len > chunk.len) return BinXmlError.OutOfBounds;
+
+    if (reader.rem() < byte_len) return BinXmlError.OutOfBounds;
+    const str_start = reader.pos;
+    const raw_slice = chunk[str_start .. str_start + byte_len];
+
     var num = num_chars;
     if (byte_len >= 2) {
-        const last = std.mem.readInt(u16, chunk[str_start + byte_len - 2 .. str_start + byte_len][0..2], .little);
+        const last = std.mem.readInt(u16, raw_slice[byte_len - 2 .. byte_len][0..2], .little);
         if (last == 0 and num > 0) num -= 1;
     }
-    try util.writeUtf16LeXmlEscaped(w, chunk[str_start .. str_start + num * 2], num);
+    try util.writeUtf16LeXmlEscaped(w, raw_slice[0 .. num * 2], num);
 }
 
 pub fn writeNameFromUtf16(w: anytype, utf16le: []const u8, num_chars: usize) !void {
@@ -28,13 +36,19 @@ pub fn writeNameFromUtf16(w: anytype, utf16le: []const u8, num_chars: usize) !vo
 }
 
 fn isNameSystemTimeFromOffset(chunk: []const u8, name_offset: u32) bool {
-    const off = @as(usize, name_offset);
-    if (off + 8 > chunk.len) return false;
-    const num_chars = std.mem.readInt(u16, chunk[off + 6 .. off + 8][0..2], .little);
-    const str_start = off + 8;
+    if (name_offset >= chunk.len) return false;
+    var reader = Reader.init(chunk);
+    reader.pos = name_offset;
+
+    const header = reader.readStruct(types.NameHeader) catch return false;
+    const num_chars = header.num_chars;
     const byte_len = @as(usize, num_chars) * 2;
-    if (str_start + byte_len > chunk.len) return false;
-    return utf16EqualsAscii(chunk[str_start .. str_start + byte_len], num_chars, "SystemTime");
+
+    if (reader.rem() < byte_len) return false;
+    const str_start = reader.pos;
+    const raw_slice = chunk[str_start .. str_start + byte_len];
+
+    return utf16EqualsAscii(raw_slice, num_chars, "SystemTime");
 }
 
 pub fn attrNameIsSystemTime(name: IR.Name, chunk: []const u8) bool {
