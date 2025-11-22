@@ -136,11 +136,6 @@ fn parseElementIRBase(
     // 4. Parse Attributes (if present)
     if (tokens.hasMore(start_token, tokens.TOK_OPEN_START)) {
         element.attrs = try parseAttributeListIR(ctx, chunk, r, allocator, src, element_end_pos, chunk_base);
-
-        // Update hints based on attribute values
-        for (element.attrs.items) |attr| {
-            updateHintsFromNodes(element, attr.value.items, true);
-        }
     }
 
     // 5. Handle Optional Padding (usually null bytes)
@@ -202,7 +197,6 @@ fn parseElementIRBase(
                 for (content_sequence.items) |node| {
                     try element.children.append(allocator, node);
                 }
-                updateHintsFromNodes(element, content_sequence.items, false);
             },
             else => break,
         }
@@ -507,27 +501,6 @@ fn parseDefElementHeader(ctx: *Context, chunk: []const u8, r: *Reader, allocator
     // Per spec: 1 byte token + 2 bytes dep_id + 4 bytes data_size
     const header_len: usize = 1 + 2 + 4;
     return .{ .name = nm, .data_size = h.data_size, .header_len = header_len };
-}
-
-// --- Hints & Utils ---
-
-fn updateHintsFromNodes(el: *IR.Element, nodes: []const IR.Node, include_attr: bool) void {
-    for (nodes) |nd| {
-        switch (nd.tag) {
-            .Value => if ((nd.vtype & 0x7f) == 0x21 and nd.vbytes.len > 0) {
-                el.has_evtxml_value_in_tree = true;
-                if (include_attr) el.has_attr_evtxml_value = true;
-            },
-            .Subst => {
-                const base = nd.subst_vtype & 0x7f;
-                if (base == 0x21) {
-                    el.has_evtxml_subst_in_tree = true;
-                    if (include_attr) el.has_attr_evtxml_subst = true;
-                }
-            },
-            else => {},
-        }
-    }
 }
 
 fn logTraceContext(msg: []const u8, src: Source, r: *Reader, pos_override: ?usize) void {

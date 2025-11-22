@@ -161,56 +161,63 @@ pub const Builder = struct {
     /// values (type 0x21) which need to be promoted to first-class XML structure.
     /// Explicitly use `anyerror` to avoid recursive inferred-error-set issues.
     fn spliceNestedBinXml(self: *Builder, chunk: []const u8, el: *IR.Element) anyerror!void {
-        // We need to check both attributes and children for 0x21 (BinXML) values.
-        // If found, we parse them and collect the resulting nodes.
+        // 1. Recurse into child elements first (depth-first)
+        for (el.children.items) |node| {
+            if (node.tag == .Element and node.elem != null) {
+                try self.spliceNestedBinXml(chunk, node.elem.?);
+            }
+        }
 
-        // 1. Collect children from attributes (weird but possible in BinXML schema)
-        var extra_children = std.ArrayList(IR.Node).initCapacity(self.allocator, 0) catch unreachable;
+        // 2. Scan for nested BinXML values in attributes or children
+        var needs_splice = false;
 
         for (el.attrs.items) |attr| {
             for (attr.value.items) |node| {
                 if (self.isNestedBinXmlNode(node)) {
-                    try self.collectNestedChildren(chunk, node.vbytes, &extra_children);
+                    needs_splice = true;
+                    break;
+                }
+            }
+            if (needs_splice) break;
+        }
+
+        if (!needs_splice) {
+            for (el.children.items) |node| {
+                if (self.isNestedBinXmlNode(node)) {
+                    needs_splice = true;
+                    break;
                 }
             }
         }
 
-        // 2. Rebuild children list if we have nested content or extra children
-        var new_children = std.ArrayList(IR.Node).initCapacity(self.allocator, 0) catch unreachable;
+        if (!needs_splice) return;
 
-        // Pre-allocate if we can guess size (existing + extra)
-        const estimated_cap = el.children.items.len + extra_children.items.len;
-        if (estimated_cap > 0) {
-            try new_children.ensureTotalCapacityPrecise(self.allocator, estimated_cap);
-        }
+        // 3. If found, rebuild children list
+        // Pre-allocate based on existing children count (plus a guess for expansion)
+        var new_children = std.ArrayList(IR.Node).initCapacity(self.allocator, el.children.items.len + 4) catch unreachable;
 
+        // Collect/copy from children
         for (el.children.items) |node| {
-            switch (node.tag) {
-                .Element => {
-                    // Recurse into child elements
-                    if (node.elem) |child_elem| {
-                        try self.spliceNestedBinXml(chunk, child_elem);
-                    }
-                    try new_children.append(self.allocator, node);
-                },
-                .Value => {
-                    if (self.isNestedBinXmlNode(node)) {
-                        // Expand this node into multiple children
-                        try self.collectNestedChildren(chunk, node.vbytes, &new_children);
-                    } else {
-                        try new_children.append(self.allocator, node);
-                    }
-                },
-                else => try new_children.append(self.allocator, node),
+            if (self.isNestedBinXmlNode(node)) {
+                // Expand this node into multiple children
+                try self.collectNestedChildren(chunk, node.vbytes, &new_children);
+            } else {
+                try new_children.append(self.allocator, node);
             }
         }
 
-        // Append any children collected from attributes
-        for (extra_children.items) |child| {
-            try new_children.append(self.allocator, child);
+        // Collect children from attributes (append to end)
+        for (el.attrs.items) |attr| {
+            for (attr.value.items) |node| {
+                if (self.isNestedBinXmlNode(node)) {
+                    try self.collectNestedChildren(chunk, node.vbytes, &new_children);
+                }
+            }
         }
 
         el.children = new_children;
+        // We expanded nested BinXML, which produces elements, so ensure the flag is set.
+        el.has_element_child = true;
     }
 
     fn isNestedBinXmlNode(_: *Builder, node: IR.Node) bool {

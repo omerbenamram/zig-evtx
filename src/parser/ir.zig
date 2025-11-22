@@ -34,12 +34,7 @@ pub const IR = struct {
         name: Name,
         attrs: std.ArrayList(Attr),
         children: std.ArrayList(Node),
-        // Render hints computed during IR build
         has_element_child: bool = false,
-        has_evtxml_value_in_tree: bool = false,
-        has_evtxml_subst_in_tree: bool = false,
-        has_attr_evtxml_value: bool = false,
-        has_attr_evtxml_subst: bool = false,
     };
 };
 

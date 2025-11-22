@@ -46,10 +46,6 @@ pub const Expander = struct {
 
         // 3. Copy flags (resetting expansion-specific ones)
         dst.has_element_child = src.has_element_child;
-        dst.has_evtxml_value_in_tree = false;
-        dst.has_evtxml_subst_in_tree = false;
-        dst.has_attr_evtxml_value = false;
-        dst.has_attr_evtxml_subst = false;
 
         return dst;
     }

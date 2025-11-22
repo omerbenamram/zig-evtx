@@ -95,9 +95,7 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
     const eff_values: []const TemplateValue = values;
     // Use precomputed hints
     const has_elem_child = el.has_element_child;
-    const has_evtxml_subst = el.has_evtxml_subst_in_tree;
-    const has_evtxml_value = el.has_evtxml_value_in_tree;
-    // Drop debug-only Data tracing (kept minimal logging elsewhere)
+
     // Early: drop element if its only content is an optional substitution resolving to NULL
     if (!has_elem_child and el.children.items.len == 1) {
         const only = el.children.items[0];
@@ -107,7 +105,7 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
         }
     }
     // Early: array substitution repetition for sole content
-    if (!has_elem_child and !has_evtxml_subst and !has_evtxml_value and el.children.items.len == 1 and !IRModule.nameEqualsAscii(chunk, el.name, "Data")) {
+    if (!has_elem_child and el.children.items.len == 1 and !IRModule.nameEqualsAscii(chunk, el.name, "Data")) {
         const c0 = el.children.items[0];
         if (c0.tag == .Subst and (c0.subst_vtype & 0x80) != 0 and c0.subst_id < eff_values.len) {
             const vv = eff_values[c0.subst_id];
@@ -266,7 +264,7 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
         return;
     }
 
-    if (!has_elem_child and !has_evtxml_subst and !has_evtxml_value) {
+    if (!has_elem_child) {
         // Inline textual content
         try w.writeByte('>');
         try renderTextContentFromIR(chunk, el.children.items, eff_values, w);
