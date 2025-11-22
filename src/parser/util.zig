@@ -784,18 +784,18 @@ fn runMatrixCase(mode: Mode, id: CaseId) !void {
     const num_chars = bytes.len / 2;
 
     var out_a = std.ArrayList(u8).initCapacity(alloc, 0) catch unreachable;
-    defer out_a.deinit();
+    defer out_a.deinit(alloc);
     var out_b = std.ArrayList(u8).initCapacity(alloc, 0) catch unreachable;
     defer out_b.deinit(alloc);
 
     switch (mode) {
         .xml => {
-            try writeUtf16LeXmlEscaped_simd_utf16(out_a.writer(), bytes, num_chars);
-            try writeUtf16LeXmlEscaped_scalar(out_b.writer(), bytes, num_chars);
+            try writeUtf16LeXmlEscaped_simd_utf16(out_a.writer(alloc), bytes, num_chars);
+            try writeUtf16LeXmlEscaped_scalar(out_b.writer(alloc), bytes, num_chars);
         },
         .json => {
-            try writeUtf16LeJsonEscaped_simd_utf16(out_a.writer(), bytes, num_chars);
-            try writeUtf16LeWithEscaper(out_b.writer(), bytes, num_chars, jsonEscapeUtf8);
+            try writeUtf16LeJsonEscaped_simd_utf16(out_a.writer(alloc), bytes, num_chars);
+            try writeUtf16LeWithEscaper(out_b.writer(alloc), bytes, num_chars, jsonEscapeUtf8);
         },
     }
     try std.testing.expectEqualStrings(out_b.items, out_a.items);

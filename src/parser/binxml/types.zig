@@ -183,3 +183,10 @@ pub const TemplateValuesCountHeader = packed struct {
 pub const NameOffsetHeader = packed struct {
     offset: u32,
 };
+
+pub const TemplateInstanceStart = packed struct {
+    token: u8,
+    version: u8,
+    template_id: u32,
+    def_data_off: u32,
+};

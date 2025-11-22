@@ -349,7 +349,7 @@ pub fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w
     if (ctx.verbose) logger.setModuleLevel("binxml", .trace);
     // Build expanded IR using the new binxml facade (preserves previous behavior)
     var builder = binxml.Builder.init(ctx, ctx.allocator);
-    const root = try builder.buildExpandedElementTree(chunk, bin);
+    const root = try builder.build(chunk, bin);
     if (ctx.verbose) {
         try logNameTrace(chunk, root.name, "root");
     }

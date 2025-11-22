@@ -85,29 +85,6 @@ pub const Reader = struct {
         return g.bytes;
     }
 
-    pub fn readLenPrefixedBytes16(self: *Reader) ![]const u8 {
-        if (self.rem() < 2) return BinXmlError.UnexpectedEof;
-        const h = try self.readStruct(types.NameLengthHeader);
-        const blen = h.len;
-        if (self.rem() < blen) return BinXmlError.UnexpectedEof;
-        const slice = self.buf[self.pos .. self.pos + blen];
-        self.pos += blen;
-        return slice;
-    }
-
-    pub fn readSidBytes(self: *Reader) ![]const u8 {
-        // Return the exact SID byte sequence: 1 byte rev, 1 byte subcount, 6 bytes authority, subcount*4 bytes subauths
-        if (self.rem() < 2) return BinXmlError.UnexpectedEof;
-        const start = self.pos;
-        // Peek subcount without advancing beyond required bounds unnecessarily
-        const subc = self.buf[self.pos + 1];
-        const needed: usize = 8 + @as(usize, subc) * 4;
-        if (self.rem() < needed) return BinXmlError.UnexpectedEof;
-        const slice = self.buf[start .. start + needed];
-        self.pos = start + needed;
-        return slice;
-    }
-
     pub inline fn readFixedBytes(self: *Reader, n: usize) ![]const u8 {
         if (self.rem() < n) return BinXmlError.UnexpectedEof;
         const slice = self.buf[self.pos .. self.pos + n];
@@ -120,54 +97,44 @@ pub const Reader = struct {
         return try self.readFixedBytes(n);
     }
 
-    pub fn readInlineName(self: *Reader) !struct { utf16: []const u8, num_chars: usize } {
-        const header = try self.readStruct(types.NameHeader);
-        const num = header.num_chars;
-        const bytes = @as(usize, num) * 2;
-        if (self.pos + bytes > self.buf.len) return BinXmlError.UnexpectedEof;
-        const slice = self.buf[self.pos .. self.pos + bytes];
-        self.pos += bytes;
-        return .{ .utf16 = slice, .num_chars = num };
-    }
+    /// Reads a length-prefixed slice where the prefix is of type `PrefixT` (e.g. u16).
+    /// `unit_size` specifies the size of each element in the slice (e.g. 2 for UTF-16).
+    /// `end_pos` is an optional absolute position limit in the buffer.
+    pub fn readLenPrefixedSlice(self: *Reader, comptime PrefixT: type, comptime unit_size: usize, end_pos: ?usize) ![]const u8 {
+        const prefix_size = @sizeOf(PrefixT);
+        if (end_pos) |end| {
+            if (self.pos + prefix_size > end) return BinXmlError.UnexpectedEof;
+        }
 
-    pub fn readUnicodeTextString(self: *Reader) ![]const u8 {
-        // Unicode text string: 2 bytes num chars, then UTF-16LE string without EOS
-        const header = try self.readStruct(types.NameLengthHeader);
-        const num_chars = header.len;
-        const byte_len = @as(usize, num_chars) * 2;
-        if (self.pos + byte_len > self.buf.len) return BinXmlError.UnexpectedEof;
+        // Read length prefix using generic readInt
+        const len = try self.readInt(PrefixT);
+        const byte_len = @as(usize, len) * unit_size;
+
+        if (end_pos) |end| {
+            if (self.pos + byte_len > end) return BinXmlError.UnexpectedEof;
+        } else {
+            if (self.pos + byte_len > self.buf.len) return BinXmlError.UnexpectedEof;
+        }
+
         const slice = self.buf[self.pos .. self.pos + byte_len];
         self.pos += byte_len;
-        return slice;
-    }
-
-    pub fn readUnicodeTextStringBounded(self: *Reader, end_pos: usize) ![]const u8 {
-        if (self.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
-        const header = try self.readStruct(types.NameLengthHeader);
-        const num_chars = header.len;
-        const byte_len = @as(usize, num_chars) * 2;
-        if (self.pos + byte_len > end_pos) return BinXmlError.UnexpectedEof;
-        const slice = self.buf[self.pos .. self.pos + byte_len];
-        self.pos += byte_len;
-        return slice;
-    }
-
-    pub fn readLenPrefixedBytes16Bounded(self: *Reader, end_pos: usize) ![]const u8 {
-        if (self.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
-        const header = try self.readStruct(types.NameLengthHeader);
-        const blen = header.len;
-        if (self.pos + @as(usize, blen) > end_pos) return BinXmlError.UnexpectedEof;
-        const slice = self.buf[self.pos .. self.pos + blen];
-        self.pos += blen;
         return slice;
     }
 
     pub fn readSidBytesBounded(self: *Reader, end_pos: usize) ![]const u8 {
         if (self.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
         const start = self.pos;
-        const subc = self.buf[self.pos + 1];
+        // Peek subcount from offset 1 (rev is at offset 0)
+        if (start + 1 >= self.buf.len) return BinXmlError.UnexpectedEof;
+        const subc = self.buf[start + 1];
+
+        // 1 byte rev + 1 byte subcount + 6 bytes authority + subcount * 4 bytes subauths
         const needed: usize = 8 + @as(usize, subc) * 4;
+
         if (start + needed > end_pos) return BinXmlError.UnexpectedEof;
+        // Also check absolute buffer bounds
+        if (start + needed > self.buf.len) return BinXmlError.UnexpectedEof;
+
         const slice = self.buf[start .. start + needed];
         self.pos = start + needed;
         return slice;
@@ -184,13 +151,6 @@ pub const Reader = struct {
     //   attempting the prefixed variant, then falling back to the plain form.
     // In both cases we also tolerate and trim a trailing UTF-16 NUL (EOS) after the string.
     pub fn readValueNameInlineView(self: *Reader) !struct { utf16: []const u8, num_chars: usize } {
-        return self.readNumCharsUtf16OptionalPrefixView();
-    }
-
-    // Generic helper: read a UTF-16 name given a num-chars (u16) field, allowing an optional
-    // leading u16 prefix before the num-chars. Trims a trailing UTF-16 NUL if present.
-    // This centralizes the two-branch logic used by value-context names (see above).
-    pub fn readNumCharsUtf16OptionalPrefixView(self: *Reader) !struct { utf16: []const u8, num_chars: usize } {
         if (self.rem() >= 4) {
             const saveA = self.pos;
             _ = try self.readStruct(types.NameLengthHeader);
@@ -205,12 +165,15 @@ pub const Reader = struct {
     // then that many bytes. If an immediate trailing UTF-16 NUL follows, consume it.
     // Returns a view into the buffer and the number of characters.
     pub fn readLenPrefixedUtf16TrimEos(self: *Reader) !struct { utf16: []const u8, num_chars: usize } {
+        // Manually read length here because we need num_chars for the return value
         const header = try self.readStruct(types.NameLengthHeader);
         const num = header.len;
         const bytes = @as(usize, num) * 2;
+
         if (self.rem() < bytes) return BinXmlError.UnexpectedEof;
         const slice = self.buf[self.pos .. self.pos + bytes];
         self.pos += bytes;
+
         if (self.rem() >= 2) {
             const eos = std.mem.readInt(u16, self.buf[self.pos .. self.pos + 2][0..2], .little);
             if (eos == 0) self.pos += 2;
@@ -230,40 +193,5 @@ pub const Reader = struct {
         const want_end = inl_start + 6 + bytes + 4;
         if (self.pos < want_end and want_end <= self.buf.len) self.pos = want_end;
         return .{ .utf16 = slice_src, .num_chars = num };
-    }
-
-    pub const TemplateInstanceHeader = struct {
-        def_data_off: u32,
-    };
-
-    pub fn readTemplateInstanceHeader(self: *Reader) !TemplateInstanceHeader {
-        // Caller should have peeked TOK_TEMPLATE_INSTANCE; be tolerant and just consume
-        const tag = try self.readU8();
-        if ((tag & 0x1f) != tokens.TOK_TEMPLATE_INSTANCE) return BinXmlError.BadToken;
-        // Template instance layout:
-        //   1 byte  : unknown/version
-        //   4 bytes : template identifier (ignored here)
-        //   4 bytes : template definition data offset (chunk-relative)
-        // Followed optionally by an inline template definition if def_data_off == current pos.
-        if (self.rem() < 1 + 4 + 4) return BinXmlError.UnexpectedEof;
-        _ = try self.readU8(); // unknown/version
-        _ = try self.readU32le(); // template id
-        const def_data_off = try self.readU32le();
-
-        // Inline template definition: definition data is embedded immediately after the header.
-        // def_data_off then points to the current reader position.
-        if (def_data_off == @as(u32, @intCast(self.pos))) {
-            // TemplateDefinition data header:
-            //   4 bytes : next_offset
-            //   16 bytes: GUID
-            //   4 bytes : data_size
-            if (self.rem() < 24) return BinXmlError.UnexpectedEof;
-            _ = try self.readU32le(); // next_offset
-            _ = try self.readGuid(); // GUID (16 bytes)
-            const data_size_inline = try self.readU32le();
-            if (self.rem() < data_size_inline) return BinXmlError.UnexpectedEof;
-            self.pos += @as(usize, data_size_inline);
-        }
-        return .{ .def_data_off = def_data_off };
     }
 };

@@ -7,29 +7,6 @@ const alloc_mod = @import("alloc");
 const logger = @import("../logger.zig");
 const log = logger.scoped("evtx");
 
-// Simple buffering wrapper to replace std.io.BufferedWriter
-// In Zig 0.15, File.Writer already has buffering, so we just wrap it
-fn BufferedWriter(comptime buffer_size: usize, comptime W: type) type {
-    _ = buffer_size; // Not used since File.Writer handles buffering
-    return struct {
-        unbuffered_writer: W,
-
-        const Self = @This();
-
-        pub fn writer(self: *Self) *W {
-            return &self.unbuffered_writer;
-        }
-
-        pub fn flush(self: *Self) !void {
-            // In Zig 0.15, File.Writer buffers internally.
-            // We need to flush the underlying writer's interface.
-            // Get a mutable reference to the writer to flush it
-            var w_ptr: *W = @constCast(&self.unbuffered_writer);
-            w_ptr.interface.flush() catch {};
-        }
-    };
-}
-
 pub const ParserOptions = struct {
     validate_checksums: bool = true,
     // Verbosity levels:
@@ -62,7 +39,6 @@ pub fn OutputImpl(comptime W: type) type {
         mode: enum { xml, json_single, json_lines },
         scratch: std.ArrayList(u8),
         last_size_hint: usize,
-        bufw: BufferedWriter(1048576, W),
         // Optional reusable rendering context provided by parser (per-chunk)
         ctx: ?*binxml.Context = null,
         // Exponential moving average of previous serialized sizes for pre-sizing
@@ -71,12 +47,12 @@ pub fn OutputImpl(comptime W: type) type {
 
         pub fn initXml(w: W) @This() {
             const scratch = std.ArrayList(u8).initCapacity(alloc_mod.get(), 0) catch unreachable;
-            return .{ .w = w, .mode = .xml, .scratch = scratch, .last_size_hint = 4096, .bufw = BufferedWriter(1048576, W){ .unbuffered_writer = w } };
+            return .{ .w = w, .mode = .xml, .scratch = scratch, .last_size_hint = 4096 };
         }
 
         pub fn initJson(w: W, json_mode: Output.JsonMode) @This() {
             const scratch = std.ArrayList(u8).initCapacity(alloc_mod.get(), 0) catch unreachable;
-            return .{ .w = w, .mode = if (json_mode == .single) .json_single else .json_lines, .scratch = scratch, .last_size_hint = 4096, .bufw = BufferedWriter(1048576, W){ .unbuffered_writer = w } };
+            return .{ .w = w, .mode = if (json_mode == .single) .json_single else .json_lines, .scratch = scratch, .last_size_hint = 4096 };
         }
 
         pub fn setContext(self: *@This(), c: *binxml.Context) void {
@@ -118,13 +94,13 @@ pub fn OutputImpl(comptime W: type) type {
                     try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
                     if (self.ctx) |ctx| {
                         var builder = binxml.Builder.init(ctx, ctx.allocator);
-                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
                         var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
                         var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
-                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
                     }
                     try bw.writeAll("}\n");
@@ -134,20 +110,20 @@ pub fn OutputImpl(comptime W: type) type {
                     try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
                     if (self.ctx) |ctx| {
                         var builder = binxml.Builder.init(ctx, ctx.allocator);
-                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
                         var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
                         var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
-                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
                     }
                     try bw.writeAll("}\n");
                 },
             }
-            // Emit once to the buffered underlying writer and update size hint
-            var outw = self.bufw.writer();
+            // Emit once to the underlying writer and update size hint
+            var outw: *W = @constCast(&self.w);
             try outw.interface.writeAll(self.scratch.items);
             self.last_size_hint = self.scratch.items.len;
             // Update EMA for future reservations
@@ -178,13 +154,13 @@ pub fn OutputImpl(comptime W: type) type {
                     try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
                     if (self.ctx) |ctx| {
                         var builder = binxml.Builder.init(ctx, ctx.allocator);
-                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
                         var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
                         var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
-                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
                     }
                     try bw.writeAll("}\n");
@@ -194,13 +170,13 @@ pub fn OutputImpl(comptime W: type) type {
                     try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
                     if (self.ctx) |ctx| {
                         var builder = binxml.Builder.init(ctx, ctx.allocator);
-                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
                         var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
                         var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
-                        const root = try builder.buildExpandedElementTree(record.chunk_buf, record.raw_xml);
+                        const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
                     }
                     try bw.writeAll("}\n");
@@ -501,6 +477,11 @@ pub const EvtxParser = struct {
                         }
                     }
                 }
+
+                // Ensure any buffered stdout data for this worker is flushed
+                self_.write_mutex.lock();
+                _ = self_.stdout_writer.interface.flush() catch {};
+                self_.write_mutex.unlock();
             }
         };
 
@@ -837,7 +818,7 @@ pub const EventRecordView = struct {
         var ctx = try binxml.Context.init(alloc_mod.get());
         defer ctx.deinit();
         var builder = binxml.Builder.init(&ctx, ctx.allocator);
-        const root = try builder.buildExpandedElementTree(self.chunk_buf, self.raw_xml);
+        const root = try builder.build(self.chunk_buf, self.raw_xml);
         try render_json.renderElementJson(self.chunk_buf, root, ctx.arena.allocator(), bw);
         try bw.writeAll("}\n");
         try w.interface.writeAll(buf.items);

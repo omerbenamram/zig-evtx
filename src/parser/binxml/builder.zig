@@ -12,9 +12,9 @@ const util = @import("../util.zig");
 const logger = @import("../../logger.zig");
 const log = logger.scoped("binxml");
 
-// Thin convenience facade: parse + expand to a fully expanded IR tree.
-// For now this forwards to core functions in binxml.zig via Parser/Expander wrappers.
-
+/// The Builder orchestrates the parsing and expansion of BinXML chunks.
+/// It handles both regular elements and template instances, including
+/// the recursive expansion of nested BinXML values (EVT_XML).
 pub const Builder = struct {
     ctx: *Context,
     allocator: std.mem.Allocator,
@@ -23,134 +23,240 @@ pub const Builder = struct {
         return .{ .ctx = ctx, .allocator = allocator };
     }
 
-    pub fn buildExpandedElementTree(self: *Builder, chunk: []const u8, bin: []const u8) !*IR.Element {
+    /// Builds a fully expanded IR element tree from a BinXML chunk.
+    /// This is the main entry point for processing an event.
+    ///
+    /// Arguments:
+    /// - `chunk`: The full chunk data (needed for offset-based lookups).
+    /// - `bin`: The specific slice of the chunk containing the event data.
+    pub fn build(self: *Builder, chunk: []const u8, bin: []const u8) !*IR.Element {
         var r = Reader.init(bin);
         try common.skipFragmentHeaderIfPresent(&r);
-        if (r.rem() == 0) return try self.buildEmptyEventElement();
 
-        if (try self.isTemplateInstance(&r)) {
-            return try self.parseAndExpandTemplateInstance(chunk, &r);
+        // Handle empty event case (rare but possible)
+        if (r.rem() == 0) {
+            return self.buildEmpty();
         }
 
-        return try self.parseAndExpandRegularElement(chunk, &r);
+        // Detect and handle template instances vs regular elements
+        if (try self.isTemplateInstance(&r)) {
+            return self.buildTemplate(chunk, &r);
+        }
+
+        return self.buildRegular(chunk, &r);
     }
 
-    fn buildEmptyEventElement(self: *Builder) !*IR.Element {
-        // Build minimal <Event/> IR
-        const bytes: []u8 = try util.utf16FromAscii(self.ctx.arena.allocator(), "Event");
-        return try IRMod.irNewElement(self.ctx.arena.allocator(), IR.Name{ .InlineUtf16 = .{ .bytes = bytes, .num_chars = 5 } });
+    /// Creates a minimal <Event/> element for empty records.
+    fn buildEmpty(self: *Builder) !*IR.Element {
+        const bytes: []u8 = try util.utf16FromAscii(self.allocator, "Event");
+        return IRMod.irNewElement(self.allocator, IR.Name{
+            .InlineUtf16 = .{ .bytes = bytes, .num_chars = 5 },
+        });
     }
 
+    /// Checks if the next token indicates a template instance.
     fn isTemplateInstance(_: *Builder, r: *Reader) !bool {
         if (r.rem() == 0) return false;
         const first = try r.peekU8();
         return first == tokens.TOK_TEMPLATE_INSTANCE;
     }
 
-    fn parseAndExpandRegularElement(self: *Builder, chunk: []const u8, r: *Reader) !*IR.Element {
-        // Parse using the per-chunk arena for all IR allocations
-        var parser = Parser.init(self.ctx, self.ctx.arena.allocator());
+    /// Parses a regular (non-template) element and expands any nested BinXML.
+    fn buildRegular(self: *Builder, chunk: []const u8, r: *Reader) !*IR.Element {
+        // 1. Parse the element into IR
+        var parser = Parser.init(self.ctx, self.allocator);
         const root = try parser.parseElementIR(chunk, r, .rec);
-        var expander = Expander.init(self.ctx, self.ctx.arena.allocator());
-        const expanded_root = try expander.expandElementWithValues(root, &[_]types.TemplateValue{});
-        try spliceEvtXmlAll(self.ctx, chunk, expanded_root, self.ctx.arena.allocator());
+
+        // 2. Expand values (trivial for regular elements, but standardizes flow)
+        var expander = Expander.init(self.ctx, self.allocator);
+        const expanded_root = try expander.expand(root, &[_]types.TemplateValue{});
+
+        // 3. Handle nested BinXML payloads (e.g., inside attributes or values)
+        try self.spliceNestedBinXml(chunk, expanded_root);
+
         return expanded_root;
     }
 
-    fn parseAndExpandTemplateInstance(self: *Builder, chunk: []const u8, r: *Reader) !*IR.Element {
-        const header = try r.readTemplateInstanceHeader();
+    /// Parses a template instance, looks up or parses the definition, and expands it.
+    fn buildTemplate(self: *Builder, chunk: []const u8, r: *Reader) !*IR.Element {
+        const header = try r.readStruct(types.TemplateInstanceStart);
+        if ((header.token & 0x1f) != tokens.TOK_TEMPLATE_INSTANCE) {
+            return error.BadToken;
+        }
+
+        // Handle inline definition if present
+        try common.skipInlineTemplateDefinition(r, header.def_data_off);
         common.skipInlineCachedTemplateDefs(r);
-        const parsed = try parseTemplateDefFromChunk(self.ctx, chunk, header.def_data_off, self.ctx.arena.allocator());
-        const parsed_def = parsed.def;
-        const expected = @import("parser.zig").expectedValuesFromTemplate(parsed_def);
-        const values = try @import("parser.zig").parseTemplateInstanceValuesExpected(r, self.ctx.arena.allocator(), expected);
-        const key = defCacheKeyFromChunkOffset(chunk, header.def_data_off);
-        const got = try self.ctx.cache.getOrPut(key);
-        if (!got.found_existing) got.value_ptr.* = parsed_def;
-        var expander = Expander.init(self.ctx, self.ctx.arena.allocator());
-        const expanded = try expander.expandElementWithValues(got.value_ptr.*, values);
-        try spliceEvtXmlAll(self.ctx, chunk, expanded, self.ctx.arena.allocator());
+
+        // Retrieve template definition (cached or parsed)
+        const def_ptr = try self.getOrParseTemplateDef(chunk, header.def_data_off);
+        const def = def_ptr.*;
+
+        // Parse substitution values
+        const expected_count = @import("parser.zig").expectedValuesFromTemplate(def);
+        const values = try @import("parser.zig").parseTemplateInstanceValuesExpected(r, self.allocator, expected_count);
+
+        // Expand template with values
+        var expander = Expander.init(self.ctx, self.allocator);
+        const expanded = try expander.expand(def, values);
+
+        // Handle nested BinXML payloads
+        try self.spliceNestedBinXml(chunk, expanded);
+
         return expanded;
     }
 
-    fn defCacheKeyFromChunkOffset(chunk: []const u8, def_data_off: u32) Context.DefKey {
+    /// Gets a template definition from cache or parses it from the chunk.
+    fn getOrParseTemplateDef(self: *Builder, chunk: []const u8, def_data_off: u32) !**IR.Element {
+        const key = self.makeDefCacheKey(chunk, def_data_off);
+        const got = try self.ctx.cache.getOrPut(key);
+
+        if (!got.found_existing) {
+            const parsed = try self.parseTemplateDef(chunk, def_data_off);
+            got.value_ptr.* = parsed;
+        }
+
+        return got.value_ptr;
+    }
+
+    /// Generates a cache key for a template definition.
+    fn makeDefCacheKey(_: *Builder, chunk: []const u8, def_data_off: u32) Context.DefKey {
         var guid: [16]u8 = undefined;
         const base: usize = @intCast(def_data_off);
-        std.mem.copyForwards(u8, guid[0..], chunk[base + 4 .. base + 20]);
+        // GUID is at offset 4 in TemplateDefinitionHeader (after next_offset u32)
+        // TemplateDefinitionHeader: [next_offset: u32][guid: u128][data_size: u32]
+        const guid_slice = chunk[base + 4 .. base + 20];
+        @memcpy(guid[0..], guid_slice);
         return .{ .def_data_off = def_data_off, .guid = guid };
     }
 
-    // Local copies removed; use common.zig
-    fn parseTemplateDefFromChunk(ctx: *Context, chunk: []const u8, def_data_off: u32, allocator: std.mem.Allocator) !struct { def: *IR.Element, data_start: usize } {
-        const def_off_usize: usize = @intCast(def_data_off);
-        if (def_off_usize + 24 > chunk.len) return error.OutOfBounds;
-        const td_data_size = std.mem.readInt(u32, chunk[def_off_usize + 20 .. def_off_usize + 24][0..4], .little);
-        if (log.enabled(.trace)) {
-            log.trace("tmpl def_data_off=0x{x} def_off_usize=0x{x} td_data_size=0x{x}", .{ def_data_off, def_off_usize, td_data_size });
+    /// Parses a template definition from the chunk at the specified offset.
+    fn parseTemplateDef(self: *Builder, chunk: []const u8, def_data_off: u32) !*IR.Element {
+        const def_off: usize = @intCast(def_data_off);
+        if (def_off + @sizeOf(types.TemplateDefinitionHeader) > chunk.len) {
+            return error.OutOfBounds;
         }
-        const data_start = def_off_usize + 24;
-        const data_end = data_start + @as(usize, td_data_size);
-        if (data_end > chunk.len or data_start >= chunk.len) return error.OutOfBounds;
+
+        // Read header manually or via struct to get data size
+        // We use manual slice reading here to be safe with alignment/bounds, mostly just need data_size
+        // TemplateDefinitionHeader is 24 bytes. data_size is at offset 20.
+        const size_slice = chunk[def_off + 20 .. def_off + 24];
+        const data_size = std.mem.readInt(u32, size_slice[0..4], .little);
+
+        if (log.enabled(.trace)) {
+            log.trace("parseTemplateDef: off=0x{x} size=0x{x}", .{ def_data_off, data_size });
+        }
+
+        const data_start = def_off + 24; // sizeof(TemplateDefinitionHeader)
+        const data_end = data_start + @as(usize, data_size);
+
+        if (data_end > chunk.len) return error.OutOfBounds;
+
         var def_r = Reader.init(chunk[data_start..data_end]);
         try common.skipFragmentHeaderIfPresent(&def_r);
-        var p = Parser.init(ctx, allocator);
-        const parsed_def = try p.parseElementIRWithBase(chunk, &def_r, .def, data_start);
-        return .{ .def = parsed_def, .data_start = data_start };
+
+        var parser = Parser.init(self.ctx, self.allocator);
+        // .def source mode handles specific name parsing rules for templates
+        return parser.parseElementIRWithBase(chunk, &def_r, .def, data_start);
     }
-    fn collectEvtXmlPayloadChildren(ctx: *Context, chunk: []const u8, data: []const u8, alloc: std.mem.Allocator, out: *std.ArrayList(IR.Node)) !void {
-        if (data.len == 0) return;
-        var r = Reader.init(data);
-        try common.skipFragmentHeaderIfPresent(&r);
-        while (r.rem() > 0) {
-            const pk = r.buf[r.pos];
-            if (pk != tokens.TOK_TEMPLATE_INSTANCE) break;
-            const header = r.readTemplateInstanceHeader() catch break;
-            common.skipInlineCachedTemplateDefs(&r);
-            const parsed = try parseTemplateDefFromChunk(ctx, chunk, header.def_data_off, alloc);
-            const child_def = parsed.def;
-            const expected = @import("parser.zig").expectedValuesFromTemplate(child_def);
-            const vals = try @import("parser.zig").parseTemplateInstanceValuesExpected(&r, alloc, expected);
-            var expander = Expander.init(ctx, alloc);
-            const expanded_child = try expander.expandElementWithValues(child_def, vals);
-            try out.append(alloc, .{ .tag = .Element, .elem = expanded_child });
-        }
-    }
-    fn spliceEvtXmlAll(ctx: *Context, chunk: []const u8, el: *IR.Element, alloc: std.mem.Allocator) !void {
-        var staged_attr_children = std.ArrayList(IR.Node).initCapacity(alloc, 0) catch unreachable;
-        var ai: usize = 0;
-        while (ai < el.attrs.items.len) : (ai += 1) {
-            const a = el.attrs.items[ai];
-            var vi: usize = 0;
-            while (vi < a.value.items.len) : (vi += 1) {
-                const nd = a.value.items[vi];
-                if (nd.tag == .Value and (nd.vtype & 0x7f) == 0x21 and nd.vbytes.len > 0) {
-                    try collectEvtXmlPayloadChildren(ctx, chunk, nd.vbytes, alloc, &staged_attr_children);
+
+    // --- Nested BinXML Handling ---
+
+    /// Recursively scans the expanded tree for nested BinXML values (EVT_XML)
+    /// and splices them into the tree as proper children.
+    ///
+    /// This is necessary because some events embed full XML fragments as binary
+    /// values (type 0x21) which need to be promoted to first-class XML structure.
+    /// Explicitly use `anyerror` to avoid recursive inferred-error-set issues.
+    fn spliceNestedBinXml(self: *Builder, chunk: []const u8, el: *IR.Element) anyerror!void {
+        // We need to check both attributes and children for 0x21 (BinXML) values.
+        // If found, we parse them and collect the resulting nodes.
+
+        // 1. Collect children from attributes (weird but possible in BinXML schema)
+        var extra_children = std.ArrayList(IR.Node).initCapacity(self.allocator, 0) catch unreachable;
+
+        for (el.attrs.items) |attr| {
+            for (attr.value.items) |node| {
+                if (self.isNestedBinXmlNode(node)) {
+                    try self.collectNestedChildren(chunk, node.vbytes, &extra_children);
                 }
             }
         }
-        var new_children = std.ArrayList(IR.Node).initCapacity(alloc, 0) catch unreachable;
-        if (el.children.items.len > 0) try new_children.ensureTotalCapacityPrecise(alloc, el.children.items.len + staged_attr_children.items.len);
-        var ci: usize = 0;
-        while (ci < el.children.items.len) : (ci += 1) {
-            const nd = el.children.items[ci];
-            switch (nd.tag) {
+
+        // 2. Rebuild children list if we have nested content or extra children
+        var new_children = std.ArrayList(IR.Node).initCapacity(self.allocator, 0) catch unreachable;
+
+        // Pre-allocate if we can guess size (existing + extra)
+        const estimated_cap = el.children.items.len + extra_children.items.len;
+        if (estimated_cap > 0) {
+            try new_children.ensureTotalCapacityPrecise(self.allocator, estimated_cap);
+        }
+
+        for (el.children.items) |node| {
+            switch (node.tag) {
                 .Element => {
-                    try spliceEvtXmlAll(ctx, chunk, nd.elem.?, alloc);
-                    try new_children.append(alloc, nd);
+                    // Recurse into child elements
+                    if (node.elem) |child_elem| {
+                        try self.spliceNestedBinXml(chunk, child_elem);
+                    }
+                    try new_children.append(self.allocator, node);
                 },
                 .Value => {
-                    if ((nd.vtype & 0x7f) == 0x21 and nd.vbytes.len > 0) {
-                        try collectEvtXmlPayloadChildren(ctx, chunk, nd.vbytes, alloc, &new_children);
+                    if (self.isNestedBinXmlNode(node)) {
+                        // Expand this node into multiple children
+                        try self.collectNestedChildren(chunk, node.vbytes, &new_children);
                     } else {
-                        try new_children.append(alloc, nd);
+                        try new_children.append(self.allocator, node);
                     }
                 },
-                else => try new_children.append(alloc, nd),
+                else => try new_children.append(self.allocator, node),
             }
         }
-        var k: usize = 0;
-        while (k < staged_attr_children.items.len) : (k += 1) try new_children.append(alloc, staged_attr_children.items[k]);
+
+        // Append any children collected from attributes
+        for (extra_children.items) |child| {
+            try new_children.append(self.allocator, child);
+        }
+
         el.children = new_children;
     }
-    // utf16FromAscii moved to util.zig
+
+    fn isNestedBinXmlNode(_: *Builder, node: IR.Node) bool {
+        return node.tag == .Value and
+            (node.vtype & 0x7f) == 0x21 and
+            node.vbytes.len > 0;
+    }
+
+    /// Parses a nested BinXML blob and appends resulting elements/nodes to `out`.
+    fn collectNestedChildren(self: *Builder, chunk: []const u8, data: []const u8, out: *std.ArrayList(IR.Node)) !void {
+        if (data.len == 0) return;
+        var r = Reader.init(data);
+        try common.skipFragmentHeaderIfPresent(&r);
+
+        while (r.rem() > 0) {
+            const pk = r.peekU8() catch break;
+            if (pk != tokens.TOK_TEMPLATE_INSTANCE) break;
+
+            // Parse the nested template instance
+            // We recurse by calling buildTemplate logic essentially
+            const header = r.readStruct(types.TemplateInstanceStart) catch break;
+
+            common.skipInlineTemplateDefinition(&r, header.def_data_off) catch break;
+            common.skipInlineCachedTemplateDefs(&r);
+
+            const def_ptr = try self.getOrParseTemplateDef(chunk, header.def_data_off);
+            const def = def_ptr.*;
+
+            const expected = @import("parser.zig").expectedValuesFromTemplate(def);
+            const vals = try @import("parser.zig").parseTemplateInstanceValuesExpected(&r, self.allocator, expected);
+
+            var expander = Expander.init(self.ctx, self.allocator);
+            const expanded_child = try expander.expand(def, vals);
+
+            // Recurse for deeper nesting
+            try self.spliceNestedBinXml(chunk, expanded_child);
+
+            try out.append(self.allocator, .{ .tag = .Element, .elem = expanded_child });
+        }
+    }
 };

@@ -478,7 +478,7 @@ fn parseStringToken(
     end_pos: usize,
 ) !void {
     _ = try readHeaderChecked(r, types.TokenHeader, end_pos);
-    const data = try r.readUnicodeTextStringBounded(end_pos);
+    const data = try r.readLenPrefixedSlice(u16, 2, end_pos);
     try out.append(allocator, .{ .tag = Tag, .text_utf16 = data, .text_num_chars = data.len / 2 });
 }
 
@@ -500,14 +500,14 @@ fn parseValueToken(r: *Reader, out: *std.ArrayList(IR.Node), allocator: std.mem.
 
     // String type (0x01)
     if (vtype == 0x01) {
-        const text = try r.readUnicodeTextStringBounded(end_pos);
+        const text = try r.readLenPrefixedSlice(u16, 2, end_pos);
         try out.append(allocator, .{ .tag = .Text, .text_utf16 = text, .text_num_chars = text.len / 2 });
         return;
     }
 
     // Ansi String (0x02)
     if (vtype == 0x02) {
-        const payload = try r.readLenPrefixedBytes16Bounded(end_pos);
+        const payload = try r.readLenPrefixedSlice(u16, 1, end_pos);
         try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload, .pad_width = 0 });
         return;
     }
@@ -521,7 +521,7 @@ fn parseValueToken(r: *Reader, out: *std.ArrayList(IR.Node), allocator: std.mem.
 
     // Binary type (0x0e)
     if (vtype == 0x0e) {
-        const payload = try r.readLenPrefixedBytes16Bounded(end_pos);
+        const payload = try r.readLenPrefixedSlice(u16, 1, end_pos);
         try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload, .pad_width = 0 });
         return;
     }

@@ -24,7 +24,7 @@ pub fn main() !void {
 
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            usage();
+            help();
         } else if (std.mem.eql(u8, arg, "-o")) {
             const mode = args_iter.next() orelse return error.InvalidArgs;
             if (std.mem.eql(u8, mode, "xml")) output_mode = .xml else if (std.mem.eql(u8, mode, "json")) output_mode = .json else if (std.mem.eql(u8, mode, "jsonl")) output_mode = .jsonl else return error.InvalidArgs;
@@ -88,13 +88,51 @@ pub fn main() !void {
 }
 
 fn usage() noreturn {
-    const msg = "Usage: evtx_dump_zig [-v|-vv|-vvv] [-o xml|json|jsonl] [-s N] [-n N] [-t NUM_THREADS] <file.evtx>\n";
-    var stderr_file = std.fs.File.stderr();
-    var write_buf: [256]u8 = undefined;
-    var w = stderr_file.writer(&write_buf);
-    _ = w.interface.writeAll(msg) catch {};
-    w.interface.flush() catch {};
-    std.process.exit(2);
+    printHelpAndExit(true, 2);
+}
+
+fn help() noreturn {
+    printHelpAndExit(false, 0);
+}
+
+fn printHelpAndExit(to_stderr: bool, exit_code: u8) noreturn {
+    const msg =
+        \\evtx_dump_zig - fast Windows EVTX event log dumper
+        \\
+        \\Usage:
+        \\  evtx_dump_zig [options] <file.evtx>
+        \\
+        \\Options:
+        \\  -h, --help          Show this help and exit
+        \\  -o FORMAT           Output format: xml (default), json, jsonl
+        \\  -v                  Increase log verbosity (info)
+        \\  -vv                 More verbose logging (debug)
+        \\  -vvv                Maximum verbosity (trace)
+        \\  -n N                Stop after N records (0 = all)
+        \\  -s N                Skip first N records
+        \\  --no-checks         Disable EVTX checksum validation
+        \\  -t NUM_THREADS      Override number of worker threads (default: CPU count)
+        \\
+        \\Examples:
+        \\  evtx_dump_zig system.evtx
+        \\  evtx_dump_zig -o jsonl -vv system.evtx
+        \\  evtx_dump_zig -n 100 -s 200 security.evtx
+        \\
+    ;
+
+    var write_buf: [512]u8 = undefined;
+    if (to_stderr) {
+        var stderr_file = std.fs.File.stderr();
+        var w = stderr_file.writer(&write_buf);
+        _ = w.interface.writeAll(msg) catch {};
+        w.interface.flush() catch {};
+    } else {
+        var stdout_file = std.fs.File.stdout();
+        var w = stdout_file.writer(&write_buf);
+        _ = w.interface.writeAll(msg) catch {};
+        w.interface.flush() catch {};
+    }
+    std.process.exit(exit_code);
 }
 
 const OutputMode = enum { xml, json, jsonl };
