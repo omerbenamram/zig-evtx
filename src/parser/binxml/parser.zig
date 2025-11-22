@@ -381,8 +381,6 @@ fn collectValueTokensIRWithCtx(
     allocator: std.mem.Allocator,
     chunk_base: usize,
 ) !void {
-    var want_pad2: bool = false;
-
     while (true) {
         if (r.rem() == 0 or r.pos >= end_pos) break;
 
@@ -398,37 +396,40 @@ fn collectValueTokensIRWithCtx(
         }
 
         if (tokens.isToken(pk, tokens.TOK_VALUE)) {
-            try parseValueToken(r, out, allocator, end_pos, &want_pad2, src);
+            try parseValueToken(r, out, allocator, end_pos, src);
             continue;
         }
 
         if (tokens.isToken(pk, tokens.TOK_NORMAL_SUBST) or tokens.isToken(pk, tokens.TOK_OPTIONAL_SUBST)) {
-            try parseSubstitutionToken(r, out, allocator, end_pos, &want_pad2);
+            const h = try readHeaderChecked(r, types.SubstitutionHeader, end_pos);
+            const optional = tokens.isToken(h.token, tokens.TOK_OPTIONAL_SUBST);
+            try out.append(allocator, .{ .tag = .Subst, .subst_id = h.id, .subst_vtype = h.vtype, .subst_optional = optional, .pad_width = 0 });
             continue;
         }
 
         if (tokens.isToken(pk, tokens.TOK_CHARREF)) {
-            try parseCharRefToken(r, out, allocator, end_pos);
+            const h = try readHeaderChecked(r, types.CharRefHeader, end_pos);
+            try out.append(allocator, .{ .tag = .CharRef, .charref_value = h.value });
             continue;
         }
 
         if (tokens.isToken(pk, tokens.TOK_ENTITYREF)) {
-            try parseEntityRefToken(ctx, chunk, r, out, allocator, src, end_pos, chunk_base);
+            try parseNameToken(.EntityRef, "entity_name", ctx, chunk, r, out, allocator, src, end_pos, chunk_base);
             continue;
         }
 
         if (tokens.isToken(pk, tokens.TOK_CDATA)) {
-            try parseCDataToken(r, out, allocator, end_pos);
+            try parseStringToken(.CData, r, out, allocator, end_pos);
             continue;
         }
 
         if (tokens.isToken(pk, tokens.TOK_PITARGET)) {
-            try parsePITargetToken(ctx, chunk, r, out, allocator, src, end_pos, chunk_base);
+            try parseNameToken(.PITarget, "pi_target", ctx, chunk, r, out, allocator, src, end_pos, chunk_base);
             continue;
         }
 
         if (tokens.isToken(pk, tokens.TOK_PIDATA)) {
-            try parsePIDataToken(r, out, allocator, end_pos);
+            try parseStringToken(.PIData, r, out, allocator, end_pos);
             continue;
         }
 
@@ -439,9 +440,50 @@ fn collectValueTokensIRWithCtx(
 
 // --- Individual Token Parsers ---
 
-fn parseValueToken(r: *Reader, out: *std.ArrayList(IR.Node), allocator: std.mem.Allocator, end_pos: usize, want_pad2: *bool, src: Source) !void {
-    if (r.pos + @sizeOf(types.ValueTokenHeader) > end_pos) return BinXmlError.UnexpectedEof;
-    const h = try r.readStruct(types.ValueTokenHeader);
+/// Helper to read a header struct after bounds checking.
+fn readHeaderChecked(r: *Reader, comptime H: type, end_pos: usize) !H {
+    if (r.pos + @sizeOf(H) > end_pos) return BinXmlError.UnexpectedEof;
+    return r.readStruct(H);
+}
+
+/// Generic helper for tokens containing a simple Name payload (PITarget, EntityRef).
+fn parseNameToken(
+    comptime Tag: IR.NodeTag,
+    comptime field_name: []const u8,
+    ctx: *Context,
+    chunk: []const u8,
+    r: *Reader,
+    out: *std.ArrayList(IR.Node),
+    allocator: std.mem.Allocator,
+    src: Source,
+    end_pos: usize,
+    chunk_base: usize,
+) !void {
+    // All these tokens start with a basic TokenHeader
+    _ = try readHeaderChecked(r, types.TokenHeader, end_pos);
+    const nm = try readNameIRBounded(ctx, chunk, r, allocator, src, end_pos, chunk_base);
+
+    var node: IR.Node = undefined;
+    node = .{ .tag = Tag };
+    @field(node, field_name) = nm;
+    try out.append(allocator, node);
+}
+
+/// Generic helper for tokens containing a string payload (CData, PIData).
+fn parseStringToken(
+    comptime Tag: IR.NodeTag,
+    r: *Reader,
+    out: *std.ArrayList(IR.Node),
+    allocator: std.mem.Allocator,
+    end_pos: usize,
+) !void {
+    _ = try readHeaderChecked(r, types.TokenHeader, end_pos);
+    const data = try r.readUnicodeTextStringBounded(end_pos);
+    try out.append(allocator, .{ .tag = Tag, .text_utf16 = data, .text_num_chars = data.len / 2 });
+}
+
+fn parseValueToken(r: *Reader, out: *std.ArrayList(IR.Node), allocator: std.mem.Allocator, end_pos: usize, src: Source) !void {
+    const h = try readHeaderChecked(r, types.ValueTokenHeader, end_pos);
     const vtype = h.vtype;
 
     if (log.enabled(.trace)) log.trace("  vtype=0x{x}", .{vtype});
@@ -466,24 +508,21 @@ fn parseValueToken(r: *Reader, out: *std.ArrayList(IR.Node), allocator: std.mem.
     // Ansi String (0x02)
     if (vtype == 0x02) {
         const payload = try r.readLenPrefixedBytes16Bounded(end_pos);
-        try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload, .pad_width = if (want_pad2.*) 2 else 0 });
-        want_pad2.* = false;
+        try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload, .pad_width = 0 });
         return;
     }
 
     // Fixed size types
     if (types.valueTypeFixedSize(vtype)) |sz| {
         const payload = try r.readFixedBytesBounded(sz, end_pos);
-        try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload, .pad_width = if (want_pad2.*) 2 else 0 });
-        want_pad2.* = false;
+        try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload, .pad_width = 0 });
         return;
     }
 
     // Binary type (0x0e)
     if (vtype == 0x0e) {
         const payload = try r.readLenPrefixedBytes16Bounded(end_pos);
-        try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload, .pad_width = if (want_pad2.*) 2 else 0 });
-        want_pad2.* = false;
+        try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload, .pad_width = 0 });
         return;
     }
 
@@ -496,48 +535,6 @@ fn parseValueToken(r: *Reader, out: *std.ArrayList(IR.Node), allocator: std.mem.
 
     log.err("unknown value vtype=0x{x} at pos=0x{x} src={s}", .{ vtype, r.pos, @tagName(src) });
     return BinXmlError.BadToken;
-}
-
-fn parseSubstitutionToken(r: *Reader, out: *std.ArrayList(IR.Node), allocator: std.mem.Allocator, end_pos: usize, want_pad2: *bool) !void {
-    if (r.pos + @sizeOf(types.SubstitutionHeader) > end_pos) return BinXmlError.UnexpectedEof;
-    const h = try r.readStruct(types.SubstitutionHeader);
-    const optional = tokens.isToken(h.token, tokens.TOK_OPTIONAL_SUBST);
-    try out.append(allocator, .{ .tag = .Subst, .subst_id = h.id, .subst_vtype = h.vtype, .subst_optional = optional, .pad_width = if (want_pad2.*) 2 else 0 });
-    want_pad2.* = false;
-}
-
-fn parseCharRefToken(r: *Reader, out: *std.ArrayList(IR.Node), allocator: std.mem.Allocator, end_pos: usize) !void {
-    if (r.pos + @sizeOf(types.CharRefHeader) > end_pos) return BinXmlError.UnexpectedEof;
-    const h = try r.readStruct(types.CharRefHeader);
-    try out.append(allocator, .{ .tag = .CharRef, .charref_value = h.value });
-}
-
-fn parseEntityRefToken(ctx: *Context, chunk: []const u8, r: *Reader, out: *std.ArrayList(IR.Node), allocator: std.mem.Allocator, src: Source, end_pos: usize, chunk_base: usize) !void {
-    if (r.pos + @sizeOf(types.TokenHeader) > end_pos) return BinXmlError.UnexpectedEof;
-    _ = try r.readStruct(types.TokenHeader);
-    const nm = try readNameIRBounded(ctx, chunk, r, allocator, src, end_pos, chunk_base);
-    try out.append(allocator, .{ .tag = .EntityRef, .entity_name = nm });
-}
-
-fn parseCDataToken(r: *Reader, out: *std.ArrayList(IR.Node), allocator: std.mem.Allocator, end_pos: usize) !void {
-    if (r.pos + @sizeOf(types.TokenHeader) > end_pos) return BinXmlError.UnexpectedEof;
-    _ = try r.readStruct(types.TokenHeader);
-    const data = try r.readUnicodeTextStringBounded(end_pos);
-    try out.append(allocator, .{ .tag = .CData, .text_utf16 = data, .text_num_chars = data.len / 2 });
-}
-
-fn parsePITargetToken(ctx: *Context, chunk: []const u8, r: *Reader, out: *std.ArrayList(IR.Node), allocator: std.mem.Allocator, src: Source, end_pos: usize, chunk_base: usize) !void {
-    if (r.pos + @sizeOf(types.TokenHeader) > end_pos) return BinXmlError.UnexpectedEof;
-    _ = try r.readStruct(types.TokenHeader);
-    const nm = try readNameIRBounded(ctx, chunk, r, allocator, src, end_pos, chunk_base);
-    try out.append(allocator, .{ .tag = .PITarget, .pi_target = nm });
-}
-
-fn parsePIDataToken(r: *Reader, out: *std.ArrayList(IR.Node), allocator: std.mem.Allocator, end_pos: usize) !void {
-    if (r.pos + @sizeOf(types.TokenHeader) > end_pos) return BinXmlError.UnexpectedEof;
-    _ = try r.readStruct(types.TokenHeader);
-    const data = try r.readUnicodeTextStringBounded(end_pos);
-    try out.append(allocator, .{ .tag = .PIData, .text_utf16 = data, .text_num_chars = data.len / 2 });
 }
 
 // --- Name Handling Helpers ---
