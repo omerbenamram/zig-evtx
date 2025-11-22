@@ -7,7 +7,6 @@ const types = @import("types.zig");
 const BinXmlError = @import("../err.zig").BinXmlError;
 const logger = @import("../../logger.zig");
 const log = logger.scoped("binxml");
-const alloc_mod = @import("alloc");
 const tokens = @import("tokens.zig");
 const util = @import("../util.zig");
 const utf16EqualsAscii = util.utf16EqualsAscii;
@@ -20,121 +19,27 @@ pub const Source = enum {
     def,
 };
 
-/// The main BinXML parser structure.
-/// It handles the parsing of BinXML fragments into an Intermediate Representation (IR).
-/// This parser is designed to be context-aware and handles both record and template definition contexts.
-pub const Parser = struct {
-    ctx: *Context,
-    allocator: std.mem.Allocator,
-
-    pub fn init(ctx: *Context, allocator: std.mem.Allocator) Parser {
-        return .{ .ctx = ctx, .allocator = allocator };
-    }
-
-    /// Parses an element and returns its IR representation.
-    /// This function is the entry point for parsing a BinXML element.
-    pub fn parseElementIR(self: *Parser, chunk: []const u8, r: *Reader, src: Source) !*IR.Element {
-        return parseElementIRBase(self.ctx, chunk, r, self.allocator, src, 0);
-    }
-
-    /// Parses an element with an explicit chunk base offset.
-    /// Useful when parsing elements that are relative to a specific chunk start.
-    pub fn parseElementIRWithBase(self: *Parser, chunk: []const u8, r: *Reader, src: Source, chunk_base: usize) !*IR.Element {
-        return parseElementIRBase(self.ctx, chunk, r, self.allocator, src, chunk_base);
-    }
-
-    /// Parses template instance values from the reader.
-    /// `expected` is the expected number of values, but the function trusts the declared count in the stream.
-    pub fn parseTemplateInstanceValues(self: *Parser, r: *Reader, expected: usize) ![]types.TemplateValue {
-        _ = self;
-        // Forward to core function for now.
-        // We use the module-level allocator provider `alloc_mod.get()` here.
-        return parseTemplateInstanceValuesExpected(r, alloc_mod.get(), expected);
-    }
-};
-
-// --- IR Analysis Helpers ---
-
-/// Calculates the maximum number of values expected by a template element.
-/// This traverses the element's attributes and children to find the highest substitution index.
-pub fn expectedValuesFromTemplate(el: *const IR.Element) usize {
-    var max: ?usize = null;
-
-    // Check attributes
-    for (el.attrs.items) |attr| {
-        if (maxSubstIndexNodes(attr.value.items)) |v| {
-            if (max) |m| {
-                if (v > m) max = v;
-            } else {
-                max = v;
-            }
-        }
-    }
-
-    // Check children
-    if (maxSubstIndexNodes(el.children.items)) |v2| {
-        if (max) |m2| {
-            if (v2 > m2) max = v2;
-        } else {
-            max = v2;
-        }
-    }
-
-    return if (max) |mfinal| mfinal + 1 else 0;
+/// Parses an element and returns its IR representation.
+/// This function is the entry point for parsing a BinXML element.
+pub fn parseElementIR(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source) !*IR.Element {
+    return parseElementIRBase(ctx, chunk, r, allocator, src, 0);
 }
 
-/// Recursively finds the maximum substitution index in a list of nodes.
-fn maxSubstIndexNodes(nodes: []const IR.Node) ?usize {
-    var max: ?usize = null;
-
-    for (nodes) |nd| {
-        switch (nd.tag) {
-            .Subst => {
-                const subst_id = @as(usize, nd.subst_id);
-                if (max) |m| {
-                    if (subst_id > m) max = subst_id;
-                } else {
-                    max = subst_id;
-                }
-            },
-            .Element => {
-                if (nd.elem) |child| {
-                    // Check attributes of child
-                    for (child.attrs.items) |attr| {
-                        if (maxSubstIndexNodes(attr.value.items)) |v| {
-                            if (max) |m2| {
-                                if (v > m2) max = v;
-                            } else {
-                                max = v;
-                            }
-                        }
-                    }
-                    // Check children of child
-                    if (maxSubstIndexNodes(child.children.items)) |v2| {
-                        if (max) |m3| {
-                            if (v2 > m3) max = v2;
-                        } else {
-                            max = v2;
-                        }
-                    }
-                }
-            },
-            else => {},
-        }
-    }
-    return max;
+/// Parses an element with an explicit chunk base offset.
+/// Useful when parsing elements that are relative to a specific chunk start.
+pub fn parseElementIRWithBase(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, chunk_base: usize) !*IR.Element {
+    return parseElementIRBase(ctx, chunk, r, allocator, src, chunk_base);
 }
 
 // --- Template Instance Value Parsing ---
 
 /// Parses the values for a template instance.
 /// It reads the descriptor table first, then the value payloads.
-pub fn parseTemplateInstanceValuesExpected(r: *Reader, allocator: std.mem.Allocator, expected: usize) ![]types.TemplateValue {
+pub fn parseTemplateInstanceValues(r: *Reader, allocator: std.mem.Allocator) ![]types.TemplateValue {
     if (r.rem() < 4) return BinXmlError.UnexpectedEof;
 
     const declared_u32 = try r.readU32le();
     const declared: usize = @intCast(declared_u32);
-    _ = expected; // Trust declared count per spec (Rust behavior)
 
     if (log.enabled(.trace)) log.trace("tmpl values declared={d}", .{declared});
 

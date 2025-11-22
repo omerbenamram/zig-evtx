@@ -3,7 +3,7 @@ const Reader = @import("../reader.zig").Reader;
 const IRMod = @import("../ir.zig");
 const IR = IRMod.IR;
 const Context = @import("context.zig").Context;
-const Parser = @import("parser.zig").Parser;
+const binxml_parser = @import("parser.zig");
 const Expander = @import("expander.zig").Expander;
 const types = @import("types.zig");
 const tokens = @import("tokens.zig");
@@ -64,8 +64,7 @@ pub const Builder = struct {
     /// Parses a regular (non-template) element and expands any nested BinXML.
     fn buildRegular(self: *Builder, chunk: []const u8, r: *Reader) !*IR.Element {
         // 1. Parse the element into IR
-        var parser = Parser.init(self.ctx, self.allocator);
-        const root = try parser.parseElementIR(chunk, r, .rec);
+        const root = try binxml_parser.parseElementIR(self.ctx, chunk, r, self.allocator, .rec);
 
         // 2. Expand values (trivial for regular elements, but standardizes flow)
         var expander = Expander.init(self.ctx, self.allocator);
@@ -93,8 +92,7 @@ pub const Builder = struct {
         const def = def_ptr.*;
 
         // Parse substitution values
-        const expected_count = @import("parser.zig").expectedValuesFromTemplate(def);
-        const values = try @import("parser.zig").parseTemplateInstanceValuesExpected(r, self.allocator, expected_count);
+        const values = try binxml_parser.parseTemplateInstanceValues(r, self.allocator);
 
         // Expand template with values
         var expander = Expander.init(self.ctx, self.allocator);
@@ -155,9 +153,8 @@ pub const Builder = struct {
         var def_r = Reader.init(chunk[data_start..data_end]);
         try common.skipFragmentHeaderIfPresent(&def_r);
 
-        var parser = Parser.init(self.ctx, self.allocator);
         // .def source mode handles specific name parsing rules for templates
-        return parser.parseElementIRWithBase(chunk, &def_r, .def, data_start);
+        return binxml_parser.parseElementIRWithBase(self.ctx, chunk, &def_r, self.allocator, .def, data_start);
     }
 
     // --- Nested BinXML Handling ---
@@ -247,8 +244,7 @@ pub const Builder = struct {
             const def_ptr = try self.getOrParseTemplateDef(chunk, header.def_data_off);
             const def = def_ptr.*;
 
-            const expected = @import("parser.zig").expectedValuesFromTemplate(def);
-            const vals = try @import("parser.zig").parseTemplateInstanceValuesExpected(&r, self.allocator, expected);
+            const vals = try binxml_parser.parseTemplateInstanceValues(&r, self.allocator);
 
             var expander = Expander.init(self.ctx, self.allocator);
             const expanded_child = try expander.expand(def, vals);

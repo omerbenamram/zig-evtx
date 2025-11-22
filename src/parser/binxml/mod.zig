@@ -2,7 +2,7 @@
 pub const types = @import("types.zig");
 pub const tokens = @import("tokens.zig");
 pub const Context = @import("context.zig").Context;
-pub const Parser = @import("parser.zig").Parser;
+pub const parser = @import("parser.zig");
 pub const Expander = @import("expander.zig").Expander;
 pub const Builder = @import("builder.zig").Builder;
 pub const common = @import("common.zig");

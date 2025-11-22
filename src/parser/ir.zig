@@ -55,14 +55,6 @@ pub fn irNewElement(allocator: std.mem.Allocator, name: IR.Name) !*IR.Element {
     return el;
 }
 
-pub fn irPushText(list: *std.ArrayList(IR.Node), utf16: []const u8, num_chars: usize) !void {
-    try list.append(.{ .tag = .Text, .text_utf16 = utf16, .text_num_chars = num_chars });
-}
-
-pub fn irPushPad2(list: *std.ArrayList(IR.Node)) !void {
-    try list.append(.{ .tag = .Pad, .pad_width = 2 });
-}
-
 pub fn nameEqualsAscii(chunk: []const u8, name: IR.Name, ascii: []const u8) bool {
     switch (name) {
         .NameOffset => |off| {
