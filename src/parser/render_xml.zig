@@ -21,23 +21,11 @@ const attrNameIsSystemTime = @import("binxml/name.zig").attrNameIsSystemTime;
 
 // Stream attribute value tokens directly to destination (no buffering)
 fn renderAttrValueFromIRStream(chunk: []const u8, nodes: []const IR.Node, _: []const TemplateValue, w: anytype) !void {
-    var pending_pad: usize = 0;
     for (nodes) |nd| switch (nd.tag) {
         .Text => try util.writeUtf16LeXmlEscaped(w, nd.text_utf16, nd.text_num_chars),
-        .Pad => pending_pad = nd.pad_width,
+        .Pad => {}, // Ignored/Dead
         .Value => {
-            if (pending_pad > 0 and (nd.vtype == 0x07 or nd.vtype == 0x08 or nd.vtype == 0x09 or nd.vtype == 0x0a)) {
-                switch (nd.vtype) {
-                    0x07 => try writePaddedInt(w, i32, std.mem.readInt(i32, nd.vbytes[0..4], .little), pending_pad),
-                    0x08 => try writePaddedInt(w, u32, std.mem.readInt(u32, nd.vbytes[0..4], .little), pending_pad),
-                    0x09 => try writePaddedInt(w, i64, std.mem.readInt(i64, nd.vbytes[0..8], .little), pending_pad),
-                    0x0a => try writePaddedInt(w, u64, std.mem.readInt(u64, nd.vbytes[0..8], .little), pending_pad),
-                    else => {},
-                }
-                pending_pad = 0;
-            } else {
-                try writeValueXml(w, nd.vtype, nd.vbytes);
-            }
+            try writeValueXml(w, nd.vtype, nd.vbytes);
         },
         .Subst => {},
         .CharRef => try w.print("&#{d};", .{nd.charref_value}),
@@ -104,7 +92,7 @@ inline fn writeHexBytesLower(w: anytype, bytes: []const u8) !void {
 
 fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const TemplateValue, w: anytype, indent: usize) anyerror!void {
     // If this element has local template values, prefer them for its subtree
-    const eff_values: []const TemplateValue = if (el.local_values.len > 0) el.local_values else values;
+    const eff_values: []const TemplateValue = values;
     // Use precomputed hints
     const has_elem_child = el.has_element_child;
     const has_evtxml_subst = el.has_evtxml_subst_in_tree;
@@ -141,7 +129,7 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
                     var ai_: usize = 0;
                     while (ai_ < el_.attrs.items.len) : (ai_ += 1) {
                         const a_ = el_.attrs.items[ai_];
-                        const eff_vals_: []const TemplateValue = if (el_.local_values.len > 0) el_.local_values else &[_]TemplateValue{};
+                        const eff_vals_: []const TemplateValue = &[_]TemplateValue{};
 
                         // Drop attribute if it is a single optional substitution resolving to NULL
                         var drop_attr_: bool = false;
@@ -157,7 +145,7 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
                         try w_.writeByte(' ');
                         try writeNameXml(chunk_, a_.name, w_);
                         try w_.writeAll("=\"");
-                        if (attrNameIsSystemTime(a_.name, chunk_)) {
+                        if (attrNameIsSystemTime(a_.name)) {
                             var tmp_: [512]u8 = undefined;
                             var fbs_ = std.io.fixedBufferStream(&tmp_);
                             try renderAttrValueFromIR(chunk_, a_.value.items, eff_vals_, fbs_.writer());
@@ -258,7 +246,7 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
         try w.writeByte(' ');
         try writeNameXml(chunk, a.name, w);
         try w.writeAll("=\"");
-        if (attrNameIsSystemTime(a.name, chunk)) {
+        if (attrNameIsSystemTime(a.name)) {
             // Use a small buffer only for SystemTime normalization
             var tmp: [512]u8 = undefined;
             var fbs = std.io.fixedBufferStream(&tmp);
@@ -319,10 +307,8 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
 }
 
 fn writeNameXml(chunk: []const u8, name: IR.Name, w: anytype) !void {
-    switch (name) {
-        .NameOffset => |off| try writeNameFromOffset(chunk, off, w),
-        .InlineUtf16 => |inl| try writeNameFromUtf16(w, inl.bytes, inl.num_chars),
-    }
+    try writeNameFromUtf16(w, name.bytes, name.num_chars);
+    _ = chunk;
 }
 pub fn writeNameFromOffset(chunk: []const u8, name_offset: u32, w: anytype) !void {
     const off = @as(usize, name_offset);
@@ -351,7 +337,7 @@ pub fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w
     var builder = binxml.Builder.init(ctx, ctx.allocator);
     const root = try builder.build(chunk, bin);
     if (ctx.verbose) {
-        try logNameTrace(chunk, root.name, "root");
+        try logNameTrace(root.name, "root");
     }
     try renderElementIRXml(chunk, root, &[_]TemplateValue{}, w, 0);
 }
@@ -360,23 +346,11 @@ fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, _: []const T
     var buf: [2048]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const aw = fbs.writer();
-    var pending_pad: usize = 0;
     for (nodes) |nd| switch (nd.tag) {
         .Text => try util.writeUtf16LeXmlEscaped(aw, nd.text_utf16, nd.text_num_chars),
-        .Pad => pending_pad = nd.pad_width,
+        .Pad => {},
         .Value => {
-            if (pending_pad > 0 and (nd.vtype == 0x07 or nd.vtype == 0x08 or nd.vtype == 0x09 or nd.vtype == 0x0a)) {
-                switch (nd.vtype) {
-                    0x07 => try writePaddedInt(aw, i32, std.mem.readInt(i32, nd.vbytes[0..4], .little), pending_pad),
-                    0x08 => try writePaddedInt(aw, u32, std.mem.readInt(u32, nd.vbytes[0..4], .little), pending_pad),
-                    0x09 => try writePaddedInt(aw, i64, std.mem.readInt(i64, nd.vbytes[0..8], .little), pending_pad),
-                    0x0a => try writePaddedInt(aw, u64, std.mem.readInt(u64, nd.vbytes[0..8], .little), pending_pad),
-                    else => {},
-                }
-                pending_pad = 0;
-            } else {
-                try writeValueXml(aw, nd.vtype, nd.vbytes);
-            }
+            try writeValueXml(aw, nd.vtype, nd.vbytes);
         },
         .Subst => {}, // no Subst nodes remain post-expansion
         .CharRef => try aw.print("&#{d};", .{nd.charref_value}),
@@ -402,26 +376,14 @@ fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, _: []const T
 }
 
 fn renderTextContentFromIR(chunk: []const u8, nodes: []const IR.Node, _: []const TemplateValue, w: anytype) !void {
-    var pending_pad: usize = 0;
     var i: usize = 0;
     while (i < nodes.len) : (i += 1) {
         const nd = nodes[i];
         switch (nd.tag) {
             .Text => try util.writeUtf16LeXmlEscaped(w, nd.text_utf16, nd.text_num_chars),
-            .Pad => pending_pad = nd.pad_width,
+            .Pad => {},
             .Value => {
-                if (pending_pad > 0 and (nd.vtype == 0x07 or nd.vtype == 0x08 or nd.vtype == 0x09 or nd.vtype == 0x0a)) {
-                    switch (nd.vtype) {
-                        0x07 => try writePaddedInt(w, i32, std.mem.readInt(i32, nd.vbytes[0..4], .little), pending_pad),
-                        0x08 => try writePaddedInt(w, u32, std.mem.readInt(u32, nd.vbytes[0..4], .little), pending_pad),
-                        0x09 => try writePaddedInt(w, i64, std.mem.readInt(i64, nd.vbytes[0..8], .little), pending_pad),
-                        0x0a => try writePaddedInt(w, u64, std.mem.readInt(u64, nd.vbytes[0..8], .little), pending_pad),
-                        else => {},
-                    }
-                    pending_pad = 0;
-                } else {
-                    try writeValueXml(w, nd.vtype, nd.vbytes);
-                }
+                try writeValueXml(w, nd.vtype, nd.vbytes);
             },
             .Subst => {}, // no Subst nodes remain post-expansion
             .CharRef => try w.print("&#{d};", .{nd.charref_value}),

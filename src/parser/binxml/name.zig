@@ -51,14 +51,11 @@ fn isNameSystemTimeFromOffset(chunk: []const u8, name_offset: u32) bool {
     return utf16EqualsAscii(raw_slice, num_chars, "SystemTime");
 }
 
-pub fn attrNameIsSystemTime(name: IR.Name, chunk: []const u8) bool {
-    return switch (name) {
-        .NameOffset => |off| isNameSystemTimeFromOffset(chunk, off),
-        .InlineUtf16 => |inl| utf16EqualsAscii(inl.bytes, inl.num_chars, "SystemTime"),
-    };
+pub fn attrNameIsSystemTime(name: IR.Name) bool {
+    return utf16EqualsAscii(name.bytes, name.num_chars, "SystemTime");
 }
 
-pub fn logNameTrace(chunk: []const u8, name: IR.Name, label: []const u8) !void {
+pub fn logNameTrace(name: IR.Name, label: []const u8) !void {
     if (!log.enabled(.trace)) return;
     var tmp: [256]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&tmp);
@@ -66,9 +63,6 @@ pub fn logNameTrace(chunk: []const u8, name: IR.Name, label: []const u8) !void {
     try w.writeAll("[");
     try w.writeAll(label);
     try w.writeAll("] ");
-    switch (name) {
-        .NameOffset => |off| try writeNameFromOffset(chunk, off, w),
-        .InlineUtf16 => |inl| try writeNameFromUtf16(w, inl.bytes, inl.num_chars),
-    }
+    try writeNameFromUtf16(w, name.bytes, name.num_chars);
     log.trace("{s}", .{fbs.getWritten()});
 }

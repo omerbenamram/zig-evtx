@@ -11,19 +11,9 @@ const writeAnsiCp1252JsonEscaped = util.writeAnsiCp1252JsonEscaped;
 const attrNameIsSystemTime = @import("binxml/name.zig").attrNameIsSystemTime;
 
 fn writeNameJsonQuoted(w: anytype, name: IR.Name, chunk: []const u8) !void {
+    _ = chunk;
     try w.writeByte('"');
-    switch (name) {
-        .InlineUtf16 => |inl| try writeUtf16LeJsonEscaped(w, inl.bytes, inl.num_chars),
-        .NameOffset => |off| {
-            const o: usize = @intCast(off);
-            if (o + 8 > chunk.len) return error.UnexpectedEof;
-            const num_chars = std.mem.readInt(u16, chunk[o + 6 .. o + 8][0..2], .little);
-            const str_start = o + 8;
-            const byte_len = @as(usize, num_chars) * 2;
-            if (str_start + byte_len > chunk.len) return error.UnexpectedEof;
-            try writeUtf16LeJsonEscaped(w, chunk[str_start .. str_start + byte_len], num_chars);
-        },
-    }
+    try writeUtf16LeJsonEscaped(w, name.bytes, name.num_chars);
     try w.writeByte('"');
 }
 
@@ -195,115 +185,89 @@ fn writeValueJson(w: anytype, t: u8, data: []const u8) !void {
 
 fn renderTextToJsonString(_: []const u8, nodes: []const IR.Node, w: anytype) !void {
     try w.writeByte('"');
-    var pending_pad: usize = 0;
     var i: usize = 0;
     while (i < nodes.len) : (i += 1) {
         const nd = nodes[i];
         switch (nd.tag) {
             .Text => try writeUtf16LeJsonEscaped(w, nd.text_utf16, nd.text_num_chars),
-            .Pad => pending_pad = nd.pad_width,
+            .Pad => {},
             .Value => {
-                if (pending_pad > 0 and (nd.vtype == 0x07 or nd.vtype == 0x08 or nd.vtype == 0x09 or nd.vtype == 0x0a)) {
-                    var tmp: [64]u8 = undefined;
-                    var fbs = std.io.fixedBufferStream(&tmp);
-                    const aw = fbs.writer();
-                    switch (nd.vtype) {
-                        0x07 => try aw.print("{d}", .{std.mem.readInt(i32, nd.vbytes[0..4], .little)}),
-                        0x08 => try aw.print("{d}", .{std.mem.readInt(u32, nd.vbytes[0..4], .little)}),
-                        0x09 => try aw.print("{d}", .{std.mem.readInt(i64, nd.vbytes[0..8], .little)}),
-                        0x0a => try aw.print("{d}", .{std.mem.readInt(u64, nd.vbytes[0..8], .little)}),
-                        else => {},
-                    }
-                    const s = fbs.getWritten();
-                    // Left pad with zeros
-                    if (s.len >= pending_pad) {
-                        try jsonEscapeUtf8(w, s);
-                    } else {
-                        var zeros: [32]u8 = undefined;
-                        const need = @min(pending_pad - s.len, zeros.len);
-                        @memset(zeros[0..need], '0');
-                        try w.writeAll(zeros[0..need]);
-                        try jsonEscapeUtf8(w, s);
-                    }
-                    pending_pad = 0;
-                } else {
-                    // Render value as plain textual content inside an existing JSON string
-                    switch (nd.vtype & 0x7f) {
-                        0x03 => if (nd.vbytes.len >= 1) try w.print("{d}", .{@as(i8, @bitCast(nd.vbytes[0]))}),
-                        0x04 => if (nd.vbytes.len >= 1) try w.print("{d}", .{nd.vbytes[0]}),
-                        0x05 => if (nd.vbytes.len >= 2) try w.print("{d}", .{std.mem.readInt(i16, nd.vbytes[0..2], .little)}),
-                        0x06 => if (nd.vbytes.len >= 2) try w.print("{d}", .{std.mem.readInt(u16, nd.vbytes[0..2], .little)}),
-                        0x07 => if (nd.vbytes.len >= 4) try w.print("{d}", .{std.mem.readInt(i32, nd.vbytes[0..4], .little)}),
-                        0x08 => if (nd.vbytes.len >= 4) try w.print("{d}", .{std.mem.readInt(u32, nd.vbytes[0..4], .little)}),
-                        0x09 => if (nd.vbytes.len >= 8) try w.print("{d}", .{std.mem.readInt(i64, nd.vbytes[0..8], .little)}),
-                        0x0a => if (nd.vbytes.len >= 8) try w.print("{d}", .{std.mem.readInt(u64, nd.vbytes[0..8], .little)}),
-                        0x0b => if (nd.vbytes.len >= 4) {
-                            const bits = std.mem.readInt(u32, nd.vbytes[0..4], .little);
-                            const f: f32 = @bitCast(bits);
-                            if (std.math.isNan(f)) try w.writeAll("-1.#IND") else if (std.math.isInf(f)) try w.writeAll(if (f > 0) "1.#INF" else "-1.#INF") else try w.print("{d}", .{f});
-                        },
-                        0x0c => if (nd.vbytes.len >= 8) {
-                            const bits = std.mem.readInt(u64, nd.vbytes[0..8], .little);
-                            const f: f64 = @bitCast(bits);
-                            if (std.math.isNan(f)) try w.writeAll("-1.#IND") else if (std.math.isInf(f)) try w.writeAll(if (f > 0) "1.#INF" else "-1.#INF") else try w.print("{d}", .{f});
-                        },
-                        0x0d => if (nd.vbytes.len >= 4) try w.writeAll(if (std.mem.readInt(u32, nd.vbytes[0..4], .little) == 0) "false" else "true"),
-                        0x0f => if (nd.vbytes.len >= 16) {
-                            const d1 = std.mem.readInt(u32, nd.vbytes[0..4], .little);
-                            const d2 = std.mem.readInt(u16, nd.vbytes[4..6], .little);
-                            const d3 = std.mem.readInt(u16, nd.vbytes[6..8], .little);
-                            const d4 = nd.vbytes[8..16];
-                            try w.print("{{{x:0>8}-{x:0>4}-{x:0>4}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}}}", .{ d1, d2, d3, d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7] });
-                        },
-                        0x11 => if (nd.vbytes.len >= 8) {
-                            const ft = std.mem.readInt(u64, nd.vbytes[0..8], .little);
-                            var buf: [40]u8 = undefined;
-                            const out = formatIso8601UtcFromFiletimeMicros(&buf, ft) catch return; // write nothing on error
-                            try w.writeAll(out);
-                        },
-                        0x12 => if (nd.vbytes.len >= 16) {
-                            const year = std.mem.readInt(u16, nd.vbytes[0..2], .little);
-                            const month = std.mem.readInt(u16, nd.vbytes[2..4], .little);
-                            const day = std.mem.readInt(u16, nd.vbytes[6..8], .little);
-                            const hour = std.mem.readInt(u16, nd.vbytes[8..10], .little);
-                            const minute = std.mem.readInt(u16, nd.vbytes[10..12], .little);
-                            const second = std.mem.readInt(u16, nd.vbytes[12..14], .little);
-                            const millis = std.mem.readInt(u16, nd.vbytes[14..16], .little);
-                            try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{ year, month, day, hour, minute, second, millis });
-                        },
-                        0x13 => if (nd.vbytes.len >= 8) {
-                            const rev = nd.vbytes[0];
-                            const sub_count = nd.vbytes[1];
-                            const ida_bytes = nd.vbytes[2..8];
-                            var idauth: u64 = 0;
-                            var kk: usize = 0;
-                            while (kk < 6) : (kk += 1) idauth = (idauth << 8) | ida_bytes[kk];
-                            try w.print("S-{d}-{d}", .{ rev, idauth });
-                            var off: usize = 8;
-                            var si: usize = 0;
-                            while (si < sub_count and off + 4 <= nd.vbytes.len) : (si += 1) {
-                                const sub = std.mem.readInt(u32, nd.vbytes[off .. off + 4][0..4], .little);
-                                off += 4;
-                                try w.print("-{d}", .{sub});
-                            }
-                        },
-                        0x14 => if (nd.vbytes.len >= 4) try w.print("0x{X}", .{std.mem.readInt(u32, nd.vbytes[0..4], .little)}),
-                        0x15 => if (nd.vbytes.len >= 8) try w.print("0x{X}", .{std.mem.readInt(u64, nd.vbytes[0..8], .little)}),
-                        0x01 => {
-                            // Sized UTF-16 string
-                            if (nd.vbytes.len > 0) {
-                                var num = nd.vbytes.len / 2;
-                                if (num > 0 and std.mem.readInt(u16, nd.vbytes[nd.vbytes.len - 2 .. nd.vbytes.len][0..2], .little) == 0) num -= 1;
-                                if (num > 0) try writeUtf16LeJsonEscaped(w, nd.vbytes[0 .. num * 2], num);
-                            }
-                        },
-                        0x02 => try writeAnsiCp1252JsonEscaped(w, nd.vbytes),
-                        0x0e => {
-                            var j: usize = 0;
-                            while (j < nd.vbytes.len) : (j += 1) try w.print("{x:0>2}", .{nd.vbytes[j]});
-                        },
-                        else => {},
-                    }
+                // Render value as plain textual content inside an existing JSON string
+                switch (nd.vtype & 0x7f) {
+                    0x03 => if (nd.vbytes.len >= 1) try w.print("{d}", .{@as(i8, @bitCast(nd.vbytes[0]))}),
+                    0x04 => if (nd.vbytes.len >= 1) try w.print("{d}", .{nd.vbytes[0]}),
+                    0x05 => if (nd.vbytes.len >= 2) try w.print("{d}", .{std.mem.readInt(i16, nd.vbytes[0..2], .little)}),
+                    0x06 => if (nd.vbytes.len >= 2) try w.print("{d}", .{std.mem.readInt(u16, nd.vbytes[0..2], .little)}),
+                    0x07 => if (nd.vbytes.len >= 4) try w.print("{d}", .{std.mem.readInt(i32, nd.vbytes[0..4], .little)}),
+                    0x08 => if (nd.vbytes.len >= 4) try w.print("{d}", .{std.mem.readInt(u32, nd.vbytes[0..4], .little)}),
+                    0x09 => if (nd.vbytes.len >= 8) try w.print("{d}", .{std.mem.readInt(i64, nd.vbytes[0..8], .little)}),
+                    0x0a => if (nd.vbytes.len >= 8) try w.print("{d}", .{std.mem.readInt(u64, nd.vbytes[0..8], .little)}),
+                    0x0b => if (nd.vbytes.len >= 4) {
+                        const bits = std.mem.readInt(u32, nd.vbytes[0..4], .little);
+                        const f: f32 = @bitCast(bits);
+                        if (std.math.isNan(f)) try w.writeAll("-1.#IND") else if (std.math.isInf(f)) try w.writeAll(if (f > 0) "1.#INF" else "-1.#INF") else try w.print("{d}", .{f});
+                    },
+                    0x0c => if (nd.vbytes.len >= 8) {
+                        const bits = std.mem.readInt(u64, nd.vbytes[0..8], .little);
+                        const f: f64 = @bitCast(bits);
+                        if (std.math.isNan(f)) try w.writeAll("-1.#IND") else if (std.math.isInf(f)) try w.writeAll(if (f > 0) "1.#INF" else "-1.#INF") else try w.print("{d}", .{f});
+                    },
+                    0x0d => if (nd.vbytes.len >= 4) try w.writeAll(if (std.mem.readInt(u32, nd.vbytes[0..4], .little) == 0) "false" else "true"),
+                    0x0f => if (nd.vbytes.len >= 16) {
+                        const d1 = std.mem.readInt(u32, nd.vbytes[0..4], .little);
+                        const d2 = std.mem.readInt(u16, nd.vbytes[4..6], .little);
+                        const d3 = std.mem.readInt(u16, nd.vbytes[6..8], .little);
+                        const d4 = nd.vbytes[8..16];
+                        try w.print("{{{x:0>8}-{x:0>4}-{x:0>4}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}}}", .{ d1, d2, d3, d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7] });
+                    },
+                    0x11 => if (nd.vbytes.len >= 8) {
+                        const ft = std.mem.readInt(u64, nd.vbytes[0..8], .little);
+                        var buf: [40]u8 = undefined;
+                        const out = formatIso8601UtcFromFiletimeMicros(&buf, ft) catch return; // write nothing on error
+                        try w.writeAll(out);
+                    },
+                    0x12 => if (nd.vbytes.len >= 16) {
+                        const year = std.mem.readInt(u16, nd.vbytes[0..2], .little);
+                        const month = std.mem.readInt(u16, nd.vbytes[2..4], .little);
+                        const day = std.mem.readInt(u16, nd.vbytes[6..8], .little);
+                        const hour = std.mem.readInt(u16, nd.vbytes[8..10], .little);
+                        const minute = std.mem.readInt(u16, nd.vbytes[10..12], .little);
+                        const second = std.mem.readInt(u16, nd.vbytes[12..14], .little);
+                        const millis = std.mem.readInt(u16, nd.vbytes[14..16], .little);
+                        try w.print("{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{ year, month, day, hour, minute, second, millis });
+                    },
+                    0x13 => if (nd.vbytes.len >= 8) {
+                        const rev = nd.vbytes[0];
+                        const sub_count = nd.vbytes[1];
+                        const ida_bytes = nd.vbytes[2..8];
+                        var idauth: u64 = 0;
+                        var kk: usize = 0;
+                        while (kk < 6) : (kk += 1) idauth = (idauth << 8) | ida_bytes[kk];
+                        try w.print("S-{d}-{d}", .{ rev, idauth });
+                        var off: usize = 8;
+                        var si: usize = 0;
+                        while (si < sub_count and off + 4 <= nd.vbytes.len) : (si += 1) {
+                            const sub = std.mem.readInt(u32, nd.vbytes[off .. off + 4][0..4], .little);
+                            off += 4;
+                            try w.print("-{d}", .{sub});
+                        }
+                    },
+                    0x14 => if (nd.vbytes.len >= 4) try w.print("0x{X}", .{std.mem.readInt(u32, nd.vbytes[0..4], .little)}),
+                    0x15 => if (nd.vbytes.len >= 8) try w.print("0x{X}", .{std.mem.readInt(u64, nd.vbytes[0..8], .little)}),
+                    0x01 => {
+                        // Sized UTF-16 string
+                        if (nd.vbytes.len > 0) {
+                            var num = nd.vbytes.len / 2;
+                            if (num > 0 and std.mem.readInt(u16, nd.vbytes[nd.vbytes.len - 2 .. nd.vbytes.len][0..2], .little) == 0) num -= 1;
+                            if (num > 0) try writeUtf16LeJsonEscaped(w, nd.vbytes[0 .. num * 2], num);
+                        }
+                    },
+                    0x02 => try writeAnsiCp1252JsonEscaped(w, nd.vbytes),
+                    0x0e => {
+                        var j: usize = 0;
+                        while (j < nd.vbytes.len) : (j += 1) try w.print("{x:0>2}", .{nd.vbytes[j]});
+                    },
+                    else => {},
                 }
             },
             .CharRef => try w.print("&#{d};", .{nd.charref_value}),
@@ -343,18 +307,7 @@ fn writeElementBodyJson(chunk: []const u8, el: *const IR.Element, alloc: std.mem
                 // Convert name to UTF-8 key
                 var key_builder = std.ArrayList(u8).initCapacity(alloc, 0) catch unreachable;
                 defer key_builder.deinit(alloc);
-                switch (child.name) {
-                    .InlineUtf16 => |inl| try writeUtf16LeJsonEscaped(key_builder.writer(alloc), inl.bytes, inl.num_chars),
-                    .NameOffset => |off| {
-                        const o: usize = @intCast(off);
-                        if (o + 8 > chunk.len) continue;
-                        const num_chars = std.mem.readInt(u16, chunk[o + 6 .. o + 8][0..2], .little);
-                        const str_start = o + 8;
-                        const byte_len = @as(usize, num_chars) * 2;
-                        if (str_start + byte_len > chunk.len) continue;
-                        try writeUtf16LeJsonEscaped(key_builder.writer(alloc), chunk[str_start .. str_start + byte_len], num_chars);
-                    },
-                }
+                try writeUtf16LeJsonEscaped(key_builder.writer(alloc), child.name.bytes, child.name.num_chars);
                 const key = try key_builder.toOwnedSlice(alloc);
                 var entry = try groups.getOrPut(key);
                 if (!entry.found_existing) {
@@ -381,21 +334,10 @@ fn writeElementBodyJson(chunk: []const u8, el: *const IR.Element, alloc: std.mem
         if (wrote_any) try w.writeByte(',');
         try w.writeByte('"');
         try w.writeByte('@');
-        switch (a.name) {
-            .InlineUtf16 => |inl| try writeUtf16LeJsonEscaped(w, inl.bytes, inl.num_chars),
-            .NameOffset => |off| {
-                const o: usize = @intCast(off);
-                if (o + 8 > chunk.len) return error.UnexpectedEof;
-                const num_chars = std.mem.readInt(u16, chunk[o + 6 .. o + 8][0..2], .little);
-                const str_start = o + 8;
-                const byte_len = @as(usize, num_chars) * 2;
-                if (str_start + byte_len > chunk.len) return error.UnexpectedEof;
-                try writeUtf16LeJsonEscaped(w, chunk[str_start .. str_start + byte_len], num_chars);
-            },
-        }
+        try writeUtf16LeJsonEscaped(w, a.name.bytes, a.name.num_chars);
         try w.writeAll("\":");
         // Special-case SystemTime normalization like XML path
-        if (attrNameIsSystemTime(a.name, chunk)) {
+        if (attrNameIsSystemTime(a.name)) {
             var tmp: [256]u8 = undefined;
             var fbs = std.io.fixedBufferStream(&tmp);
             const aw = fbs.writer();

@@ -98,7 +98,7 @@ pub const Expander = struct {
         if (is_array) {
             try self.expandArrayValue(base_type, val, policy, out);
         } else {
-            try self.expandSingleValue(base_type, val, nd.pad_width, out);
+            try self.expandSingleValue(base_type, val, out);
         }
     }
 
@@ -106,7 +106,6 @@ pub const Expander = struct {
         self: *Expander,
         base_type: u8,
         val: types.TemplateValue,
-        pad_width: usize,
         out: *std.ArrayList(IR.Node),
     ) !void {
         // String types (0x01) are treated as Text nodes for proper XML escaping/joining
@@ -128,7 +127,6 @@ pub const Expander = struct {
                 .tag = .Value,
                 .vtype = val.t,
                 .vbytes = val.data,
-                .pad_width = pad_width,
             });
         }
     }
@@ -165,7 +163,7 @@ pub const Expander = struct {
             // Recursively handle single value logic for array items
             // Construct a temporary TemplateValue for the item
             const item_val = types.TemplateValue{ .t = base_type, .data = item_bytes };
-            try self.expandSingleValue(base_type, item_val, 0, out);
+            try self.expandSingleValue(base_type, item_val, out);
         }
     }
 
@@ -176,15 +174,9 @@ pub const Expander = struct {
         out: *std.ArrayList(IR.Node),
     ) !void {
         const child_elem = nd.elem.?;
-        // Use local values if defined (e.g. for nested structures), otherwise inherit
-        const effective_values = if (child_elem.local_values.len > 0)
-            child_elem.local_values
-        else
-            values;
-
         var sub_expander = Expander.init(self.ctx, self.allocator);
         // Pass pointer to child_elem since expand expects *const IR.Element
-        const expanded_child = sub_expander.expand(child_elem, effective_values) catch |err| return err;
+        const expanded_child = sub_expander.expand(child_elem, values) catch |err| return err;
 
         try out.append(self.allocator, .{ .tag = .Element, .elem = expanded_child });
     }

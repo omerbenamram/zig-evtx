@@ -49,9 +49,7 @@ pub const Builder = struct {
     /// Creates a minimal <Event/> element for empty records.
     fn buildEmpty(self: *Builder) !*IR.Element {
         const bytes: []u8 = try util.utf16FromAscii(self.allocator, "Event");
-        return IRMod.irNewElement(self.allocator, IR.Name{
-            .InlineUtf16 = .{ .bytes = bytes, .num_chars = 5 },
-        });
+        return IRMod.irNewElement(self.allocator, IR.Name{ .bytes = bytes, .num_chars = 5 });
     }
 
     /// Checks if the next token indicates a template instance.
@@ -66,14 +64,11 @@ pub const Builder = struct {
         // 1. Parse the element into IR
         const root = try binxml_parser.parseElementIR(self.ctx, chunk, r, self.allocator, .rec);
 
-        // 2. Expand values (trivial for regular elements, but standardizes flow)
-        var expander = Expander.init(self.ctx, self.allocator);
-        const expanded_root = try expander.expand(root, &[_]types.TemplateValue{});
+        // 2. Handle nested BinXML payloads (e.g., inside attributes or values)
+        // No need to run Expander for regular records as they don't have substitutions
+        try self.spliceNestedBinXml(chunk, root);
 
-        // 3. Handle nested BinXML payloads (e.g., inside attributes or values)
-        try self.spliceNestedBinXml(chunk, expanded_root);
-
-        return expanded_root;
+        return root;
     }
 
     /// Parses a template instance, looks up or parses the definition, and expands it.

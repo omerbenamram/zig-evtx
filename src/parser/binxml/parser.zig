@@ -260,7 +260,7 @@ fn parseAttributeListIR(
 
         // Parse Attribute Name
         const name = try readNameIRBounded(ctx, chunk, r, allocator, src, list_end, chunk_base);
-        if (log.enabled(.trace)) try binxml_name.logNameTrace(chunk, name, "attr");
+        if (log.enabled(.trace)) try binxml_name.logNameTrace(name, "attr");
 
         // Parse Attribute Value (sequence of tokens)
         var value_tokens = std.ArrayList(IR.Node).initCapacity(allocator, 0) catch unreachable;
@@ -308,7 +308,7 @@ fn collectValueTokensIRWithCtx(
         if (tokens.isToken(pk, tokens.TOK_NORMAL_SUBST) or tokens.isToken(pk, tokens.TOK_OPTIONAL_SUBST)) {
             const h = try readHeaderChecked(r, types.SubstitutionHeader, end_pos);
             const optional = tokens.isToken(h.token, tokens.TOK_OPTIONAL_SUBST);
-            try out.append(allocator, .{ .tag = .Subst, .subst_id = h.id, .subst_vtype = h.vtype, .subst_optional = optional, .pad_width = 0 });
+            try out.append(allocator, .{ .tag = .Subst, .subst_id = h.id, .subst_vtype = h.vtype, .subst_optional = optional });
             continue;
         }
 
@@ -413,21 +413,21 @@ fn parseValueToken(r: *Reader, out: *std.ArrayList(IR.Node), allocator: std.mem.
     // Ansi String (0x02)
     if (vtype == 0x02) {
         const payload = try r.readLenPrefixedSlice(u16, 1, end_pos);
-        try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload, .pad_width = 0 });
+        try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload });
         return;
     }
 
     // Fixed size types
     if (types.valueTypeFixedSize(vtype)) |sz| {
         const payload = try r.readFixedBytesBounded(sz, end_pos);
-        try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload, .pad_width = 0 });
+        try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload });
         return;
     }
 
     // Binary type (0x0e)
     if (vtype == 0x0e) {
         const payload = try r.readLenPrefixedSlice(u16, 1, end_pos);
-        try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload, .pad_width = 0 });
+        try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload });
         return;
     }
 
@@ -483,7 +483,7 @@ fn materializeNameFromChunkOffset(ctx: *Context, chunk: []const u8, off_u32: u32
 
     // Check cache first
     if (ctx.name_cache.get(off_u32)) |entry| {
-        return IR.Name{ .InlineUtf16 = .{ .bytes = entry.bytes, .num_chars = entry.num_chars } };
+        return IR.Name{ .bytes = entry.bytes, .num_chars = entry.num_chars };
     }
 
     // Allocate and cache new name
@@ -491,7 +491,7 @@ fn materializeNameFromChunkOffset(ctx: *Context, chunk: []const u8, off_u32: u32
     @memcpy(buf, chunk[str_start .. str_start + take_chars * 2]);
     try ctx.name_cache.put(off_u32, @import("context.zig").NameCacheEntry{ .bytes = buf, .num_chars = take_chars });
 
-    return IR.Name{ .InlineUtf16 = .{ .bytes = buf, .num_chars = take_chars } };
+    return IR.Name{ .bytes = buf, .num_chars = take_chars };
 }
 
 fn parseDefNameIR(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, chunk_base: usize) !IR.Name {
@@ -511,7 +511,7 @@ fn parseDefNameIR(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.m
         const buf = try allocator.alloc(u8, bytes);
         @memcpy(buf, view.utf16);
 
-        return IR.Name{ .InlineUtf16 = .{ .bytes = buf, .num_chars = view.num_chars } };
+        return IR.Name{ .bytes = buf, .num_chars = view.num_chars };
     }
 
     return materializeNameFromChunkOffset(ctx, chunk, name_off);
