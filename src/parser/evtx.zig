@@ -7,6 +7,29 @@ const alloc_mod = @import("alloc");
 const logger = @import("../logger.zig");
 const log = logger.scoped("evtx");
 
+// Simple buffering wrapper to replace std.io.BufferedWriter
+// In Zig 0.15, File.Writer already has buffering, so we just wrap it
+fn BufferedWriter(comptime buffer_size: usize, comptime W: type) type {
+    _ = buffer_size; // Not used since File.Writer handles buffering
+    return struct {
+        unbuffered_writer: W,
+
+        const Self = @This();
+
+        pub fn writer(self: *Self) *W {
+            return &self.unbuffered_writer;
+        }
+
+        pub fn flush(self: *Self) !void {
+            // In Zig 0.15, File.Writer buffers internally.
+            // We need to flush the underlying writer's interface.
+            // Get a mutable reference to the writer to flush it
+            var w_ptr: *W = @constCast(&self.unbuffered_writer);
+            w_ptr.interface.flush() catch {};
+        }
+    };
+}
+
 pub const ParserOptions = struct {
     validate_checksums: bool = true,
     // Verbosity levels:
@@ -39,7 +62,7 @@ pub fn OutputImpl(comptime W: type) type {
         mode: enum { xml, json_single, json_lines },
         scratch: std.ArrayList(u8),
         last_size_hint: usize,
-        bufw: std.io.BufferedWriter(1048576, W),
+        bufw: BufferedWriter(1048576, W),
         // Optional reusable rendering context provided by parser (per-chunk)
         ctx: ?*binxml.Context = null,
         // Exponential moving average of previous serialized sizes for pre-sizing
@@ -47,11 +70,13 @@ pub fn OutputImpl(comptime W: type) type {
         ema_alpha: f64 = 0.25,
 
         pub fn initXml(w: W) @This() {
-            return .{ .w = w, .mode = .xml, .scratch = std.ArrayList(u8).init(alloc_mod.get()), .last_size_hint = 4096, .bufw = std.io.BufferedWriter(1048576, W){ .unbuffered_writer = w } };
+            const scratch = std.ArrayList(u8).initCapacity(alloc_mod.get(), 0) catch unreachable;
+            return .{ .w = w, .mode = .xml, .scratch = scratch, .last_size_hint = 4096, .bufw = BufferedWriter(1048576, W){ .unbuffered_writer = w } };
         }
 
         pub fn initJson(w: W, json_mode: Output.JsonMode) @This() {
-            return .{ .w = w, .mode = if (json_mode == .single) .json_single else .json_lines, .scratch = std.ArrayList(u8).init(alloc_mod.get()), .last_size_hint = 4096, .bufw = std.io.BufferedWriter(1048576, W){ .unbuffered_writer = w } };
+            const scratch = std.ArrayList(u8).initCapacity(alloc_mod.get(), 0) catch unreachable;
+            return .{ .w = w, .mode = if (json_mode == .single) .json_single else .json_lines, .scratch = scratch, .last_size_hint = 4096, .bufw = BufferedWriter(1048576, W){ .unbuffered_writer = w } };
         }
 
         pub fn setContext(self: *@This(), c: *binxml.Context) void {
@@ -71,12 +96,12 @@ pub fn OutputImpl(comptime W: type) type {
             const max_cap: usize = 4 * 1024 * 1024; // clamp to 4 MiB retained capacity
             if (target > max_cap) target = max_cap;
             self.scratch.clearRetainingCapacity();
-            try self.scratch.ensureTotalCapacityPrecise(target);
+            try self.scratch.ensureTotalCapacityPrecise(alloc_mod.get(), target);
         }
 
         pub fn writeRecord(self: *@This(), record: EventRecordView) !void {
             try self.reserveScratch();
-            var bw = self.scratch.writer();
+            var bw = self.scratch.writer(alloc_mod.get());
             switch (self.mode) {
                 .xml => {
                     if (self.ctx) |ctx| {
@@ -123,7 +148,7 @@ pub fn OutputImpl(comptime W: type) type {
             }
             // Emit once to the buffered underlying writer and update size hint
             var outw = self.bufw.writer();
-            try outw.writeAll(self.scratch.items);
+            try outw.interface.writeAll(self.scratch.items);
             self.last_size_hint = self.scratch.items.len;
             // Update EMA for future reservations
             const cur_len_f: f64 = @floatFromInt(self.scratch.items.len);
@@ -136,7 +161,7 @@ pub fn OutputImpl(comptime W: type) type {
 
         pub fn serializeRecord(self: *@This(), record: EventRecordView) ![]const u8 {
             try self.reserveScratch();
-            var bw = self.scratch.writer();
+            var bw = self.scratch.writer(alloc_mod.get());
             switch (self.mode) {
                 .xml => {
                     if (self.ctx) |ctx| {
@@ -188,7 +213,9 @@ pub fn OutputImpl(comptime W: type) type {
         }
 
         pub fn flush(self: *@This()) void {
-            self.bufw.flush() catch {};
+            // Flush the underlying writer
+            var w_ptr: *W = @constCast(&self.w);
+            w_ptr.interface.flush() catch {};
         }
     };
 }
@@ -377,7 +404,8 @@ pub const EvtxParser = struct {
         var queue = try WorkQueue.init(self.allocator, q_cap);
         defer queue.deinit(self.allocator);
 
-        var stdout_file = std.io.getStdOut();
+        var stdout_file = std.fs.File.stdout();
+        var write_buf: [8192]u8 = undefined;
         var write_mutex: std.Thread.Mutex = .{};
 
         // Shared counters for skip and max limits
@@ -389,7 +417,7 @@ pub const EvtxParser = struct {
             parser: *EvtxParser,
             out_kind: OutKind,
             queue: *WorkQueue,
-            stdout_writer: @TypeOf(stdout_file.writer()),
+            stdout_writer: std.fs.File.Writer,
             write_mutex: *std.Thread.Mutex,
             emitted: *usize,
             skipped: *usize,
@@ -423,9 +451,9 @@ pub const EvtxParser = struct {
                     const has_limits = (self_.parser.opts.max_records != 0) or (self_.parser.opts.skip_first > 0);
                     if (!has_limits) {
                         // Fast path: no global limits, render the whole chunk to a local buffer, then single write
-                        var chunk_out = std.ArrayList(u8).init(alloc_mod.get());
-                        defer chunk_out.deinit();
-                        _ = chunk_out.ensureTotalCapacityPrecise(96 * 1024) catch {};
+                        var chunk_out = std.ArrayList(u8).initCapacity(alloc_mod.get(), 0) catch return;
+                        defer chunk_out.deinit(alloc_mod.get());
+                        _ = chunk_out.ensureTotalCapacityPrecise(alloc_mod.get(), 96 * 1024) catch {};
                         while (rec_iter.next() catch null) |rec| {
                             if (self_.parser.opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
                             const view = EventRecordView{ .id = rec.identifier, .timestamp_filetime = rec.written_time, .raw_xml = rec.binxml, .chunk_buf = rec.chunk_buf };
@@ -433,12 +461,12 @@ pub const EvtxParser = struct {
                                 log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
                                 continue;
                             };
-                            chunk_out.appendSlice(bytes) catch {
+                            chunk_out.appendSlice(alloc_mod.get(), bytes) catch {
                                 continue;
                             };
                         }
                         self_.write_mutex.lock();
-                        _ = self_.stdout_writer.writeAll(chunk_out.items) catch {};
+                        _ = self_.stdout_writer.interface.writeAll(chunk_out.items) catch {};
                         self_.write_mutex.unlock();
                     } else {
                         var selected_including_skips: usize = 0;
@@ -463,7 +491,7 @@ pub const EvtxParser = struct {
                                 emitting = false;
                                 continue;
                             }
-                            _ = self_.stdout_writer.writeAll(bytes2) catch {
+                            _ = self_.stdout_writer.interface.writeAll(bytes2) catch {
                                 continue;
                             };
                             if (self_.parser.opts.max_records != 0) {
@@ -488,7 +516,7 @@ pub const EvtxParser = struct {
                 .parser = self,
                 .out_kind = out_kind,
                 .queue = &queue,
-                .stdout_writer = stdout_file.writer(),
+                .stdout_writer = stdout_file.writer(&write_buf),
                 .write_mutex = &write_mutex,
                 .emitted = &emitted_count,
                 .skipped = &skipped_count,
@@ -547,7 +575,7 @@ pub const RecordStream = struct {
     selected_including_skips: usize = 0,
     emitted: usize = 0,
 
-    /// Adapter to satisfy `reader.readNoEof` for FileHeader/Chunk readers.
+    /// Adapter to satisfy `reader.interface.streamExact` for FileHeader/Chunk readers.
     pub fn readNoEof(self: *RecordStream, buf: []u8) !void {
         return self.read_fn(self.read_ctx, buf);
     }
@@ -640,7 +668,7 @@ const FileHeader = struct {
 
     fn read(reader: anytype) !FileHeader {
         var buf: [4096]u8 = undefined;
-        try reader.readNoEof(&buf);
+        try reader.interface.readSliceAll(&buf);
         if (!std.mem.eql(u8, buf[0..8], "ElfFile\x00")) return error.BadSignature;
         const first_chunk = std.mem.readInt(u64, buf[8..16], .little);
         const last_chunk = std.mem.readInt(u64, buf[16..24], .little);
@@ -683,7 +711,7 @@ const Chunk = struct {
 
     fn read(reader: anytype) !Chunk {
         var buf: [65536]u8 = undefined;
-        try reader.readNoEof(&buf);
+        try reader.interface.readSliceAll(&buf);
         const h = try ChunkHeader.parse(&buf);
         return .{ .header = h, .buf = buf };
     }
@@ -790,20 +818,20 @@ pub const EventRecordView = struct {
         // Buffer per-record output to avoid leaking partial garbage on failures
         var ctx = try binxml.Context.init(alloc_mod.get());
         defer ctx.deinit();
-        var buf = std.ArrayList(u8).init(alloc_mod.get());
-        defer buf.deinit();
-        var bw = buf.writer();
+        var buf = std.ArrayList(u8).initCapacity(alloc_mod.get(), 0) catch return;
+        defer buf.deinit(alloc_mod.get());
+        var bw = buf.writer(alloc_mod.get());
         try render_xml.renderXmlWithContext(&ctx, self.chunk_buf, self.raw_xml, bw);
         try bw.writeByte('\n');
-        try w.writeAll(buf.items);
+        try w.interface.writeAll(buf.items);
     }
 
     const JsonOutMode = enum { single, lines };
     fn writeJson(self: *const EventRecordView, w: anytype) !void {
         // Buffer full JSON object per record to avoid corrupting stream on errors
-        var buf = std.ArrayList(u8).init(alloc_mod.get());
-        defer buf.deinit();
-        var bw = buf.writer();
+        var buf = std.ArrayList(u8).initCapacity(alloc_mod.get(), 0) catch return;
+        defer buf.deinit(alloc_mod.get());
+        var bw = buf.writer(alloc_mod.get());
         try bw.writeAll("{");
         try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ self.id, self.timestamp_filetime });
         var ctx = try binxml.Context.init(alloc_mod.get());
@@ -812,6 +840,6 @@ pub const EventRecordView = struct {
         const root = try builder.buildExpandedElementTree(self.chunk_buf, self.raw_xml);
         try render_json.renderElementJson(self.chunk_buf, root, ctx.arena.allocator(), bw);
         try bw.writeAll("}\n");
-        try w.writeAll(buf.items);
+        try w.interface.writeAll(buf.items);
     }
 };

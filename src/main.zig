@@ -23,7 +23,9 @@ pub fn main() !void {
     var threads_opt: ?usize = null;
 
     while (args_iter.next()) |arg| {
-        if (std.mem.eql(u8, arg, "-o")) {
+        if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+            usage();
+        } else if (std.mem.eql(u8, arg, "-o")) {
             const mode = args_iter.next() orelse return error.InvalidArgs;
             if (std.mem.eql(u8, mode, "xml")) output_mode = .xml else if (std.mem.eql(u8, mode, "json")) output_mode = .json else if (std.mem.eql(u8, mode, "jsonl")) output_mode = .jsonl else return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "-v")) {
@@ -55,7 +57,8 @@ pub fn main() !void {
     var file = try fs.cwd().openFile(in_path, .{ .mode = .read_only });
     defer file.close();
 
-    var reader = file.reader();
+    var read_buf: [8192]u8 = undefined;
+    var reader = file.reader(&read_buf);
 
     var parser = try evtx.EvtxParser.init(allocator, .{ .validate_checksums = validate_checksums, .verbosity = verbosity, .max_records = max_records, .skip_first = skip_first });
     defer parser.deinit();
@@ -65,10 +68,12 @@ pub fn main() !void {
     if (num_threads == 0) num_threads = 1;
 
     if (num_threads <= 1) {
+        var write_buf: [8192]u8 = undefined;
+        var stdout_file = std.fs.File.stdout();
         var output = switch (output_mode) {
-            .xml => evtx.Output.xml(std.io.getStdOut().writer()),
-            .json => evtx.Output.json(std.io.getStdOut().writer(), .single),
-            .jsonl => evtx.Output.json(std.io.getStdOut().writer(), .lines),
+            .xml => evtx.Output.xml(stdout_file.writer(&write_buf)),
+            .json => evtx.Output.json(stdout_file.writer(&write_buf), .single),
+            .jsonl => evtx.Output.json(stdout_file.writer(&write_buf), .lines),
         };
         try parser.parse(&reader, &output);
         output.flush();
@@ -83,8 +88,12 @@ pub fn main() !void {
 }
 
 fn usage() noreturn {
-    const w = std.io.getStdErr().writer();
-    w.print("Usage: evtx_dump_zig [-v|-vv|-vvv] [-o xml|json|jsonl] [-s N] [-n N] [-t NUM_THREADS] <file.evtx>\n", .{}) catch {};
+    const msg = "Usage: evtx_dump_zig [-v|-vv|-vvv] [-o xml|json|jsonl] [-s N] [-n N] [-t NUM_THREADS] <file.evtx>\n";
+    var stderr_file = std.fs.File.stderr();
+    var write_buf: [256]u8 = undefined;
+    var w = stderr_file.writer(&write_buf);
+    _ = w.interface.writeAll(msg) catch {};
+    w.interface.flush() catch {};
     std.process.exit(2);
 }
 

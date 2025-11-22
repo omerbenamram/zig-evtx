@@ -90,7 +90,7 @@ make record FILE=samples/system.evtx N=5       # by ordinal position
 
 The parser implements basic EVTX file and chunk parsing with partial Binary XML support. See TODO.md for pending implementation items including:
 - Complete Binary XML token framework
-- Full template system implementation  
+- Full template system implementation
 - Type conversions (GUID, FILETIME, SID, etc.)
 - Output parity with evtx_dump
 
@@ -100,3 +100,10 @@ The project uses comparison testing against the Rust `evtx_dump` tool:
 - XML normalization for fair comparison (expanding self-closing tags, removing prologs)
 - Record-by-record comparison via Python diff script
 - Test samples in `samples/` directory covering various EVTX file types
+
+## Core principles
+- Deterministic paths only: For each token and structure, parse exactly the fields the spec mandates in that context. No probing, no retrying, no alternative interpretations.
+- Minimal explicit context: If the spec defines multiple valid encodings depending on nesting (e.g., Binary XML substitution vs normal element start), capture that as an explicit, single-bit context (e.g., `ParseContext` in [src/binary_xml.zig](mdc:src/binary_xml.zig)). Do not infer context from bytes by trying multiple parses.
+- No fallbacks: If parsing fails under the selected spec-defined path, propagate the error. Do not re-parse with a different interpretation.
+- No heuristics: Do not "peek and guess" or validate by attempting different layouts. If it is not disambiguated by spec and state, the input is invalid.
+- Span checks are authoritative: Sizes (e.g., `data_size`) define the canonical boundary of structures. Always compute `expected_end` deterministically and verify cursor position matches. Mismatches are errors.

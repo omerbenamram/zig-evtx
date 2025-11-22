@@ -25,7 +25,7 @@ pub const PythonModuleOptions = struct {
     root_source_file: std.Build.LazyPath,
     limited_api: bool = true,
     target: std.Target.Query,
-    optimize: std.builtin.Mode,
+    optimize: std.builtin.OptimizeMode,
     main_pkg_path: ?std.Build.LazyPath = null,
 
     pub fn short_name(self: *const PythonModuleOptions) [:0]const u8 {
@@ -130,10 +130,13 @@ pub const PydustStep = struct {
                 pyconf.addOption(bool, "limited_api", false);
                 pyconf.addOption([]const u8, "hexversion", hexversion);
 
-                const testdebug = b.addTest(.{
+                const testdebug_root_mod = b.createModule(.{
                     .root_source_file = b.path(root),
                     .target = b.resolveTargetQuery(.{}),
                     .optimize = .Debug,
+                });
+                const testdebug = b.addTest(.{
+                    .root_module = testdebug_root_mod,
                 });
                 testdebug.root_module.addOptions("pyconf", pyconf);
                 const testdebug_module = b.createModule(.{
@@ -169,12 +172,15 @@ pub const PydustStep = struct {
         pyconf.addOption([]const u8, "hexversion", self.hexversion);
 
         // Configure and install the Python module shared library
-        const lib = b.addSharedLibrary(.{
-            .name = short_name,
+        const lib_root_mod = b.createModule(.{
             .root_source_file = options.root_source_file,
             .target = b.resolveTargetQuery(options.target),
             .optimize = options.optimize,
-            //.main_pkg_path = options.main_pkg_path,
+        });
+        const lib = b.addLibrary(.{
+            .linkage = .dynamic,
+            .name = short_name,
+            .root_module = lib_root_mod,
         });
         lib.root_module.addOptions("pyconf", pyconf);
         const lib_module = b.createModule(.{
@@ -208,11 +214,13 @@ pub const PydustStep = struct {
         self.generate_stubs.dependOn(&stubs.step);
 
         // Configure a test runner for the module
-        const libtest = b.addTest(.{
+        const libtest_root_mod = b.createModule(.{
             .root_source_file = options.root_source_file,
-            // .main_pkg_path = options.main_pkg_path,
             .target = b.resolveTargetQuery(options.target),
             .optimize = options.optimize,
+        });
+        const libtest = b.addTest(.{
+            .root_module = libtest_root_mod,
         });
         libtest.root_module.addOptions("pyconf", pyconf);
         const libtest_module = b.createModule(.{

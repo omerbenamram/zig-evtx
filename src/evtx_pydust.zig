@@ -10,7 +10,8 @@ pub const __doc__ = "EVTX Python bindings";
 fn file_read_cb(ctx_ptr: *anyopaque, buf: []u8) !void {
     const self: *IterDef = @ptrCast(@alignCast(ctx_ptr));
     var f = self.infile orelse return error.EndOfStream;
-    try f.reader().readNoEof(buf);
+    var reader = f.reader(&self.read_buf);
+    try reader.interface.readSliceAll(buf);
 }
 
 fn bytes_read_cb(ctx_ptr: *anyopaque, out_buf: []u8) !void {
@@ -54,6 +55,7 @@ const IterDef = struct {
     stream: ?evtx.RecordStream = null,
     buf: std.ArrayList(u8) = undefined,
     infile: ?std.fs.File = null,
+    read_buf: [8192]u8 = undefined,
 
     // For from_bytes
     bytes_data: []const u8 = &[_]u8{},
@@ -94,7 +96,7 @@ const IterDef = struct {
             args.format,
         );
         self.stream = stream;
-        self.buf = std.ArrayList(u8).init(allocator);
+        self.buf = std.ArrayList(u8).initCapacity(allocator, 0) catch return;
     }
 
     pub fn __del__(self: *IterDef) void {
@@ -141,7 +143,7 @@ const IterDef = struct {
         var self = try py.alloc(Root, IterDef);
         self.* = .{
             .stream = null,
-            .buf = std.ArrayList(u8).init(allocator),
+            .buf = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable,
             .infile = null,
             .bytes_data = &[_]u8{},
             .bytes_pos = 0,
@@ -199,7 +201,7 @@ const IterDef = struct {
         var self = try py.alloc(Root, IterDef);
         self.* = .{
             .stream = null,
-            .buf = std.ArrayList(u8).init(allocator),
+            .buf = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable,
             .infile = null,
             .bytes_data = &[_]u8{},
             .bytes_pos = 0,
@@ -256,10 +258,11 @@ pub fn dump_file_bytes(args: struct {
     const allocator = alloc_mod.get();
     var infile = try std.fs.cwd().openFile(args.path, .{ .mode = .read_only });
     defer infile.close();
-    var reader = infile.reader();
+    var read_buf: [8192]u8 = undefined;
+    var reader = infile.reader(&read_buf);
 
-    var buf = std.ArrayList(u8).init(allocator);
-    const out_writer = buf.writer();
+    var buf = std.ArrayList(u8).initCapacity(allocator, 0) catch return;
+    const out_writer = buf.writer(allocator);
 
     var parser = try evtx.EvtxParser.init(allocator, .{
         .validate_checksums = args.validate_checksums,
@@ -301,11 +304,13 @@ pub fn dump_file_to_file(args: struct {
 
     var infile = try std.fs.cwd().openFile(args.path, .{ .mode = .read_only });
     defer infile.close();
-    var reader = infile.reader();
+    var read_buf: [8192]u8 = undefined;
+    var reader = infile.reader(&read_buf);
 
     var outfile = try std.fs.cwd().createFile(args.out_path, .{ .truncate = true });
     defer outfile.close();
-    const out_writer = outfile.writer();
+    var write_buf: [8192]u8 = undefined;
+    const out_writer = outfile.writer(&write_buf);
 
     var parser = try evtx.EvtxParser.init(allocator, .{
         .validate_checksums = args.validate_checksums,

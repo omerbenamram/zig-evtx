@@ -783,10 +783,10 @@ fn runMatrixCase(mode: Mode, id: CaseId) !void {
     defer alloc.free(bytes);
     const num_chars = bytes.len / 2;
 
-    var out_a = std.ArrayList(u8).init(alloc);
+    var out_a = std.ArrayList(u8).initCapacity(alloc, 0) catch unreachable;
     defer out_a.deinit();
-    var out_b = std.ArrayList(u8).init(alloc);
-    defer out_b.deinit();
+    var out_b = std.ArrayList(u8).initCapacity(alloc, 0) catch unreachable;
+    defer out_b.deinit(alloc);
 
     switch (mode) {
         .xml => {

@@ -1,6 +1,7 @@
 // Reader drives Binary XML token parsing for one buffer slice (record or template definition).
 const BinXmlError = @import("err.zig").BinXmlError;
 const tokens = @import("binxml/tokens.zig");
+const types = @import("binxml/types.zig");
 
 const std = @import("std");
 
@@ -16,43 +17,78 @@ pub const Reader = struct {
         return self.buf.len - self.pos;
     }
 
-    pub inline fn peekU8(self: *const Reader) !u8 {
+    pub fn readInt(self: *Reader, comptime T: type) !T {
+        const size = @sizeOf(T);
+        if (self.pos + size > self.buf.len) return BinXmlError.UnexpectedEof;
+        const val = std.mem.readInt(T, self.buf[self.pos..][0..size], .little);
+        self.pos += size;
+        return val;
+    }
+
+    pub fn readByte(self: *Reader) !u8 {
+        return self.readInt(u8);
+    }
+
+    pub fn peekByte(self: *const Reader) !u8 {
         if (self.pos >= self.buf.len) return BinXmlError.UnexpectedEof;
         return self.buf[self.pos];
     }
 
+    // Generic struct reader using reflection
+    pub fn readStruct(self: *Reader, comptime T: type) !T {
+        var result: T = undefined;
+        inline for (std.meta.fields(T)) |field| {
+            @field(result, field.name) = try self.readAny(field.type);
+        }
+        return result;
+    }
+
+    fn readAny(self: *Reader, comptime T: type) !T {
+        const type_info = @typeInfo(T);
+        switch (type_info) {
+            .int => return self.readInt(T),
+            .@"enum" => {
+                const TagType = type_info.@"enum".tag_type;
+                const val = try self.readInt(TagType);
+                return std.meta.intToEnum(T, val) catch return BinXmlError.BadToken;
+            },
+            .@"struct" => return self.readStruct(T),
+            .array => |arr_info| {
+                var arr: T = undefined;
+                for (&arr) |*elem| {
+                    elem.* = try self.readAny(arr_info.child);
+                }
+                return arr;
+            },
+            else => @compileError("Unsupported type in readAny: " ++ @typeName(T)),
+        }
+    }
+
+    pub inline fn peekU8(self: *const Reader) !u8 {
+        return self.peekByte();
+    }
+
     pub inline fn readU8(self: *Reader) !u8 {
-        if (self.pos >= self.buf.len) return BinXmlError.UnexpectedEof;
-        const b = self.buf[self.pos];
-        self.pos += 1;
-        return b;
+        return self.readByte();
     }
 
     pub inline fn readU16le(self: *Reader) !u16 {
-        if (self.pos + 2 > self.buf.len) return BinXmlError.UnexpectedEof;
-        const v = std.mem.readInt(u16, self.buf[self.pos .. self.pos + 2][0..2], .little);
-        self.pos += 2;
-        return v;
+        return self.readInt(u16);
     }
 
     pub inline fn readU32le(self: *Reader) !u32 {
-        if (self.pos + 4 > self.buf.len) return BinXmlError.UnexpectedEof;
-        const v = std.mem.readInt(u32, self.buf[self.pos .. self.pos + 4][0..4], .little);
-        self.pos += 4;
-        return v;
+        return self.readInt(u32);
     }
 
     pub fn readGuid(self: *Reader) ![16]u8 {
-        if (self.pos + 16 > self.buf.len) return BinXmlError.UnexpectedEof;
-        var g: [16]u8 = undefined;
-        @memcpy(&g, self.buf[self.pos .. self.pos + 16]);
-        self.pos += 16;
-        return g;
+        const g = try self.readStruct(types.GuidBytes);
+        return g.bytes;
     }
 
     pub fn readLenPrefixedBytes16(self: *Reader) ![]const u8 {
         if (self.rem() < 2) return BinXmlError.UnexpectedEof;
-        const blen = try self.readU16le();
+        const h = try self.readStruct(types.NameLengthHeader);
+        const blen = h.len;
         if (self.rem() < blen) return BinXmlError.UnexpectedEof;
         const slice = self.buf[self.pos .. self.pos + blen];
         self.pos += blen;
@@ -85,9 +121,8 @@ pub const Reader = struct {
     }
 
     pub fn readInlineName(self: *Reader) !struct { utf16: []const u8, num_chars: usize } {
-        _ = try self.readU32le(); // unknown
-        _ = try self.readU16le(); // hash
-        const num = try self.readU16le();
+        const header = try self.readStruct(types.NameHeader);
+        const num = header.num_chars;
         const bytes = @as(usize, num) * 2;
         if (self.pos + bytes > self.buf.len) return BinXmlError.UnexpectedEof;
         const slice = self.buf[self.pos .. self.pos + bytes];
@@ -97,7 +132,8 @@ pub const Reader = struct {
 
     pub fn readUnicodeTextString(self: *Reader) ![]const u8 {
         // Unicode text string: 2 bytes num chars, then UTF-16LE string without EOS
-        const num_chars = try self.readU16le();
+        const header = try self.readStruct(types.NameLengthHeader);
+        const num_chars = header.len;
         const byte_len = @as(usize, num_chars) * 2;
         if (self.pos + byte_len > self.buf.len) return BinXmlError.UnexpectedEof;
         const slice = self.buf[self.pos .. self.pos + byte_len];
@@ -107,7 +143,8 @@ pub const Reader = struct {
 
     pub fn readUnicodeTextStringBounded(self: *Reader, end_pos: usize) ![]const u8 {
         if (self.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
-        const num_chars = try self.readU16le();
+        const header = try self.readStruct(types.NameLengthHeader);
+        const num_chars = header.len;
         const byte_len = @as(usize, num_chars) * 2;
         if (self.pos + byte_len > end_pos) return BinXmlError.UnexpectedEof;
         const slice = self.buf[self.pos .. self.pos + byte_len];
@@ -117,7 +154,8 @@ pub const Reader = struct {
 
     pub fn readLenPrefixedBytes16Bounded(self: *Reader, end_pos: usize) ![]const u8 {
         if (self.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
-        const blen = try self.readU16le();
+        const header = try self.readStruct(types.NameLengthHeader);
+        const blen = header.len;
         if (self.pos + @as(usize, blen) > end_pos) return BinXmlError.UnexpectedEof;
         const slice = self.buf[self.pos .. self.pos + blen];
         self.pos += blen;
@@ -155,7 +193,7 @@ pub const Reader = struct {
     pub fn readNumCharsUtf16OptionalPrefixView(self: *Reader) !struct { utf16: []const u8, num_chars: usize } {
         if (self.rem() >= 4) {
             const saveA = self.pos;
-            _ = try self.readU16le();
+            _ = try self.readStruct(types.NameLengthHeader);
             // Attempt prefixed form: treat next u16 as num-chars and read the UTF-16 string
             if (self.readLenPrefixedUtf16TrimEos()) |v| return v else |_| self.pos = saveA;
         }
@@ -167,7 +205,8 @@ pub const Reader = struct {
     // then that many bytes. If an immediate trailing UTF-16 NUL follows, consume it.
     // Returns a view into the buffer and the number of characters.
     pub fn readLenPrefixedUtf16TrimEos(self: *Reader) !struct { utf16: []const u8, num_chars: usize } {
-        const num = try self.readU16le();
+        const header = try self.readStruct(types.NameLengthHeader);
+        const num = header.len;
         const bytes = @as(usize, num) * 2;
         if (self.rem() < bytes) return BinXmlError.UnexpectedEof;
         const slice = self.buf[self.pos .. self.pos + bytes];
@@ -182,9 +221,8 @@ pub const Reader = struct {
     // Inline NameLink definition used in template definitions; includes next/hash and aligns to end-of-block
     pub fn readTemplateNameLinkInlineView(self: *Reader) !struct { utf16: []const u8, num_chars: usize } {
         const inl_start = self.pos;
-        _ = try self.readU32le(); // next string
-        _ = try self.readU16le(); // name hash
-        const num = try self.readU16le();
+        const header = try self.readStruct(types.NameHeader);
+        const num = header.num_chars;
         const bytes = @as(usize, num) * 2;
         if (self.rem() < bytes) return BinXmlError.UnexpectedEof;
         const slice_src = self.buf[self.pos .. self.pos + bytes];
@@ -194,20 +232,34 @@ pub const Reader = struct {
         return .{ .utf16 = slice_src, .num_chars = num };
     }
 
-    pub const TemplateInstanceHeader = struct { def_data_off: u32 };
+    pub const TemplateInstanceHeader = struct {
+        def_data_off: u32,
+    };
 
     pub fn readTemplateInstanceHeader(self: *Reader) !TemplateInstanceHeader {
         // Caller should have peeked TOK_TEMPLATE_INSTANCE; be tolerant and just consume
         const tag = try self.readU8();
         if ((tag & 0x1f) != tokens.TOK_TEMPLATE_INSTANCE) return BinXmlError.BadToken;
+        // Template instance layout:
+        //   1 byte  : unknown/version
+        //   4 bytes : template identifier (ignored here)
+        //   4 bytes : template definition data offset (chunk-relative)
+        // Followed optionally by an inline template definition if def_data_off == current pos.
         if (self.rem() < 1 + 4 + 4) return BinXmlError.UnexpectedEof;
-        _ = try self.readU8(); // unknown
+        _ = try self.readU8(); // unknown/version
         _ = try self.readU32le(); // template id
         const def_data_off = try self.readU32le();
+
+        // Inline template definition: definition data is embedded immediately after the header.
+        // def_data_off then points to the current reader position.
         if (def_data_off == @as(u32, @intCast(self.pos))) {
+            // TemplateDefinition data header:
+            //   4 bytes : next_offset
+            //   16 bytes: GUID
+            //   4 bytes : data_size
             if (self.rem() < 24) return BinXmlError.UnexpectedEof;
-            _ = try self.readU32le();
-            _ = try self.readGuid();
+            _ = try self.readU32le(); // next_offset
+            _ = try self.readGuid(); // GUID (16 bytes)
             const data_size_inline = try self.readU32le();
             if (self.rem() < data_size_inline) return BinXmlError.UnexpectedEof;
             self.pos += @as(usize, data_size_inline);

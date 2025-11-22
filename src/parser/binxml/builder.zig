@@ -9,6 +9,8 @@ const types = @import("types.zig");
 const tokens = @import("tokens.zig");
 const common = @import("common.zig");
 const util = @import("../util.zig");
+const logger = @import("../../logger.zig");
+const log = logger.scoped("binxml");
 
 // Thin convenience facade: parse + expand to a fully expanded IR tree.
 // For now this forwards to core functions in binxml.zig via Parser/Expander wrappers.
@@ -83,6 +85,9 @@ pub const Builder = struct {
         const def_off_usize: usize = @intCast(def_data_off);
         if (def_off_usize + 24 > chunk.len) return error.OutOfBounds;
         const td_data_size = std.mem.readInt(u32, chunk[def_off_usize + 20 .. def_off_usize + 24][0..4], .little);
+        if (log.enabled(.trace)) {
+            log.trace("tmpl def_data_off=0x{x} def_off_usize=0x{x} td_data_size=0x{x}", .{ def_data_off, def_off_usize, td_data_size });
+        }
         const data_start = def_off_usize + 24;
         const data_end = data_start + @as(usize, td_data_size);
         if (data_end > chunk.len or data_start >= chunk.len) return error.OutOfBounds;
@@ -107,11 +112,11 @@ pub const Builder = struct {
             const vals = try @import("parser.zig").parseTemplateInstanceValuesExpected(&r, alloc, expected);
             var expander = Expander.init(ctx, alloc);
             const expanded_child = try expander.expandElementWithValues(child_def, vals);
-            try out.append(.{ .tag = .Element, .elem = expanded_child });
+            try out.append(alloc, .{ .tag = .Element, .elem = expanded_child });
         }
     }
     fn spliceEvtXmlAll(ctx: *Context, chunk: []const u8, el: *IR.Element, alloc: std.mem.Allocator) !void {
-        var staged_attr_children = std.ArrayList(IR.Node).init(alloc);
+        var staged_attr_children = std.ArrayList(IR.Node).initCapacity(alloc, 0) catch unreachable;
         var ai: usize = 0;
         while (ai < el.attrs.items.len) : (ai += 1) {
             const a = el.attrs.items[ai];
@@ -123,28 +128,28 @@ pub const Builder = struct {
                 }
             }
         }
-        var new_children = std.ArrayList(IR.Node).init(alloc);
-        if (el.children.items.len > 0) try new_children.ensureTotalCapacityPrecise(el.children.items.len + staged_attr_children.items.len);
+        var new_children = std.ArrayList(IR.Node).initCapacity(alloc, 0) catch unreachable;
+        if (el.children.items.len > 0) try new_children.ensureTotalCapacityPrecise(alloc, el.children.items.len + staged_attr_children.items.len);
         var ci: usize = 0;
         while (ci < el.children.items.len) : (ci += 1) {
             const nd = el.children.items[ci];
             switch (nd.tag) {
                 .Element => {
                     try spliceEvtXmlAll(ctx, chunk, nd.elem.?, alloc);
-                    try new_children.append(nd);
+                    try new_children.append(alloc, nd);
                 },
                 .Value => {
                     if ((nd.vtype & 0x7f) == 0x21 and nd.vbytes.len > 0) {
                         try collectEvtXmlPayloadChildren(ctx, chunk, nd.vbytes, alloc, &new_children);
                     } else {
-                        try new_children.append(nd);
+                        try new_children.append(alloc, nd);
                     }
                 },
-                else => try new_children.append(nd),
+                else => try new_children.append(alloc, nd),
             }
         }
         var k: usize = 0;
-        while (k < staged_attr_children.items.len) : (k += 1) try new_children.append(staged_attr_children.items[k]);
+        while (k < staged_attr_children.items.len) : (k += 1) try new_children.append(alloc, staged_attr_children.items[k]);
         el.children = new_children;
     }
     // utf16FromAscii moved to util.zig

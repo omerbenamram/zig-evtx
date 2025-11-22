@@ -13,12 +13,11 @@ fn makeUtf16FromAscii(alloc: std.mem.Allocator, ascii: []const u8) ![]u8 {
 
 const DevNullWriter = struct {
     pub const Error = error{};
-    pub const Writer = std.io.Writer(*DevNullWriter, Error, write);
-    pub fn writer(self: *DevNullWriter) Writer {
-        return .{ .context = self };
+    pub fn writer(self: *DevNullWriter) std.io.AnyWriter {
+        return .{ .context = self, .writeFn = write };
     }
-    fn write(self: *DevNullWriter, bytes: []const u8) Error!usize {
-        _ = self;
+    fn write(ctx: *const anyopaque, bytes: []const u8) anyerror!usize {
+        _ = ctx;
         if (bytes.len > 0) {
             var tmp: u8 = 0;
             const vp: *volatile u8 = &tmp;
@@ -30,7 +29,7 @@ const DevNullWriter = struct {
 
 // Prebuilt input and writer to avoid per-iteration allocations
 var g_dev: DevNullWriter = .{};
-var g_writer: DevNullWriter.Writer = undefined;
+var g_writer: @TypeOf(g_dev.writer()) = undefined;
 var g_utf: []u8 = &[_]u8{};
 var g_num_chars: usize = 0;
 
@@ -40,9 +39,9 @@ fn beforeAll() void {
     const alloc = gpa.allocator();
     g_writer = g_dev.writer();
     const ascii_text = "A & B < C > D 'E' \"F\" and a long ASCII paragraph to stress escaping. ";
-    var list = std.ArrayList(u8).init(alloc);
+    var list = std.ArrayList(u8).initCapacity(alloc, 0) catch @panic("alloc");
     // build once, reuse across iterations
-    for (0..16384) |_| list.appendSlice(ascii_text) catch @panic("alloc");
+    for (0..16384) |_| list.appendSlice(alloc, ascii_text) catch @panic("alloc");
     g_utf = makeUtf16FromAscii(alloc, list.items) catch @panic("alloc");
     g_num_chars = g_utf.len / 2;
 
@@ -72,5 +71,8 @@ pub fn main() !void {
     defer bench.deinit();
     try bench.add("utf16 xml escaped new ascii", bench_new_ascii, .{});
     try bench.add("utf16 xml escaped simd ascii", bench_simd_ascii, .{});
-    try bench.run(std.io.getStdOut().writer());
+    var write_buf: [8192]u8 = undefined;
+    var stdout_file = std.fs.File.stdout();
+    var stdout_writer = stdout_file.writer(&write_buf);
+    try bench.run(&stdout_writer.interface);
 }

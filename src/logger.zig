@@ -130,10 +130,13 @@ fn writePrefix(w: anytype, lvl: Level, module: []const u8) !void {
 
 fn logInternal(module: []const u8, lvl: Level, comptime fmt: []const u8, args: anytype) void {
     if (!shouldLog(module, lvl)) return;
-    var stderr = std.io.getStdErr().writer();
-    writePrefix(stderr, lvl, module) catch return;
-    stderr.print(fmt, args) catch return;
-    stderr.writeByte('\n') catch {};
+    var buf: [4096]u8 = undefined;
+    var fbs = std.io.fixedBufferStream(&buf);
+    var writer = fbs.writer();
+    writePrefix(writer, lvl, module) catch return;
+    writer.print(fmt, args) catch return;
+    writer.writeByte('\n') catch {};
+    std.fs.File.stderr().writeAll(fbs.getWritten()) catch {};
 }
 
 pub const Logger = struct {

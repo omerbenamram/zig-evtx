@@ -2,7 +2,8 @@
 alwaysApply: true
 ---
 # zig
-- we are using zig 0.14.1
+- we are using zig 0.15.2
+- use `zigdoc` to look up Zig standard library API documentation (e.g., `zigdoc std.fs.File.reader`)
 
 # Usage of the Makefile
 - You must use the @Makefile to run build commands.

@@ -19,19 +19,19 @@ pub const Expander = struct {
     pub fn expandElementWithValues(self: *Expander, src: *const IR.Element, values: []const types.TemplateValue) !*IR.Element {
         const dst = try IRModule.irNewElement(self.allocator, src.name);
         // Pre-size destination containers based on source sizes
-        if (src.attrs.items.len > 0) try dst.attrs.ensureTotalCapacityPrecise(src.attrs.items.len);
+        if (src.attrs.items.len > 0) try dst.attrs.ensureTotalCapacityPrecise(self.allocator, src.attrs.items.len);
         // attributes
         var ai: usize = 0;
         while (ai < src.attrs.items.len) : (ai += 1) {
             const a = src.attrs.items[ai];
             const expanded = try cloneNodesReplacingSubstWithPolicy(self.ctx, .Attr, self.allocator, a.value.items, values);
-            try dst.attrs.append(.{ .name = a.name, .value = expanded });
+            try dst.attrs.append(self.allocator, .{ .name = a.name, .value = expanded });
         }
         // children
         const expanded_children = try cloneNodesReplacingSubstWithPolicy(self.ctx, .Text, self.allocator, src.children.items, values);
-        if (expanded_children.items.len > 0) try dst.children.ensureTotalCapacityPrecise(expanded_children.items.len);
+        if (expanded_children.items.len > 0) try dst.children.ensureTotalCapacityPrecise(self.allocator, expanded_children.items.len);
         var ci: usize = 0;
-        while (ci < expanded_children.items.len) : (ci += 1) try dst.children.append(expanded_children.items[ci]);
+        while (ci < expanded_children.items.len) : (ci += 1) try dst.children.append(self.allocator, expanded_children.items[ci]);
         // flags (conservative)
         dst.has_element_child = src.has_element_child;
         dst.has_evtxml_value_in_tree = false;
@@ -118,8 +118,8 @@ fn arrayItemNext(base: u8, backing_t: u8, data: []const u8, idx: *usize) ?[]cons
 }
 
 fn cloneNodesReplacingSubstWithPolicy(ctx: *Context, policy: JoinerPolicy, alloc: std.mem.Allocator, nodes: []const IR.Node, values: []const types.TemplateValue) anyerror!std.ArrayList(IR.Node) {
-    var out = std.ArrayList(IR.Node).init(alloc);
-    if (nodes.len > 0) try out.ensureTotalCapacityPrecise(nodes.len);
+    var out = std.ArrayList(IR.Node).initCapacity(alloc, 0) catch unreachable;
+    if (nodes.len > 0) try out.ensureTotalCapacityPrecise(alloc, nodes.len);
     var i: usize = 0;
     while (i < nodes.len) : (i += 1) {
         const nd = nodes[i];
@@ -144,23 +144,23 @@ fn cloneNodesReplacingSubstWithPolicy(ctx: *Context, policy: JoinerPolicy, alloc
                     while (arrayItemNext(base, vv.t, vv.data, &idx)) |seg| {
                         if (!first) {
                             if (sep_utf16_opt) |sep| {
-                                try out.append(.{ .tag = .Text, .text_utf16 = sep.bytes, .text_num_chars = sep.num_chars });
+                                try out.append(alloc, .{ .tag = .Text, .text_utf16 = sep.bytes, .text_num_chars = sep.num_chars });
                             }
                         }
                         first = false;
                         if (base == 0x01) {
-                            try out.append(.{ .tag = .Text, .text_utf16 = seg, .text_num_chars = seg.len / 2 });
+                            try out.append(alloc, .{ .tag = .Text, .text_utf16 = seg, .text_num_chars = seg.len / 2 });
                         } else {
-                            try out.append(.{ .tag = .Value, .vtype = base, .vbytes = seg });
+                            try out.append(alloc, .{ .tag = .Value, .vtype = base, .vbytes = seg });
                         }
                     }
                 } else {
                     if (base == 0x01) {
                         var num = vv.data.len / 2;
                         if (num > 0 and std.mem.readInt(u16, vv.data[vv.data.len - 2 .. vv.data.len][0..2], .little) == 0) num -= 1;
-                        try out.append(.{ .tag = .Text, .text_utf16 = vv.data[0 .. num * 2], .text_num_chars = num });
+                        try out.append(alloc, .{ .tag = .Text, .text_utf16 = vv.data[0 .. num * 2], .text_num_chars = num });
                     } else {
-                        try out.append(.{ .tag = .Value, .vtype = vv.t, .vbytes = vv.data, .pad_width = nd.pad_width });
+                        try out.append(alloc, .{ .tag = .Value, .vtype = vv.t, .vbytes = vv.data, .pad_width = nd.pad_width });
                     }
                 }
             },
@@ -169,9 +169,9 @@ fn cloneNodesReplacingSubstWithPolicy(ctx: *Context, policy: JoinerPolicy, alloc
                 const eff_vals: []const types.TemplateValue = if (child.local_values.len > 0) child.local_values else values;
                 var sub_expander = Expander.init(ctx, alloc);
                 const repl = try sub_expander.expandElementWithValues(child, eff_vals);
-                try out.append(.{ .tag = .Element, .elem = repl });
+                try out.append(alloc, .{ .tag = .Element, .elem = repl });
             },
-            else => try out.append(nd),
+            else => try out.append(alloc, nd),
         }
     }
     return out;

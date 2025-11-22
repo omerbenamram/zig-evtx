@@ -13,7 +13,7 @@ py-uv-venv:
 # Ensure pydust (ziggy-pydust) is available for the Zig build script's Python discovery
 py-ensure-pydust: py-uv-venv
 	@set -euo pipefail; \
-	$(UV) pip install "ziggy-pydust==0.25.1" >/dev/null; \
+	$(UV) pip install "ziggy-pydust==0.26.0" >/dev/null; \
 	echo "pydust ready in $(VENV)"
 
 py-wheel: py-ensure-pydust

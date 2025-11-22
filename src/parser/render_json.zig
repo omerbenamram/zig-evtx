@@ -330,21 +330,21 @@ fn writeElementBodyJson(chunk: []const u8, el: *const IR.Element, alloc: std.mem
     var groups = std.StringHashMap(std.ArrayList(*IR.Element)).init(alloc);
     defer groups.deinit();
     var has_textual: bool = false;
-    var textual_nodes = std.ArrayList(IR.Node).init(alloc);
-    defer textual_nodes.deinit();
+    var textual_nodes = std.ArrayList(IR.Node).initCapacity(alloc, 0) catch unreachable;
+    defer textual_nodes.deinit(alloc);
 
     var ci: usize = 0;
-    if (el.children.items.len > 0) try textual_nodes.ensureTotalCapacityPrecise(el.children.items.len);
+    if (el.children.items.len > 0) try textual_nodes.ensureTotalCapacityPrecise(alloc, el.children.items.len);
     while (ci < el.children.items.len) : (ci += 1) {
         const nd = el.children.items[ci];
         switch (nd.tag) {
             .Element => {
                 const child = nd.elem.?;
                 // Convert name to UTF-8 key
-                var key_builder = std.ArrayList(u8).init(alloc);
-                defer key_builder.deinit();
+                var key_builder = std.ArrayList(u8).initCapacity(alloc, 0) catch unreachable;
+                defer key_builder.deinit(alloc);
                 switch (child.name) {
-                    .InlineUtf16 => |inl| try writeUtf16LeJsonEscaped(key_builder.writer(), inl.bytes, inl.num_chars),
+                    .InlineUtf16 => |inl| try writeUtf16LeJsonEscaped(key_builder.writer(alloc), inl.bytes, inl.num_chars),
                     .NameOffset => |off| {
                         const o: usize = @intCast(off);
                         if (o + 8 > chunk.len) continue;
@@ -352,21 +352,21 @@ fn writeElementBodyJson(chunk: []const u8, el: *const IR.Element, alloc: std.mem
                         const str_start = o + 8;
                         const byte_len = @as(usize, num_chars) * 2;
                         if (str_start + byte_len > chunk.len) continue;
-                        try writeUtf16LeJsonEscaped(key_builder.writer(), chunk[str_start .. str_start + byte_len], num_chars);
+                        try writeUtf16LeJsonEscaped(key_builder.writer(alloc), chunk[str_start .. str_start + byte_len], num_chars);
                     },
                 }
-                const key = try key_builder.toOwnedSlice();
+                const key = try key_builder.toOwnedSlice(alloc);
                 var entry = try groups.getOrPut(key);
                 if (!entry.found_existing) {
-                    entry.value_ptr.* = std.ArrayList(*IR.Element).init(alloc);
+                    entry.value_ptr.* = std.ArrayList(*IR.Element).initCapacity(alloc, 0) catch unreachable;
                     // Guess a small group size to avoid early growth (tuneable)
-                    try entry.value_ptr.ensureTotalCapacityPrecise(2);
+                    try entry.value_ptr.ensureTotalCapacityPrecise(alloc, 2);
                 }
-                try entry.value_ptr.append(child);
+                try entry.value_ptr.append(alloc, child);
             },
             else => {
                 has_textual = true;
-                try textual_nodes.append(nd);
+                try textual_nodes.append(alloc, nd);
             },
         }
     }
@@ -439,12 +439,12 @@ fn writeElementBodyJson(chunk: []const u8, el: *const IR.Element, alloc: std.mem
             if (isLeafString(child)) {
                 // Represent as string
                 // Collect child's textual nodes
-                var text_nodes = std.ArrayList(IR.Node).init(alloc);
-                defer text_nodes.deinit();
+                var text_nodes = std.ArrayList(IR.Node).initCapacity(alloc, 0) catch unreachable;
+                defer text_nodes.deinit(alloc);
                 var j: usize = 0;
                 while (j < child.children.items.len) : (j += 1) {
                     const nd = child.children.items[j];
-                    if (nd.tag != .Element) try text_nodes.append(nd);
+                    if (nd.tag != .Element) try text_nodes.append(alloc, nd);
                 }
                 try renderTextToJsonString(chunk, text_nodes.items, w);
             } else {
@@ -457,12 +457,12 @@ fn writeElementBodyJson(chunk: []const u8, el: *const IR.Element, alloc: std.mem
                 if (k > 0) try w.writeByte(',');
                 const child = elems.items[k];
                 if (isLeafString(child)) {
-                    var text_nodes = std.ArrayList(IR.Node).init(alloc);
-                    defer text_nodes.deinit();
+                    var text_nodes = std.ArrayList(IR.Node).initCapacity(alloc, 0) catch unreachable;
+                    defer text_nodes.deinit(alloc);
                     var j: usize = 0;
                     while (j < child.children.items.len) : (j += 1) {
                         const nd = child.children.items[j];
-                        if (nd.tag != .Element) try text_nodes.append(nd);
+                        if (nd.tag != .Element) try text_nodes.append(alloc, nd);
                     }
                     try renderTextToJsonString(chunk, text_nodes.items, w);
                 } else {

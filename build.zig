@@ -18,14 +18,20 @@ pub fn build(b: *std.Build) void {
     const dep_opts = .{ .target = target_query, .optimize = optimize };
     const zbench_mod = b.dependency("zbench", dep_opts).module("zbench");
 
-    const exe = b.addExecutable(.{
-        .name = "evtx_dump_zig",
-        .root_source_file = .{ .cwd_relative = "src/main.zig" },
+    // Provide alloc module and optionally link libc
+    const alloc_mod = b.createModule(.{
+        .root_source_file = b.path("src/alloc.zig"),
+    });
+
+    const exe_root_mod = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
     });
-    // Provide alloc module and optionally link libc
-    const alloc_mod = b.createModule(.{ .root_source_file = .{ .cwd_relative = "src/alloc.zig" } });
+    const exe = b.addExecutable(.{
+        .name = "evtx_dump_zig",
+        .root_module = exe_root_mod,
+    });
     exe.root_module.addImport("alloc", alloc_mod);
     if (use_c_alloc) {
         exe.linkLibC();
@@ -38,10 +44,13 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the evtx_dump_zig tool");
     run_step.dependOn(&run_cmd.step);
 
-    const unit_tests = b.addTest(.{
-        .root_source_file = .{ .cwd_relative = "src/tests.zig" },
+    const test_root_mod = b.createModule(.{
+        .root_source_file = b.path("src/tests.zig"),
         .target = target,
         .optimize = optimize,
+    });
+    const unit_tests = b.addTest(.{
+        .root_module = test_root_mod,
     });
     // Optional filter from CLI: -Dtest-filter (unused on 0.14 runner, kept for future)
     unit_tests.root_module.addImport("alloc", alloc_mod);
@@ -59,11 +68,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&test_run.step);
 
     // zBench microbench executable
-    const zbench_exe = b.addExecutable(.{
-        .name = "bench_utf_zbench",
-        .root_source_file = .{ .cwd_relative = "src/bench_utf_zbench.zig" },
+    const zbench_exe_root_mod = b.createModule(.{
+        .root_source_file = b.path("src/bench_utf_zbench.zig"),
         .target = target,
         .optimize = optimize,
+    });
+    const zbench_exe = b.addExecutable(.{
+        .name = "bench_utf_zbench",
+        .root_module = zbench_exe_root_mod,
     });
     zbench_exe.root_module.addImport("zbench", zbench_mod);
     zbench_exe.root_module.addImport("alloc", alloc_mod);
