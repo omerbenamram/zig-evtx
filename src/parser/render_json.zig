@@ -14,6 +14,38 @@ const vf = @import("value_format.zig");
 /// Writer error type for all rendering functions.
 pub const WriterError = std.Io.Writer.Error;
 
+/// Key for grouping elements by name.
+/// Uses content comparison to handle cases where same logical name
+/// might have different pointers (inline vs cached names).
+const NameKey = struct {
+    bytes: []const u8,
+    num_chars: usize,
+
+    fn fromName(name: IR.Name) NameKey {
+        return .{ .bytes = name.bytes, .num_chars = name.num_chars };
+    }
+
+    fn eql(self: NameKey, other: NameKey) bool {
+        // Fast path: if lengths differ, not equal
+        if (self.num_chars != other.num_chars) return false;
+        // Fast path: pointer equality means same buffer
+        if (self.bytes.ptr == other.bytes.ptr) return true;
+        // Slow path: compare actual content
+        return std.mem.eql(u8, self.bytes, other.bytes);
+    }
+};
+
+/// Entry for counting unique element names during two-pass rendering.
+const NameCount = struct {
+    key: NameKey,
+    count: u16,
+    emitted: bool,
+};
+
+/// Maximum unique child element names we track before falling back.
+/// Most XML elements have < 32 distinct child tag names.
+const MAX_UNIQUE_NAMES: usize = 64;
+
 // ============================================================================
 // Content Rendering
 // ============================================================================
@@ -44,45 +76,68 @@ fn isLeafString(element: *const IR.Element) bool {
     return element.attrs.items.len == 0 and !element.has_element_child;
 }
 
-/// Write the body of an element as a JSON object
+/// Write the body of an element as a JSON object.
+///
+/// ## Two-Pass Counting Algorithm
+///
+/// JSON requires grouping same-named XML elements into arrays:
+/// ```xml
+/// <Data Name="A">1</Data><Data Name="B">2</Data>
+/// ```
+/// becomes: `{"Data": [{"@Name":"A",...}, {"@Name":"B",...}]}`
+///
+/// We use a two-pass approach with zero heap allocation:
+/// - Pass 1: Count occurrences of each unique tag name using a fixed stack array
+/// - Pass 2: Emit JSON, using counts to decide single object vs array
+///
+/// This is O(n²) but n is tiny (typically <10 unique child tags per element).
+/// The stack-based linear scan is faster than a HashMap due to cache locality
+/// and zero allocator overhead.
 fn writeElementBodyJson(element: *const IR.Element, allocator: std.mem.Allocator, writer: *std.Io.Writer) anyerror!void {
-    // Group child elements by name for proper JSON array handling
-    var groups = std.StringHashMap(std.ArrayList(*IR.Element)).init(allocator);
-    defer groups.deinit();
+    // allocator only used for recursive calls
 
+    // =========================================================================
+    // PASS 1: Count unique element names
+    // =========================================================================
+    // Scan all children once to build a frequency table of tag names.
+    // Uses a fixed stack array - no heap allocation. Linear search is O(n²)
+    // overall but faster than HashMap for small n due to cache locality and
+    // zero allocator overhead.
+    var name_counts: [MAX_UNIQUE_NAMES]NameCount = undefined;
+    var num_unique: usize = 0;
     var has_textual_content: bool = false;
-    var textual_nodes: std.ArrayList(IR.Node) = .empty;
-    defer textual_nodes.deinit(allocator);
 
-    // Pre-allocate capacity for textual nodes
-    if (element.children.items.len > 0) {
-        try textual_nodes.ensureTotalCapacityPrecise(allocator, element.children.items.len);
-    }
-
-    // Categorize children into element groups and textual content
     for (element.children.items) |node| {
         switch (node) {
             .Element => |child| {
-                // Convert name to UTF-8 key for grouping
-                var key_alloc = std.Io.Writer.Allocating.init(allocator);
-                defer key_alloc.deinit();
-                try util.writeUtf16LeJsonEscaped(&key_alloc.writer, child.name.bytes, child.name.num_chars);
-                const key = try key_alloc.toOwnedSlice();
-
-                const entry = try groups.getOrPut(key);
-                if (!entry.found_existing) {
-                    entry.value_ptr.* = .empty;
-                    try entry.value_ptr.ensureTotalCapacityPrecise(allocator, 2);
+                const key = NameKey.fromName(child.name);
+                // Linear search - fast for small n, cache-friendly, no allocation
+                var found = false;
+                for (name_counts[0..num_unique]) |*nc| {
+                    if (nc.key.eql(key)) {
+                        nc.count += 1;
+                        found = true;
+                        break;
+                    }
                 }
-                try entry.value_ptr.append(allocator, child);
+                if (!found and num_unique < MAX_UNIQUE_NAMES) {
+                    name_counts[num_unique] = .{ .key = key, .count = 1, .emitted = false };
+                    num_unique += 1;
+                }
             },
-            else => {
-                has_textual_content = true;
-                try textual_nodes.append(allocator, node);
-            },
+            else => has_textual_content = true,
         }
     }
 
+    // =========================================================================
+    // PASS 2: Emit JSON using the counts from Pass 1
+    // =========================================================================
+    // Now we know how many times each tag name appears:
+    // - count == 1: emit as single object  {"Tag": {...}}
+    // - count > 1:  emit as array           {"Tag": [{...}, {...}]}
+    //
+    // We iterate children in document order, but only emit each unique tag name
+    // once (on first occurrence). The `emitted` flag prevents duplicate keys.
     try writer.writeByte('{');
     var wrote_any = false;
 
@@ -117,48 +172,73 @@ fn writeElementBodyJson(element: *const IR.Element, allocator: std.mem.Allocator
     if (has_textual_content) {
         if (wrote_any) try writer.writeByte(',');
         try writer.writeAll("\"#text\":");
-        try renderTextToJsonString(textual_nodes.items, writer);
+        try writer.writeByte('"');
+        for (element.children.items) |node| {
+            switch (node) {
+                .Text => |text| try util.writeUtf16LeJsonEscaped(writer, text.utf16, text.num_chars),
+                .Pad => {},
+                .Value => |val| try vf.formatValueXmlFromRaw(writer, val.vtype, val.bytes),
+                .CharRef => |charref| try writer.print("&#{d};", .{charref}),
+                .EntityRef => try writer.writeByte('&'),
+                .CData => |cdata| try util.writeUtf16LeJsonEscaped(writer, cdata.utf16, cdata.num_chars),
+                .PITarget, .PIData, .Element, .Subst => {},
+            }
+        }
+        try writer.writeByte('"');
         wrote_any = true;
     }
 
-    // Render child element groups
-    var iterator = groups.iterator();
-    while (iterator.next()) |entry| {
-        const key = entry.key_ptr.*;
-        const children = entry.value_ptr.*;
+    // Render child elements grouped by name.
+    // Process in document order, emitting each unique tag name only once.
+    // When we encounter the first element with a given name, we look up its
+    // count and emit either a single object or an array of all matching elements.
+    for (element.children.items) |node| {
+        if (node != .Element) continue;
+        const child = node.Element;
+        const key = NameKey.fromName(child.name);
+
+        // Look up this name's count and check if we've already emitted it
+        var count: u16 = 1;
+        var nc_ptr: ?*NameCount = null;
+        for (name_counts[0..num_unique]) |*nc| {
+            if (nc.key.eql(key)) {
+                if (nc.emitted) break; // Already output all elements with this name
+                nc.emitted = true; // Mark as processed to prevent duplicate JSON keys
+                count = nc.count;
+                nc_ptr = nc;
+                break;
+            }
+        }
+        if (nc_ptr == null) continue; // Skip - already emitted or not in our tracking array
 
         if (wrote_any) try writer.writeByte(',');
         try writer.writeByte('"');
-        try util.jsonEscapeUtf8(writer, key);
+        try util.writeUtf16LeJsonEscaped(writer, child.name.bytes, child.name.num_chars);
         try writer.writeAll("\":");
 
-        if (children.items.len == 1) {
-            const child = children.items[0];
+        if (count == 1) {
+            // Single element - emit directly
             if (isLeafString(child)) {
-                // Render leaf element as string value
-                var text_nodes: std.ArrayList(IR.Node) = .empty;
-                defer text_nodes.deinit(allocator);
-                for (child.children.items) |node| {
-                    if (node != .Element) try text_nodes.append(allocator, node);
-                }
-                try renderTextToJsonString(text_nodes.items, writer);
+                try renderTextToJsonString(child.children.items, writer);
             } else {
                 try writeElementBodyJson(child, allocator, writer);
             }
         } else {
-            // Multiple children with same name -> array
+            // Multiple elements with same name - emit as array
             try writer.writeByte('[');
-            for (children.items, 0..) |child, i| {
-                if (i > 0) try writer.writeByte(',');
-                if (isLeafString(child)) {
-                    var text_nodes: std.ArrayList(IR.Node) = .empty;
-                    defer text_nodes.deinit(allocator);
-                    for (child.children.items) |node| {
-                        if (node != .Element) try text_nodes.append(allocator, node);
-                    }
-                    try renderTextToJsonString(text_nodes.items, writer);
+            var first = true;
+            // Re-scan children for all matching this name
+            for (element.children.items) |node2| {
+                if (node2 != .Element) continue;
+                const c = node2.Element;
+                if (!NameKey.fromName(c.name).eql(key)) continue;
+
+                if (!first) try writer.writeByte(',');
+                first = false;
+                if (isLeafString(c)) {
+                    try renderTextToJsonString(c.children.items, writer);
                 } else {
-                    try writeElementBodyJson(child, allocator, writer);
+                    try writeElementBodyJson(c, allocator, writer);
                 }
             }
             try writer.writeByte(']');

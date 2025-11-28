@@ -1,10 +1,23 @@
 //! Concurrent EVTX parsing with std.Thread.Pool.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const binxml = @import("../binxml/mod.zig");
 const alloc_mod = @import("alloc");
 const logger = @import("../../logger.zig");
 const log = logger.scoped("evtx");
+
+/// Ignore SIGPIPE to prevent crashes when stdout is closed (e.g., piped to head/hyperfine).
+fn ignoreSigpipe() void {
+    if (comptime builtin.os.tag != .windows) {
+        const act = std.posix.Sigaction{
+            .handler = .{ .handler = std.posix.SIG.IGN },
+            .mask = std.mem.zeroes(std.posix.sigset_t),
+            .flags = 0,
+        };
+        std.posix.sigaction(std.posix.SIG.PIPE, &act, null);
+    }
+}
 
 const format = @import("format.zig");
 const output = @import("output.zig");
@@ -132,6 +145,9 @@ pub fn parseConcurrent(
     out_kind: OutKind,
     num_threads: usize,
 ) !void {
+    // Ignore SIGPIPE so we don't crash when stdout closes (e.g., piping to head)
+    ignoreSigpipe();
+
     // Logging levels
     switch (opts.verbosity) {
         0 => {},
