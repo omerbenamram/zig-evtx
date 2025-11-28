@@ -57,28 +57,6 @@ pub const ValueType = enum(u8) {
 
     pub const ARRAY_FLAG = 0x80;
 
-    pub fn isArray(self: ValueType) bool {
-        return @intFromEnum(self) & ARRAY_FLAG != 0;
-    }
-
-    pub fn baseType(self: ValueType) ValueType {
-        const val = @intFromEnum(self) & 0x7F;
-        return std.meta.intToEnum(ValueType, val) catch self;
-    }
-
-    /// Returns the fixed byte size for this value type, or null if variable-length.
-    /// Uses comptime switch on enum values for optimal codegen.
-    pub fn fixedSize(self: ValueType) ?usize {
-        return switch (self.baseType()) {
-            .int8, .uint8 => 1,
-            .int16, .uint16 => 2,
-            .int32, .uint32, .bool, .hex_int32 => 4,
-            .int64, .uint64, .real32, .real64, .filetime, .hex_int64 => 8,
-            .guid, .systime => 16,
-            else => null,
-        };
-    }
-
     /// Returns the fixed byte size for a raw type byte, or null if variable-length.
     /// Use this when working with raw u8 type codes from binary data.
     pub fn fixedSizeFromRaw(vtype: u8) ?usize {

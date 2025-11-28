@@ -1,8 +1,5 @@
 const std = @import("std");
 
-const TemplateValue = @import("binxml/types.zig").TemplateValue;
-const utf16EqualsAscii = @import("util.zig").utf16EqualsAscii;
-
 pub const IR = struct {
     pub const Name = struct { bytes: []const u8, num_chars: usize };
 
@@ -45,8 +42,4 @@ pub fn irNewElement(allocator: std.mem.Allocator, name: IR.Name) !*IR.Element {
     const el = try allocator.create(IR.Element);
     el.* = .{ .name = name, .attrs = .empty, .children = .empty };
     return el;
-}
-
-pub fn nameEqualsAscii(name: IR.Name, ascii: []const u8) bool {
-    return utf16EqualsAscii(name.bytes, name.num_chars, ascii);
 }

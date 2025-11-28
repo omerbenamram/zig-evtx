@@ -15,19 +15,6 @@ const vf = @import("value_format.zig");
 // Name and Value Writing
 // ============================================================================
 
-/// Write an element/attribute name as a quoted JSON string
-fn writeNameJsonQuoted(writer: anytype, name: IR.Name, chunk: []const u8) !void {
-    _ = chunk;
-    try writer.writeByte('"');
-    try writeUtf16LeJsonEscaped(writer, name.bytes, name.num_chars);
-    try writer.writeByte('"');
-}
-
-/// Write a BinXML value as a JSON value (uses shared value_format module)
-fn writeValueJson(writer: anytype, raw_type: u8, data: []const u8) !void {
-    try vf.formatValueJsonFromRaw(writer, raw_type, data);
-}
-
 /// Write a value inline within a JSON string (no surrounding quotes).
 /// This is used when a value appears as part of text content within a string.
 fn writeValueInlineJson(writer: anytype, raw_type: u8, data: []const u8) !void {

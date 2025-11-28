@@ -55,13 +55,13 @@ fn renderAttribute(chunk: []const u8, attr: *const IR.Attr, writer: anytype) !vo
     try writer.writeAll("=\"");
 
     if (attrNameIsSystemTime(attr.name)) {
-        // SystemTime attributes need normalization
+        // SystemTime attributes need normalization - buffer first, then normalize
         var buffer: [512]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&buffer);
-        try renderAttrValueFromIR(chunk, attr.value.items, fbs.writer());
+        try renderAttrValueNodes(chunk, attr.value.items, fbs.writer());
         try normalizeAndWriteSystemTimeAscii(writer, fbs.getWritten());
     } else {
-        try renderAttrValueFromIRStream(chunk, attr.value.items, writer);
+        try renderAttrValueNodes(chunk, attr.value.items, writer);
     }
 
     try writer.writeByte('"');
@@ -82,8 +82,8 @@ fn renderOpenTagStart(chunk: []const u8, element: *const IR.Element, writer: any
 // Content Rendering
 // ============================================================================
 
-/// Stream attribute value tokens directly to destination (no buffering)
-fn renderAttrValueFromIRStream(chunk: []const u8, nodes: []const IR.Node, writer: anytype) !void {
+/// Render attribute value tokens to any writer
+fn renderAttrValueNodes(chunk: []const u8, nodes: []const IR.Node, writer: anytype) !void {
     for (nodes) |node| switch (node) {
         .Text => |text| try util.writeUtf16LeXmlEscaped(writer, text.utf16, text.num_chars),
         .Pad => {},
@@ -107,40 +107,6 @@ fn renderAttrValueFromIRStream(chunk: []const u8, nodes: []const IR.Node, writer
         },
         .Element => {},
     };
-}
-
-/// Render attribute value with buffering (for normalization)
-fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, writer: anytype) !void {
-    var buffer: [2048]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buffer);
-    const buf_writer = fbs.writer();
-
-    for (nodes) |node| switch (node) {
-        .Text => |text| try util.writeUtf16LeXmlEscaped(buf_writer, text.utf16, text.num_chars),
-        .Pad => {},
-        .Value => |val| try writeValueXml(buf_writer, val.vtype, val.bytes),
-        .Subst => {},
-        .CharRef => |charref| try buf_writer.print("&#{d};", .{charref}),
-        .EntityRef => |name| {
-            try buf_writer.writeByte('&');
-            try writeNameXml(chunk, name, buf_writer);
-            try buf_writer.writeByte(';');
-        },
-        .CData => |cdata| try util.writeUtf16LeXmlEscaped(buf_writer, cdata.utf16, cdata.num_chars),
-        .PITarget => |name| {
-            try buf_writer.writeAll("<?");
-            try writeNameXml(chunk, name, buf_writer);
-        },
-        .PIData => |pidata| {
-            try buf_writer.writeByte(' ');
-            try writeUtf16LeRawToUtf8(buf_writer, pidata.utf16, pidata.num_chars);
-            try buf_writer.writeAll("?>");
-        },
-        .Element => {},
-    };
-
-    const written = fbs.getWritten();
-    if (written.len > 0) try writer.writeAll(written);
 }
 
 /// Render text content from IR nodes

@@ -168,11 +168,8 @@ pub fn formatFloat64Json(w: anytype, f: f64) !void {
 // Boolean Formatting
 // ============================================================================
 
-pub fn formatBoolXml(w: anytype, value: bool) !void {
-    try w.writeAll(if (value) "true" else "false");
-}
-
-pub fn formatBoolJson(w: anytype, value: bool) !void {
+/// Format a boolean as "true" or "false" (same for XML and JSON)
+pub fn formatBool(w: anytype, value: bool) !void {
     try w.writeAll(if (value) "true" else "false");
 }
 
@@ -269,7 +266,7 @@ pub fn formatValueXml(w: anytype, vtype: ValueType, data: []const u8) !void {
         .uint64 => _ = try readAndFormatInt(w, u64, data),
         .real32 => if (vr.readFloat32(data)) |f| try formatFloat32Xml(w, f),
         .real64 => if (vr.readFloat64(data)) |f| try formatFloat64Xml(w, f),
-        .bool => if (vr.readBool(data)) |b| try formatBoolXml(w, b),
+        .bool => if (vr.readBool(data)) |b| try formatBool(w, b),
         .binary => try formatHexBytesLower(w, data),
         .guid => if (vr.readGuid(data)) |g| try formatGuidXml(w, g),
         .size_t => {
@@ -317,7 +314,7 @@ pub fn formatValueJson(w: anytype, vtype: ValueType, data: []const u8) !void {
         .uint64 => if (!try readAndFormatInt(w, u64, data)) try w.writeAll("null"),
         .real32 => if (vr.readFloat32(data)) |f| try formatFloat32Json(w, f) else try w.writeAll("null"),
         .real64 => if (vr.readFloat64(data)) |f| try formatFloat64Json(w, f) else try w.writeAll("null"),
-        .bool => if (vr.readBool(data)) |b| try formatBoolJson(w, b) else try w.writeAll("null"),
+        .bool => if (vr.readBool(data)) |b| try formatBool(w, b) else try w.writeAll("null"),
         .binary => try formatHexBytesLowerJson(w, data),
         .guid => if (vr.readGuid(data)) |g| try formatGuidJson(w, g) else try w.writeAll("null"),
         .size_t => {

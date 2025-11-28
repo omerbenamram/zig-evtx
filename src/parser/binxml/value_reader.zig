@@ -107,12 +107,6 @@ pub fn readSystemTime(data: []const u8) ?SystemTime {
     return std.mem.bytesToValue(SystemTime, data[0..16]);
 }
 
-/// Generic integer reader with bounds checking.
-/// Delegates to readValue for the actual implementation.
-pub fn readInt(comptime T: type, data: []const u8) ?T {
-    return readValue(T, data);
-}
-
 /// Read f32 from little-endian bytes.
 /// Delegates to readValue for the actual implementation.
 pub fn readFloat32(data: []const u8) ?f32 {
@@ -244,13 +238,13 @@ test "readSystemTime parses correctly" {
     try std.testing.expectEqual(@as(u16, 123), st.milliseconds);
 }
 
-test "readInt handles various sizes" {
+test "readValue handles various integer sizes" {
     const data32 = [_]u8{ 0x78, 0x56, 0x34, 0x12 };
-    try std.testing.expectEqual(@as(i32, 0x12345678), readInt(i32, &data32).?);
-    try std.testing.expectEqual(@as(u32, 0x12345678), readInt(u32, &data32).?);
+    try std.testing.expectEqual(@as(i32, 0x12345678), readValue(i32, &data32).?);
+    try std.testing.expectEqual(@as(u32, 0x12345678), readValue(u32, &data32).?);
 
     const data64 = [_]u8{ 0xEF, 0xCD, 0xAB, 0x90, 0x78, 0x56, 0x34, 0x12 };
-    try std.testing.expectEqual(@as(u64, 0x1234567890ABCDEF), readInt(u64, &data64).?);
+    try std.testing.expectEqual(@as(u64, 0x1234567890ABCDEF), readValue(u64, &data64).?);
 }
 
 test "readBool interprets zero as false" {

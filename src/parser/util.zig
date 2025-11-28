@@ -591,24 +591,6 @@ pub fn normalizeAndWriteSystemTimeAscii(w: anytype, ascii: []const u8) !void {
     try w.writeByte('Z');
 }
 
-pub fn writePaddedInt(w: anytype, comptime T: type, value: T, pad_width: usize) !void {
-    if (pad_width == 0) {
-        try w.print("{d}", .{value});
-        return;
-    }
-    var buf: [64]u8 = undefined;
-    const s = try std.fmt.bufPrint(&buf, "{d}", .{value});
-    if (s.len >= pad_width) {
-        try w.writeAll(s);
-        return;
-    }
-    var zeros: [32]u8 = undefined;
-    const need = @min(pad_width - s.len, zeros.len);
-    @memset(zeros[0..need], '0');
-    try w.writeAll(zeros[0..need]);
-    try w.writeAll(s);
-}
-
 const DateTimeParts = struct {
     year: i64,
     month: i64,

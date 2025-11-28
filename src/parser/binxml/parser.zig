@@ -421,9 +421,8 @@ fn parseDefNameIR(ps: *ParseState) !IR.Name {
         const view = try ps.r.readTemplateNameLinkInlineView();
         if (log.enabled(.trace)) log.trace("inline NameLink next+hash read inl_start to end; num={d}", .{view.num_chars});
 
-        const bytes = view.utf16.len;
-        const buf = try ps.alloc().alloc(u8, bytes);
-        @memcpy(buf, view.utf16);
+        const buf = try ps.alloc().alloc(u8, view.bytes.len);
+        @memcpy(buf, view.bytes);
 
         return IR.Name{ .bytes = buf, .num_chars = view.num_chars };
     }

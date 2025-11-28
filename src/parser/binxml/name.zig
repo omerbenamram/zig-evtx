@@ -3,33 +3,8 @@ const util = @import("../util.zig");
 const utf16EqualsAscii = util.utf16EqualsAscii;
 const IRModule = @import("../ir.zig");
 const IR = IRModule.IR;
-const BinXmlError = @import("../err.zig").BinXmlError;
-const Reader = @import("../reader.zig").Reader;
-const types = @import("types.zig");
 const logger = @import("../../logger.zig");
 const log = logger.scoped("binxml.name");
-
-// Local name writers for tracing (avoid renderer dependency)
-pub fn writeNameFromOffset(chunk: []const u8, name_offset: u32, w: anytype) !void {
-    if (name_offset >= chunk.len) return BinXmlError.OutOfBounds;
-    var reader = Reader.init(chunk);
-    reader.pos = name_offset;
-
-    const header = try reader.readStruct(types.NameHeader);
-    const num_chars = header.num_chars;
-    const byte_len = @as(usize, num_chars) * 2;
-
-    if (reader.rem() < byte_len) return BinXmlError.OutOfBounds;
-    const str_start = reader.pos;
-    const raw_slice = chunk[str_start .. str_start + byte_len];
-
-    var num = num_chars;
-    if (byte_len >= 2) {
-        const last = std.mem.readInt(u16, raw_slice[byte_len - 2 .. byte_len][0..2], .little);
-        if (last == 0 and num > 0) num -= 1;
-    }
-    try util.writeUtf16LeXmlEscaped(w, raw_slice[0 .. num * 2], num);
-}
 
 pub fn writeNameFromUtf16(w: anytype, utf16le: []const u8, num_chars: usize) !void {
     try util.writeUtf16LeXmlEscaped(w, utf16le, num_chars);

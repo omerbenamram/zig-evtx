@@ -9,12 +9,7 @@ const BinXmlError = @import("err.zig").BinXmlError;
 const tokens = @import("binxml/tokens.zig");
 const types = @import("binxml/types.zig");
 const value_reader = @import("binxml/value_reader.zig");
-
-/// Result of reading a UTF-16 name from the binary stream.
-pub const NameView = struct {
-    utf16: []const u8,
-    num_chars: usize,
-};
+const IR = @import("ir.zig").IR;
 
 /// Zero-copy binary reader for parsing EVTX BinXML data.
 ///
@@ -174,7 +169,8 @@ pub const Reader = struct {
     ///
     /// Format: 4 bytes next_offset, 2 bytes hash, 2 bytes num_chars, UTF-16 name.
     /// After reading, advances to end-of-block alignment (name data + 4 byte padding).
-    pub fn readTemplateNameLinkInlineView(self: *Reader) !NameView {
+    /// Returns an IR.Name pointing into the buffer (caller must copy if persistence needed).
+    pub fn readTemplateNameLinkInlineView(self: *Reader) !IR.Name {
         const block_start = self.pos;
         const header = try self.readStruct(types.NameHeader);
         const num_chars = header.num_chars;
@@ -189,6 +185,6 @@ pub const Reader = struct {
         if (self.pos < block_end and block_end <= self.buf.len) {
             self.pos = block_end;
         }
-        return .{ .utf16 = slice, .num_chars = num_chars };
+        return .{ .bytes = slice, .num_chars = num_chars };
     }
 };
