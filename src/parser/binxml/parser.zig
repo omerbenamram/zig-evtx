@@ -465,26 +465,86 @@ const PartialElementHeader = struct {
 
 fn parseRecElementHeader(ps: *ParseState) !PartialElementHeader {
     const pos_before = ps.r.pos;
-    const h = try ps.r.readStruct(types.ElementStartHeader);
+
+    // For direct elements in records (non-template path), there's NO dependency ID.
+    // Per MS-EVEN6: "the dependency identifier is not present when the element start
+    // is used in a substitution token with value type: Binary XML (0x21)"
+    // This also applies to direct (non-template) record elements.
+    const h = try ps.r.readStruct(types.ElementStartHeaderNoDep);
 
     if (log.enabled(.debug)) {
-        log.debug("parseRecElementHeader: pos=0x{x} dep_id={d} data_size=0x{x} ({d})", .{ pos_before, h.dep_id, h.data_size, h.data_size });
+        log.debug("parseRecElementHeader: pos=0x{x} data_size=0x{x} ({d})", .{ pos_before, h.data_size, h.data_size });
     }
 
-    // Per spec: 1 byte token + 2 bytes dep_id + 4 bytes data_size
-    const header_len: usize = 1 + 2 + 4;
+    // Per spec: 1 byte token + 4 bytes data_size (no dep_id for direct elements)
+    const header_len: usize = 1 + 4;
     const h2 = try ps.r.readStruct(types.NameOffsetHeader);
     const name_off = h2.offset;
 
     if (log.enabled(.debug)) {
-        log.debug("parseRecElementHeader: name_off=0x{x} chunk_len=0x{x}", .{ name_off, ps.chunk.len });
+        log.debug("parseRecElementHeader: name_off=0x{x} chunk_len=0x{x} r.pos=0x{x}", .{ name_off, ps.chunk.len, ps.r.pos });
     }
 
-    const name = ps.ctx.getOrReadName(ps.chunk, name_off) catch |err| {
-        log.err("parseRecElementHeader: getOrReadName failed at off=0x{x}: {s}", .{ name_off, @errorName(err) });
-        return err;
-    };
+    // Calculate the absolute chunk position after reading the name offset.
+    // For direct elements, we use chunk_base=0 (the BinXML starts at the record's binxml offset).
+    // The name offset is relative to chunk start, not BinXML start.
+    // BinXML buffer = chunk[binxml_start..binxml_end], but we don't have binxml_start here.
+    // However, we can detect inline names by checking if name_off points within the current region.
+
+    // Check if name is inline (offset points to current position in chunk).
+    // For records parsed from chunk buffer slices, we need to compute the chunk offset
+    // corresponding to current reader position. The record's BinXML starts at some offset
+    // in the chunk, and r.pos is relative to that start.
+    //
+    // To handle this, we check: if name_off - (chunk binxml start) == r.pos, name is inline.
+    // But we don't directly know the binxml start offset. Instead, use a heuristic:
+    // if the name offset seems to point near the current position, try reading inline.
+    //
+    // Alternative: always try inline first if name points within a reasonable range.
+
+    // Actually, for direct element records, the simpler approach is:
+    // The name is always inline right after the name_offset field.
+    // Read it inline and skip over it.
+    const name = try readRecNameInline(ps);
+
     return .{ .name = name, .data_size = h.data_size, .header_len = header_len };
+}
+
+/// Reads an inline name for record direct elements.
+/// The name is stored as NameHeader (next_offset, hash, num_chars) followed by UTF-16 string + null terminator.
+fn readRecNameInline(ps: *ParseState) !IR.Name {
+    // Read NameHeader: next_offset (u32) + hash (u16) + num_chars (u16) = 8 bytes
+    const hdr = try ps.r.readStruct(types.NameHeader);
+    const num_chars = hdr.num_chars;
+    const byte_len = @as(usize, num_chars) * 2;
+
+    if (log.enabled(.debug)) {
+        log.debug("readRecNameInline: next_off=0x{x} hash=0x{x} num_chars={d}", .{ hdr.next_offset, hdr.hash, num_chars });
+    }
+
+    if (ps.r.rem() < byte_len) return BinXmlError.UnexpectedEof;
+    const str_start = ps.r.pos;
+    const slice = ps.r.buf[str_start .. str_start + byte_len];
+    ps.r.pos += byte_len;
+
+    // Allocate and copy name (names need to persist beyond chunk processing)
+    const buf = try ps.alloc().alloc(u8, byte_len);
+    @memcpy(buf, slice);
+
+    // Skip null terminator (2 bytes UTF-16) and padding after name to align to 4-byte boundary.
+    // Total name block: NameHeader (8) + string (byte_len) + null terminator (2) + padding
+    const name_block_size = 8 + byte_len + 2; // +2 for null terminator
+    const aligned_size = (name_block_size + 3) & ~@as(usize, 3); // round up to 4
+    const skip_after_string = 2 + (aligned_size - name_block_size); // null + padding
+    if (ps.r.rem() >= skip_after_string) {
+        ps.r.pos += skip_after_string;
+    }
+
+    if (log.enabled(.debug)) {
+        log.debug("readRecNameInline: name_block={d} aligned={d} skip={d} new_pos=0x{x}", .{ name_block_size, aligned_size, skip_after_string, ps.r.pos });
+    }
+
+    return IR.Name{ .bytes = buf, .num_chars = num_chars };
 }
 
 fn parseDefElementHeader(ps: *ParseState) !PartialElementHeader {

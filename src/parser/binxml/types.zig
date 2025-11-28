@@ -94,6 +94,15 @@ pub const ElementStartHeader = packed struct {
     data_size: u32,
 };
 
+/// Element start header for direct elements (no dependency ID).
+/// Used when parsing non-template elements directly from record data.
+/// Per MS-EVEN6: "the dependency identifier is not present when the element start
+/// is used in a substitution token with value type: Binary XML (0x21)"
+/// and also not present in direct (non-template) record elements.
+pub const ElementStartHeaderNoDep = packed struct {
+    data_size: u32,
+};
+
 pub const NameHeader = packed struct {
     next_offset: u32,
     hash: u16,
