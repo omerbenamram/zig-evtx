@@ -95,8 +95,7 @@ fn readTemplateValueDescriptorTable(r: *Reader, allocator: std.mem.Allocator, de
     var reserved = try allocator.alloc(u8, declared);
     errdefer allocator.free(reserved);
 
-    var i: usize = 0;
-    while (i < declared) : (i += 1) {
+    for (0..declared) |i| {
         const desc = try r.readStruct(types.ValueDescriptor);
         sizes[i] = desc.size;
         vtypes[i] = @intFromEnum(desc.value_type);
@@ -110,20 +109,19 @@ fn readTemplateValuesFromDescriptors(r: *Reader, allocator: std.mem.Allocator, s
     const declared = sizes.len;
     var values = try allocator.alloc(types.TemplateValue, declared);
 
-    var i: usize = 0;
-    while (i < declared) : (i += 1) {
-        const need: usize = @intCast(sizes[i]);
+    for (sizes, vtypes, 0..) |size, vtype, i| {
+        const need: usize = @intCast(size);
         if (r.rem() < need) return BinXmlError.UnexpectedEof;
 
         const slice = r.buf[r.pos .. r.pos + need];
         r.pos += need;
 
-        if (vtypes[i] == 0x00) {
-            values[i] = .{ .t = 0x00, .data = &[_]u8{} };
-        } else {
-            values[i] = .{ .t = vtypes[i], .data = slice };
-        }
-        if (log.enabled(.trace)) log.trace("  payload[{d}]: t=0x{x} len={d}", .{ i, vtypes[i], need });
+        values[i] = if (vtype == 0x00)
+            .{ .t = 0x00, .data = &[_]u8{} }
+        else
+            .{ .t = vtype, .data = slice };
+
+        if (log.enabled(.trace)) log.trace("  payload[{d}]: t=0x{x} len={d}", .{ i, vtype, need });
     }
     return values;
 }
@@ -157,9 +155,12 @@ fn parseElementIRImpl(ps: *ParseState) !*IR.Element {
         element.attrs = try parseAttributeListIR(ps, element_end_pos);
     }
 
-    // 5. Handle Optional Padding (usually null bytes)
-    var pad: usize = 0;
-    while (pad < 4 and ps.r.pos < element_end_pos and (ps.r.peekByte() catch 0) == 0) : (pad += 1) {
+    // 5. Skip padding bytes (NUL bytes between header and content)
+    // Bounded to max 4 bytes as per BinXML spec
+    for (0..4) |_| {
+        if (ps.r.pos >= element_end_pos) break;
+        const byte = ps.r.peekByte() catch break;
+        if (byte != 0) break;
         ps.r.pos += 1;
     }
 
@@ -207,7 +208,7 @@ fn parseElementIRImpl(ps: *ParseState) !*IR.Element {
             },
             tokens.TOK_VALUE, tokens.TOK_NORMAL_SUBST, tokens.TOK_OPTIONAL_SUBST, tokens.TOK_CDATA, tokens.TOK_CHARREF, tokens.TOK_ENTITYREF, tokens.TOK_PITARGET, tokens.TOK_PIDATA => {
                 // Accumulate sequence of value/text tokens
-                var content_sequence = std.ArrayList(IR.Node).initCapacity(ps.alloc(), 0) catch unreachable;
+                var content_sequence: std.ArrayList(IR.Node) = .empty;
                 try collectValueTokens(ps, &content_sequence, element_end_pos);
 
                 // Ensure we don't overshoot
@@ -237,7 +238,7 @@ fn parseAttributeListIR(ps: *ParseState, max_end: usize) !std.ArrayList(IR.Attr)
 
     if (list_end > max_end or list_end < list_start) return BinXmlError.UnexpectedEof;
 
-    var attributes = std.ArrayList(IR.Attr).initCapacity(ps.alloc(), 0) catch unreachable;
+    var attributes: std.ArrayList(IR.Attr) = .empty;
 
     // Pre-scan to estimate capacity (optional optimization)
     var scan_pos = ps.r.pos;
@@ -248,7 +249,9 @@ fn parseAttributeListIR(ps: *ParseState, max_end: usize) !std.ArrayList(IR.Attr)
     }
     if (attr_count > 0) try attributes.ensureTotalCapacityPrecise(ps.alloc(), attr_count);
 
-    while (ps.r.pos < list_end and ps.r.rem() > 0 and tokens.isToken(ps.r.peekByte() catch 0, tokens.TOK_ATTRIBUTE)) {
+    while (ps.r.pos < list_end and ps.r.rem() > 0) {
+        const maybe_attr = ps.r.peekByte() catch break;
+        if (!tokens.isToken(maybe_attr, tokens.TOK_ATTRIBUTE)) break;
         _ = try ps.r.readInt(u8); // Consume Attribute Token
 
         // Parse Attribute Name
@@ -256,7 +259,7 @@ fn parseAttributeListIR(ps: *ParseState, max_end: usize) !std.ArrayList(IR.Attr)
         if (log.enabled(.trace)) try binxml_name.logNameTrace(name, "attr");
 
         // Parse Attribute Value (sequence of tokens)
-        var value_tokens = std.ArrayList(IR.Node).initCapacity(ps.alloc(), 0) catch unreachable;
+        var value_tokens: std.ArrayList(IR.Node) = .empty;
         try collectValueTokens(ps, &value_tokens, list_end);
 
         try attributes.append(ps.alloc(), .{ .name = name, .value = value_tokens });

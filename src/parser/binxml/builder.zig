@@ -307,7 +307,7 @@ pub const Builder = struct {
         values: []const types.TemplateValue,
         policy: JoinerPolicy,
     ) anyerror!std.ArrayList(IR.Node) {
-        var out = std.ArrayList(IR.Node).initCapacity(self.alloc(), 0) catch unreachable;
+        var out: std.ArrayList(IR.Node) = .empty;
         if (nodes.len > 0) {
             try out.ensureTotalCapacityPrecise(self.alloc(), nodes.len);
         }
@@ -405,17 +405,11 @@ pub const Builder = struct {
         };
 
         var first = true;
-        const sep_ascii = joinerFor(policy, base_type);
-        const sep_utf16 = if (sep_ascii.len > 0)
-            try self.ctx.getSepUtf16(sep_ascii)
-        else
-            null;
+        const sep = self.ctx.getSepUtf16(joinerFor(policy, base_type));
 
         while (iter.next()) |item_bytes| {
-            if (!first) {
-                if (sep_utf16) |sep| {
-                    try out.append(self.alloc(), .{ .Text = .{ .utf16 = sep.bytes, .num_chars = sep.num_chars } });
-                }
+            if (!first and sep.num_chars > 0) {
+                try out.append(self.alloc(), .{ .Text = .{ .utf16 = sep.bytes, .num_chars = sep.num_chars } });
             }
             first = false;
 

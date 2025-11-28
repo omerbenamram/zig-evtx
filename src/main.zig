@@ -2,7 +2,7 @@ const std = @import("std");
 const alloc = @import("alloc");
 const fs = std.fs;
 
-const evtx = @import("parser/evtx.zig");
+const evtx = @import("parser/evtx/mod.zig");
 
 pub fn main() !void {
     // Default allocator is selectable at build time (libc or GPA)

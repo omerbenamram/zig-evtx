@@ -43,7 +43,7 @@ pub const IR = struct {
 
 pub fn irNewElement(allocator: std.mem.Allocator, name: IR.Name) !*IR.Element {
     const el = try allocator.create(IR.Element);
-    el.* = .{ .name = name, .attrs = std.ArrayList(IR.Attr).initCapacity(allocator, 0) catch unreachable, .children = std.ArrayList(IR.Node).initCapacity(allocator, 0) catch unreachable };
+    el.* = .{ .name = name, .attrs = .empty, .children = .empty };
     return el;
 }
 

@@ -1,6 +1,6 @@
 const std = @import("std");
 const py = @import("pydust");
-const evtx = @import("parser/evtx.zig");
+const evtx = @import("parser/evtx/mod.zig");
 const alloc_mod = @import("alloc");
 const Root = @This();
 

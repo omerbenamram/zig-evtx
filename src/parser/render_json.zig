@@ -78,7 +78,7 @@ fn writeElementBodyJson(chunk: []const u8, element: *const IR.Element, allocator
     defer groups.deinit();
 
     var has_textual_content: bool = false;
-    var textual_nodes = std.ArrayList(IR.Node).initCapacity(allocator, 0) catch unreachable;
+    var textual_nodes: std.ArrayList(IR.Node) = .empty;
     defer textual_nodes.deinit(allocator);
 
     // Pre-allocate capacity for textual nodes
@@ -91,14 +91,14 @@ fn writeElementBodyJson(chunk: []const u8, element: *const IR.Element, allocator
         switch (node) {
             .Element => |child| {
                 // Convert name to UTF-8 key for grouping
-                var key_builder = std.ArrayList(u8).initCapacity(allocator, 0) catch unreachable;
+                var key_builder: std.ArrayList(u8) = .empty;
                 defer key_builder.deinit(allocator);
                 try writeUtf16LeJsonEscaped(key_builder.writer(allocator), child.name.bytes, child.name.num_chars);
                 const key = try key_builder.toOwnedSlice(allocator);
 
-                var entry = try groups.getOrPut(key);
+                const entry = try groups.getOrPut(key);
                 if (!entry.found_existing) {
-                    entry.value_ptr.* = std.ArrayList(*IR.Element).initCapacity(allocator, 0) catch unreachable;
+                    entry.value_ptr.* = .empty;
                     try entry.value_ptr.ensureTotalCapacityPrecise(allocator, 2);
                 }
                 try entry.value_ptr.append(allocator, child);
@@ -162,7 +162,7 @@ fn writeElementBodyJson(chunk: []const u8, element: *const IR.Element, allocator
             const child = children.items[0];
             if (isLeafString(child)) {
                 // Render leaf element as string value
-                var text_nodes = std.ArrayList(IR.Node).initCapacity(allocator, 0) catch unreachable;
+                var text_nodes: std.ArrayList(IR.Node) = .empty;
                 defer text_nodes.deinit(allocator);
                 for (child.children.items) |node| {
                     if (node != .Element) try text_nodes.append(allocator, node);
@@ -177,7 +177,7 @@ fn writeElementBodyJson(chunk: []const u8, element: *const IR.Element, allocator
             for (children.items, 0..) |child, i| {
                 if (i > 0) try writer.writeByte(',');
                 if (isLeafString(child)) {
-                    var text_nodes = std.ArrayList(IR.Node).initCapacity(allocator, 0) catch unreachable;
+                    var text_nodes: std.ArrayList(IR.Node) = .empty;
                     defer text_nodes.deinit(allocator);
                     for (child.children.items) |node| {
                         if (node != .Element) try text_nodes.append(allocator, node);

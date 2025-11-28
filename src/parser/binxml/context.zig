@@ -1,31 +1,59 @@
+//! Context and template cache for BinXML parsing.
+//!
+//! This module provides the shared state used during parsing, including:
+//! - Template definition cache (per-chunk)
+//! - Name cache for string deduplication
+//! - Arena allocator for chunk-scoped allocations
+//!
+//! Keep this file renderer-free to avoid cycles.
+
 const std = @import("std");
 const IRModule = @import("../ir.zig");
 const IR = IRModule.IR;
-const util = @import("../util.zig");
 const types = @import("types.zig");
 const BinXmlError = @import("../err.zig").BinXmlError;
 const Reader = @import("../reader.zig").Reader;
 
-// --- Context and template cache (IR) ---
-// Keep this file renderer-free to avoid cycles. Lifetime: per parser/run, with resetPerChunk().
+/// Cached name entry with UTF-16 bytes and character count.
+pub const NameCacheEntry = struct {
+    bytes: []u8,
+    num_chars: usize,
+};
 
-pub const NameCacheEntry = struct { bytes: []u8, num_chars: usize };
+/// UTF-16 separator payload for array joining.
+pub const SeparatorPayload = struct {
+    bytes: []const u8,
+    num_chars: usize,
+};
 
+// Comptime UTF-16LE literals for common separators (no runtime allocation needed)
+const sep_space_utf16: []const u8 = &[_]u8{ ' ', 0 }; // U+0020
+const sep_comma_utf16: []const u8 = &[_]u8{ ',', 0 }; // U+002C
+
+/// Shared parsing context for BinXML processing.
+///
+/// Manages per-chunk state including template caches, name caches, and a scoped
+/// arena allocator. All chunk-scoped allocations use the arena, which is reset
+/// atomically between chunks via `resetPerChunk()`.
 pub const Context = struct {
+    /// Cache key for template definitions: offset + GUID for uniqueness.
     pub const DefKey = struct {
         def_data_off: u32,
         guid: [16]u8,
     };
 
+    /// Backing allocator for long-lived allocations (cache hash maps).
     allocator: std.mem.Allocator,
+    /// Arena for chunk-scoped allocations (IR elements, names, etc.).
     arena: std.heap.ArenaAllocator,
+    /// Template definition cache: DefKey -> parsed IR element.
     cache: std.AutoHashMap(DefKey, *IR.Element),
+    /// Enable verbose logging.
     verbose: bool = false,
+    /// Name cache: offset -> (UTF-16 bytes, char count).
     name_cache: std.AutoHashMap(u32, NameCacheEntry),
-    // Cached UTF-16 separators for joining arrays (arena-owned)
-    sep_space_utf16: ?[]u8 = null,
-    sep_comma_utf16: ?[]u8 = null,
 
+    /// Creates a new context with the given backing allocator.
     pub fn init(allocator: std.mem.Allocator) !Context {
         return .{
             .allocator = allocator,
@@ -36,39 +64,38 @@ pub const Context = struct {
         };
     }
 
+    /// Releases all resources held by this context.
     pub fn deinit(self: *Context) void {
         self.cache.deinit();
         self.name_cache.deinit();
         self.arena.deinit();
     }
 
+    /// Resets chunk-local state for processing a new chunk.
+    ///
+    /// Clears all caches and resets the arena allocator while retaining
+    /// hash map capacity to avoid repeated allocations.
     pub fn resetPerChunk(self: *Context) void {
-        // EVTX template definitions are chunk-local. Reset arena and clear cache buckets.
         self.cache.clearRetainingCapacity();
         self.name_cache.clearRetainingCapacity();
-        // Invalidate any arena-backed cached slices
-        self.sep_space_utf16 = null;
-        self.sep_comma_utf16 = null;
         _ = self.arena.reset(.retain_capacity);
     }
 
-    pub fn getSepUtf16(self: *Context, ascii: []const u8) !struct { bytes: []u8, num_chars: usize } {
+    /// Returns UTF-16 separator for array element joining.
+    /// Uses comptime literals for common separators (space, comma) - no allocation needed.
+    pub fn getSepUtf16(_: *Context, ascii: []const u8) SeparatorPayload {
         if (ascii.len == 0) return .{ .bytes = &[_]u8{}, .num_chars = 0 };
-        if (ascii.len == 1 and ascii[0] == ' ') {
-            if (self.sep_space_utf16 == null) {
-                self.sep_space_utf16 = try util.utf16FromAscii(self.arena.allocator(), ascii);
-            }
-            return .{ .bytes = self.sep_space_utf16.?, .num_chars = 1 };
+
+        if (ascii.len == 1) {
+            return switch (ascii[0]) {
+                ' ' => .{ .bytes = sep_space_utf16, .num_chars = 1 },
+                ',' => .{ .bytes = sep_comma_utf16, .num_chars = 1 },
+                else => .{ .bytes = &[_]u8{}, .num_chars = 0 },
+            };
         }
-        if (ascii.len == 1 and ascii[0] == ',') {
-            if (self.sep_comma_utf16 == null) {
-                self.sep_comma_utf16 = try util.utf16FromAscii(self.arena.allocator(), ascii);
-            }
-            return .{ .bytes = self.sep_comma_utf16.?, .num_chars = 1 };
-        }
-        // Fallback (should not happen with current joiner policy)
-        const dyn = try util.utf16FromAscii(self.arena.allocator(), ascii);
-        return .{ .bytes = dyn, .num_chars = ascii.len };
+
+        // Unexpected separator - return empty (caller should only use space/comma)
+        return .{ .bytes = &[_]u8{}, .num_chars = 0 };
     }
 
     pub fn getOrReadName(self: *Context, chunk: []const u8, off_u32: u32) !IR.Name {
@@ -105,13 +132,16 @@ pub const Context = struct {
     }
 
     /// Pre-populates the name cache using offsets from the chunk header.
-    /// This avoids repeated lookups during parsing by caching common strings upfront.
-    /// Errors are silently ignored since pre-caching is an optimization.
+    ///
+    /// This is a best-effort optimization that avoids repeated lookups during parsing.
+    /// Invalid offsets or malformed names are silently skipped since this is optional
+    /// pre-warming - the actual parsing will handle errors properly if encountered.
     pub fn preCacheFromChunkHeader(self: *Context, chunk: []const u8, offsets: []const u32) void {
         for (offsets) |off| {
-            if (off != 0 and off < chunk.len) {
-                _ = self.getOrReadName(chunk, off) catch continue;
-            }
+            // Skip null offsets and out-of-bounds
+            if (off == 0 or off >= chunk.len) continue;
+            // Best-effort: errors during pre-caching are non-fatal
+            _ = self.getOrReadName(chunk, off) catch continue;
         }
     }
 };

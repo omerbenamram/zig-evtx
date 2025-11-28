@@ -1,23 +1,40 @@
-// Reader drives Binary XML token parsing for one buffer slice (record or template definition).
+//! Reader drives Binary XML token parsing for one buffer slice (record or template definition).
+//!
+//! This is a zero-allocation slice reader that provides typed access to binary data.
+//! All reads are bounds-checked and return errors on EOF.
+
+const std = @import("std");
+
 const BinXmlError = @import("err.zig").BinXmlError;
 const tokens = @import("binxml/tokens.zig");
 const types = @import("binxml/types.zig");
 const value_reader = @import("binxml/value_reader.zig");
 
-const std = @import("std");
+/// Result of reading a UTF-16 name from the binary stream.
+pub const NameView = struct {
+    utf16: []const u8,
+    num_chars: usize,
+};
 
+/// Zero-copy binary reader for parsing EVTX BinXML data.
+///
+/// Provides typed access to little-endian binary data with bounds checking.
+/// All read operations advance the internal position and return errors on EOF.
 pub const Reader = struct {
     buf: []const u8,
     pos: usize = 0,
 
+    /// Creates a new Reader over the given buffer slice.
     pub fn init(buf: []const u8) Reader {
         return .{ .buf = buf, .pos = 0 };
     }
 
+    /// Returns the number of bytes remaining in the buffer.
     pub inline fn rem(self: *const Reader) usize {
         return self.buf.len - self.pos;
     }
 
+    /// Reads a little-endian integer of type T from the current position.
     pub fn readInt(self: *Reader, comptime T: type) !T {
         const size = @sizeOf(T);
         if (self.pos + size > self.buf.len) return BinXmlError.UnexpectedEof;
@@ -26,12 +43,14 @@ pub const Reader = struct {
         return val;
     }
 
+    /// Peeks at the next byte without advancing position.
     pub fn peekByte(self: *const Reader) !u8 {
         if (self.pos >= self.buf.len) return BinXmlError.UnexpectedEof;
         return self.buf[self.pos];
     }
 
-    // Generic struct reader using reflection
+    /// Reads a struct by reflecting over its fields and reading each in order.
+    /// Uses comptime to specialize for each struct type.
     pub fn readStruct(self: *Reader, comptime T: type) !T {
         var result: T = undefined;
         inline for (std.meta.fields(T)) |field| {
@@ -61,11 +80,14 @@ pub const Reader = struct {
         }
     }
 
+    /// Reads a 16-byte GUID from the current position.
     pub fn readGuid(self: *Reader) ![16]u8 {
         const g = try self.readStruct(types.GuidBytes);
         return g.bytes;
     }
 
+    /// Reads exactly `n` bytes from the current position.
+    /// Returns a slice into the underlying buffer (zero-copy).
     pub inline fn readFixedBytes(self: *Reader, n: usize) ![]const u8 {
         if (self.rem() < n) return BinXmlError.UnexpectedEof;
         const slice = self.buf[self.pos .. self.pos + n];
@@ -73,14 +95,18 @@ pub const Reader = struct {
         return slice;
     }
 
+    /// Reads exactly `n` bytes, but fails if reading would exceed `end_pos`.
+    /// Used when parsing bounded regions within a larger buffer.
     pub inline fn readFixedBytesBounded(self: *Reader, n: usize, end_pos: usize) ![]const u8 {
         if (self.pos + n > end_pos) return BinXmlError.UnexpectedEof;
-        return try self.readFixedBytes(n);
+        return self.readFixedBytes(n);
     }
 
-    /// Reads a length-prefixed slice where the prefix is of type `PrefixT` (e.g. u16).
-    /// `unit_size` specifies the size of each element in the slice (e.g. 2 for UTF-16).
-    /// `end_pos` is an optional absolute position limit in the buffer.
+    /// Reads a length-prefixed slice.
+    ///
+    /// - `PrefixT`: Integer type for the length prefix (e.g. u16)
+    /// - `unit_size`: Size of each element in bytes (e.g. 2 for UTF-16)
+    /// - `end_pos`: Optional absolute position limit
     pub fn readLenPrefixedSlice(self: *Reader, comptime PrefixT: type, comptime unit_size: usize, end_pos: ?usize) ![]const u8 {
         const prefix_size = @sizeOf(PrefixT);
         if (end_pos) |end| {
@@ -102,12 +128,17 @@ pub const Reader = struct {
         return slice;
     }
 
+    /// Reads a Windows SID (Security Identifier) within the given bounds.
+    ///
+    /// SID size is variable and determined by the SubAuthorityCount field.
+    /// Returns the raw SID bytes as a slice.
     pub fn readSidBytesBounded(self: *Reader, end_pos: usize) ![]const u8 {
         if (self.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
         const start = self.pos;
 
-        // Use shared SID size calculation from value_reader
-        const needed = value_reader.sidSize(self.buf[start..]) orelse return BinXmlError.UnexpectedEof;
+        const needed = value_reader.sidSize(self.buf[start..]) orelse {
+            return BinXmlError.UnexpectedEof;
+        };
 
         if (start + needed > end_pos) return BinXmlError.UnexpectedEof;
         if (start + needed > self.buf.len) return BinXmlError.UnexpectedEof;
@@ -117,58 +148,46 @@ pub const Reader = struct {
         return slice;
     }
 
-    // Name definitions (per EVTX BinXML spec: Name)
-    // Inline Name used in value contexts (no leading unknown/hash fields)
-    // According to the spec "Name" section, there are two on-wire encodings that can appear
-    // depending on context:
-    // - Template NameLink form (handled by readTemplateNameLinkInlineView): 4 bytes next pointer,
-    //   2 bytes hash, 2 bytes num chars, UTF-16 name, then advance to the end of the inline name block.
-    // - Value-context inline name form (this function): num-chars (u16) followed by UTF-16 string.
-    //   Some real-world payloads prepend an extra u16 before num-chars. We handle both by first
-    //   attempting the prefixed variant, then falling back to the plain form.
-    // In both cases we also tolerate and trim a trailing UTF-16 NUL (EOS) after the string.
-    pub fn readValueNameInlineView(self: *Reader) !struct { utf16: []const u8, num_chars: usize } {
-        if (self.rem() >= 4) {
-            const saveA = self.pos;
-            _ = try self.readStruct(types.NameLengthHeader);
-            // Attempt prefixed form: treat next u16 as num-chars and read the UTF-16 string
-            if (self.readLenPrefixedUtf16TrimEos()) |v| return v else |_| self.pos = saveA;
-        }
-        // Fallback: plain num-chars + UTF-16
-        return try self.readLenPrefixedUtf16TrimEos();
-    }
-
-    // Read a length-prefixed UTF-16LE string: first u16 = number of UTF-16 code units,
-    // then that many bytes. If an immediate trailing UTF-16 NUL follows, consume it.
-    // Returns a view into the buffer and the number of characters.
-    pub fn readLenPrefixedUtf16TrimEos(self: *Reader) !struct { utf16: []const u8, num_chars: usize } {
-        // Manually read length here because we need num_chars for the return value
+    /// Reads a length-prefixed UTF-16LE string.
+    ///
+    /// Format: u16 num_chars, followed by num_chars * 2 bytes of UTF-16LE data.
+    /// If an immediate trailing UTF-16 NUL (0x0000) follows, it is consumed.
+    pub fn readLenPrefixedUtf16TrimEos(self: *Reader) !NameView {
         const header = try self.readStruct(types.NameLengthHeader);
-        const num = header.len;
-        const bytes = @as(usize, num) * 2;
+        const num_chars = header.len;
+        const byte_len = @as(usize, num_chars) * 2;
 
-        if (self.rem() < bytes) return BinXmlError.UnexpectedEof;
-        const slice = self.buf[self.pos .. self.pos + bytes];
-        self.pos += bytes;
+        if (self.rem() < byte_len) return BinXmlError.UnexpectedEof;
+        const slice = self.buf[self.pos .. self.pos + byte_len];
+        self.pos += byte_len;
 
+        // Consume trailing NUL if present
         if (self.rem() >= 2) {
-            const eos = std.mem.readInt(u16, self.buf[self.pos .. self.pos + 2][0..2], .little);
-            if (eos == 0) self.pos += 2;
+            const maybe_nul = std.mem.readInt(u16, self.buf[self.pos..][0..2], .little);
+            if (maybe_nul == 0) self.pos += 2;
         }
-        return .{ .utf16 = slice, .num_chars = num };
+        return .{ .utf16 = slice, .num_chars = num_chars };
     }
 
-    // Inline NameLink definition used in template definitions; includes next/hash and aligns to end-of-block
-    pub fn readTemplateNameLinkInlineView(self: *Reader) !struct { utf16: []const u8, num_chars: usize } {
-        const inl_start = self.pos;
+    /// Reads an inline NameLink definition used in template definitions.
+    ///
+    /// Format: 4 bytes next_offset, 2 bytes hash, 2 bytes num_chars, UTF-16 name.
+    /// After reading, advances to end-of-block alignment (name data + 4 byte padding).
+    pub fn readTemplateNameLinkInlineView(self: *Reader) !NameView {
+        const block_start = self.pos;
         const header = try self.readStruct(types.NameHeader);
-        const num = header.num_chars;
-        const bytes = @as(usize, num) * 2;
-        if (self.rem() < bytes) return BinXmlError.UnexpectedEof;
-        const slice_src = self.buf[self.pos .. self.pos + bytes];
-        self.pos += bytes;
-        const want_end = inl_start + 6 + bytes + 4;
-        if (self.pos < want_end and want_end <= self.buf.len) self.pos = want_end;
-        return .{ .utf16 = slice_src, .num_chars = num };
+        const num_chars = header.num_chars;
+        const byte_len = @as(usize, num_chars) * 2;
+
+        if (self.rem() < byte_len) return BinXmlError.UnexpectedEof;
+        const slice = self.buf[self.pos .. self.pos + byte_len];
+        self.pos += byte_len;
+
+        // Align to end of name block: header(6) + string + padding(4)
+        const block_end = block_start + 6 + byte_len + 4;
+        if (self.pos < block_end and block_end <= self.buf.len) {
+            self.pos = block_end;
+        }
+        return .{ .utf16 = slice, .num_chars = num_chars };
     }
 };

@@ -1,0 +1,300 @@
+---
+description: Zig style guide based on matklad's idioms for writing idiomatic, maintainable Zig code
+globs: **/*.zig
+alwaysApply: false
+---
+
+# Zig Style Guide
+
+Based on idioms from [matklad's blog](https://matklad.github.io/) and codebase analysis.
+
+## 1. Comptime Guidelines
+
+### Use Partial Evaluation, Not Code Generation
+Zig's comptime is for type dispatch and specialization, not string-based code generation.
+
+```zig
+// GOOD: Type dispatch via comptime parameter
+fn readAny(self: *Reader, comptime T: type) !T {
+    switch (@typeInfo(T)) {
+        .int => return self.readInt(T),
+        .@"enum" => |info| {
+            const val = try self.readInt(info.tag_type);
+            return std.meta.intToEnum(T, val) catch error.BadToken;
+        },
+        else => @compileError("Unsupported type: " ++ @typeName(T)),
+    }
+}
+```
+
+**Reference**: [Things Zig comptime Won't Do](https://matklad.github.io/2025/04/19/things-zig-comptime-wont-do.html)
+
+### No I/O in Comptime
+Comptime code cannot perform I/O. Use `build.zig` for build-time I/O needs.
+
+### No Host Leakage
+Comptime observes target architecture, not host. `@sizeOf(usize)` returns target size during cross-compilation.
+
+## 2. Error Handling
+
+### No Fallbacks or Heuristics
+From project rules: "If you think a heuristic is useful, then you are definitely wrong."
+
+```zig
+// BAD: Fallback pattern
+if (self.tryFormat1()) |v| return v else |_| {
+    return self.tryFormat2();  // Heuristic fallback
+}
+
+// GOOD: Deterministic format selection
+return switch (context) {
+    .template => self.readTemplateFormat(),
+    .value => self.readValueFormat(),
+};
+```
+
+### Use Error Unions Explicitly
+All fallible operations should return `!T`. Never silently ignore errors.
+
+```zig
+// BAD: Silent error suppression
+const result = operation() catch 0;
+const item = iter.next() catch null;
+
+// GOOD: Explicit error handling
+const result = try operation();
+// Or if null is valid:
+const item = iter.next() catch |err| {
+    log.err("iteration failed: {}", .{err});
+    return err;
+};
+```
+
+### Avoid `catch unreachable` for Allocations
+Allocations can fail. Use proper error propagation.
+
+```zig
+// BAD
+var list = std.ArrayList(T).initCapacity(alloc, 0) catch unreachable;
+
+// GOOD: Use .empty for zero-capacity initialization
+var list: std.ArrayList(T) = .empty;
+// Then pass allocator to append:
+try list.append(alloc, item);
+```
+
+## 3. Control Flow Patterns
+
+### Push Ifs Up
+Move conditions to callers; centralize control flow in single functions.
+
+```zig
+// BAD: Condition buried in callee
+fn process(item: ?Item) void {
+    if (item == null) return;  // Hidden early return
+    // ... processing
+}
+
+// GOOD: Caller handles the condition
+if (item) |i| {
+    process(i);  // process() assumes valid input
+}
+```
+
+**Reference**: [Push Ifs Up And Fors Down](https://matklad.github.io/2023/11/15/push-ifs-up-and-fors-down.html)
+
+### Push Fors Down
+Batch operations for performance. Process arrays together.
+
+```zig
+// BAD: Processing one at a time with repeated checks
+for (items) |item| {
+    if (condition) {
+        processOne(item);
+    }
+}
+
+// GOOD: Batch processing with condition hoisted
+if (condition) {
+    processAll(items);  // Vectorization opportunity
+}
+```
+
+### Prefer Bounded `for` Over `while` With Index
+
+```zig
+// BAD: Manual index management
+var i: usize = 0;
+while (i < items.len) : (i += 1) {
+    process(items[i]);
+}
+
+// GOOD: Use for with range or multi-object iteration
+for (items) |item| {
+    process(item);
+}
+
+// Or with index if needed:
+for (items, 0..) |item, i| {
+    processWithIndex(item, i);
+}
+
+// Multi-object iteration:
+for (keys, values) |k, v| {
+    process(k, v);
+}
+```
+
+## 4. Resource Management
+
+### Pass Allocators Explicitly (Call-Site Dependency Injection)
+Collections take allocators as parameters to methods, not at init time.
+
+```zig
+// Zig 0.15+ ArrayList pattern:
+var list: std.ArrayList(T) = .empty;
+try list.append(allocator, item);
+try list.ensureTotalCapacityPrecise(allocator, n);
+```
+
+**Reference**: [Call Site Dependency Injection](https://matklad.github.io/2020/12/28/call-site-dependency-injection.html)
+
+### Pre-allocate When Bounds Are Known
+Avoid unbounded allocations. Use `ensureTotalCapacityPrecise` when size is known.
+
+```zig
+// GOOD: Pre-size based on known bounds
+if (def.attrs.items.len > 0) {
+    try el.attrs.ensureTotalCapacityPrecise(alloc, def.attrs.items.len);
+}
+```
+
+### Use Arena Allocators for Scoped Lifetimes
+Group allocations with shared lifetime into arenas for atomic cleanup.
+
+```zig
+pub fn resetPerChunk(self: *Context) void {
+    self.cache.clearRetainingCapacity();
+    _ = self.arena.reset(.retain_capacity);
+}
+```
+
+## 5. Syntax and Naming
+
+### Import Ordering
+Place `std` first, then project imports alphabetically.
+
+```zig
+const std = @import("std");
+
+const BinXmlError = @import("err.zig").BinXmlError;
+const Context = @import("context.zig").Context;
+const Reader = @import("reader.zig").Reader;
+```
+
+### Use Named Return Types for Complex Returns
+Avoid anonymous struct returns when the type is used in multiple places.
+
+```zig
+// Define once
+pub const NameView = struct {
+    utf16: []const u8,
+    num_chars: usize,
+};
+
+// Use in multiple functions
+pub fn readName(self: *Reader) !NameView { ... }
+pub fn readTemplateName(self: *Reader) !NameView { ... }
+```
+
+### Module-Level Doc Comments at File Top
+Use `//!` comments before any code.
+
+```zig
+//! Binary XML parser for Windows Event Log format.
+//!
+//! This module handles parsing of BinXML tokens and building IR elements.
+
+const std = @import("std");
+```
+
+### Use `switch` Over Chained `if-else` for Enums
+
+```zig
+// GOOD
+switch (ascii[0]) {
+    ' ' => return self.sep_space_utf16,
+    ',' => return self.sep_comma_utf16,
+    else => {},
+}
+```
+
+## 6. API Design
+
+### Use Struct Literals for Options (Named Arguments)
+
+```zig
+// GOOD: Clear at call site
+const opts = ParserOptions{
+    .validate_checksums = true,
+    .verbosity = 2,
+    .max_records = 1000,
+};
+```
+
+### init/deinit Patterns
+- `init` creates, `deinit` destroys
+- Use `errdefer` for cleanup on error paths
+- Document ownership clearly
+
+```zig
+pub fn init(allocator: std.mem.Allocator) !Context {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+
+    var cache = std.AutoHashMap(Key, Value).init(allocator);
+    errdefer cache.deinit();
+
+    return .{ .arena = arena, .cache = cache };
+}
+```
+
+## 7. Documentation
+
+### Doc Comments for All Public Items
+Use `///` for items, `//!` for modules.
+
+```zig
+/// Reads a little-endian integer of type T from the current position.
+/// Returns `UnexpectedEof` if insufficient bytes remain.
+pub fn readInt(self: *Reader, comptime T: type) !T {
+```
+
+### Mark TODOs for Technical Debt
+Flag patterns that violate guidelines but need more investigation.
+
+```zig
+// TODO(style): This uses a fallback pattern. Investigate if caller context
+// can determine format deterministically.
+```
+
+## 8. Common Anti-Patterns to Avoid
+
+| Anti-Pattern | Issue | Fix |
+|-------------|-------|-----|
+| `catch unreachable` | Hides allocation failures | Use `.empty` or propagate error |
+| `catch 0` / `catch null` | Silent error suppression | Explicit error handling or break |
+| `catch continue` | Hides iteration errors | Log or propagate |
+| `while (i < n) : (i += 1)` | Manual index management | Use `for (0..n)` |
+| Anonymous return structs | Harder to reuse/document | Define named types |
+| Glob imports | Unclear dependencies | Import each item explicitly |
+| Fallback parsing | Heuristics violate format spec | Deterministic dispatch |
+
+## References
+
+- [Zig's Lovely Syntax](https://matklad.github.io/2025/08/09/zigs-lovely-syntax.html)
+- [Things Zig comptime Won't Do](https://matklad.github.io/2025/04/19/things-zig-comptime-wont-do.html)
+- [Push Ifs Up And Fors Down](https://matklad.github.io/2023/11/15/push-ifs-up-and-fors-down.html)
+- [Zig And Rust](https://matklad.github.io/2023/03/26/zig-and-rust.html)
+- [Error Codes for Control Flow](https://matklad.github.io/2025/11/06/error-codes-for-control-flow.html)
+- [Call Site Dependency Injection](https://matklad.github.io/2020/12/28/call-site-dependency-injection.html)

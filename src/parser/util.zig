@@ -1,3 +1,8 @@
+//! String encoding utilities for BinXML output rendering.
+//!
+//! Provides UTF-16LE to UTF-8 conversion with XML/JSON escaping,
+//! CP-1252 decoding, and timestamp formatting.
+
 const std = @import("std");
 
 inline fn xmlEntityFor(c: u8) ?[]const u8 {
@@ -532,11 +537,10 @@ pub fn writeAnsiCp1252JsonEscaped(w: anytype, bytes: []const u8) !void {
 
 pub fn utf16EqualsAscii(utf16le: []const u8, num_chars: usize, ascii: []const u8) bool {
     if (ascii.len != num_chars) return false;
-    var i: usize = 0;
-    while (i < num_chars) : (i += 1) {
+    for (ascii, 0..) |c, i| {
         const lo = utf16le[i * 2];
         const hi = utf16le[i * 2 + 1];
-        if (hi != 0 or lo != ascii[i]) return false;
+        if (hi != 0 or lo != c) return false;
     }
     return true;
 }
@@ -728,10 +732,9 @@ pub fn formatIso8601UtcFromFiletimeMicros(buf: []u8, filetime: u64) ![]const u8 
 
 pub fn utf16FromAscii(alloc: std.mem.Allocator, ascii: []const u8) ![]u8 {
     if (ascii.len == 0) return try alloc.alloc(u8, 0);
-    var buf = try alloc.alloc(u8, ascii.len * 2);
-    var i: usize = 0;
-    while (i < ascii.len) : (i += 1) {
-        buf[i * 2] = ascii[i];
+    const buf = try alloc.alloc(u8, ascii.len * 2);
+    for (ascii, 0..) |c, i| {
+        buf[i * 2] = c;
         buf[i * 2 + 1] = 0;
     }
     return buf;
@@ -783,9 +786,9 @@ fn runMatrixCase(mode: Mode, id: CaseId) !void {
     defer alloc.free(bytes);
     const num_chars = bytes.len / 2;
 
-    var out_a = std.ArrayList(u8).initCapacity(alloc, 0) catch unreachable;
+    var out_a: std.ArrayList(u8) = .empty;
     defer out_a.deinit(alloc);
-    var out_b = std.ArrayList(u8).initCapacity(alloc, 0) catch unreachable;
+    var out_b: std.ArrayList(u8) = .empty;
     defer out_b.deinit(alloc);
 
     switch (mode) {
