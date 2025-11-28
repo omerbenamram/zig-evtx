@@ -16,88 +16,12 @@ inline fn xmlEntityFor(c: u8) ?[]const u8 {
     };
 }
 
-pub fn writeXmlEscaped(w: anytype, s: []const u8) !void {
-    // Fast path: scan and write contiguous safe spans; only emit entities when needed
-    var i: usize = 0;
-    var start: usize = 0;
-    while (i < s.len) : (i += 1) {
-        const c = s[i];
-        if (xmlEntityFor(c)) |e| {
-            if (i > start) try w.writeAll(s[start..i]);
-            try w.writeAll(e);
-            start = i + 1;
-        }
-    }
-    if (start < s.len) try w.writeAll(s[start..]);
-}
-
-// JSON escaping for UTF-8 input
-pub fn jsonEscapeUtf8(w: anytype, s: []const u8) !void {
-    var i: usize = 0;
-    while (i < s.len) : (i += 1) {
-        const c = s[i];
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            0x08 => try w.writeAll("\\b"),
-            0x0c => try w.writeAll("\\f"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            else => {
-                if (c < 0x20) {
-                    var buf: [6]u8 = undefined;
-                    _ = try std.fmt.bufPrint(&buf, "\\u{X:0>4}", .{c});
-                    try w.writeAll(&buf);
-                } else {
-                    try w.writeByte(c);
-                }
-            },
-        }
-    }
-}
-
-fn writeUtf16LeWithEscaper(w: anytype, utf16le: []const u8, num_chars: usize, comptime escape: anytype) !void {
-    var i: usize = 0;
-    while (i < num_chars and (i * 2 + 1) < utf16le.len) : (i += 1) {
-        const lo = @as(u16, utf16le[i * 2]) | (@as(u16, utf16le[i * 2 + 1]) << 8);
-        var codepoint: u21 = lo;
-        if (lo >= 0xD800 and lo <= 0xDBFF) {
-            if (i + 1 >= num_chars or (i + 1) * 2 + 1 >= utf16le.len) break;
-            const lo2 = @as(u16, utf16le[(i + 1) * 2]) | (@as(u16, utf16le[(i + 1) * 2 + 1]) << 8);
-            if (lo2 >= 0xDC00 and lo2 <= 0xDFFF) {
-                const high_ten = lo - 0xD800;
-                const low_ten = lo2 - 0xDC00;
-                codepoint = 0x10000 + (@as(u21, high_ten) << 10) + @as(u21, low_ten);
-                i += 1;
-            } else {
-                continue;
-            }
-        } else if (lo >= 0xDC00 and lo <= 0xDFFF) {
-            continue;
-        }
-        var buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(codepoint, &buf) catch 0;
-        if (len == 0) continue;
-        try escape(w, buf[0..len]);
-    }
-}
-
+// Internal flush helper for scalar implementations
 inline fn flushOut2048(w: anytype, ob: *[2048]u8, olen: *usize) !void {
     if (olen.* != 0) {
         try w.writeAll(ob.*[0..olen.*]);
         olen.* = 0;
     }
-}
-
-pub fn writeUtf16LeXmlEscaped(w: anytype, utf16le: []const u8, num_chars: usize) !void {
-    // On platforms with decent vector support this SIMD-assisted path provides
-    // measurable wins for ASCII-heavy inputs. Fallback preserves behavior.
-    const builtin = @import("builtin");
-    if (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64) {
-        return writeUtf16LeXmlEscaped_simd_utf16(w, utf16le, num_chars);
-    }
-    return writeUtf16LeXmlEscaped_scalar(w, utf16le, num_chars);
 }
 
 pub fn writeUtf16LeXmlEscaped_scalar(w: anytype, utf16le: []const u8, num_chars: usize) !void {
@@ -420,7 +344,7 @@ fn writeUtf16LeEscaped_simd_utf16(
         if (comptime mode == .xml) {
             try writeUtf16LeXmlEscaped_scalar(w, utf16le[p..], max_chars - i);
         } else {
-            try writeUtf16LeWithEscaper(w, utf16le[p..], max_chars - i, jsonEscapeUtf8);
+            try writeUtf16LeJsonEscaped_scalar(w, utf16le[p..], max_chars - i);
         }
     }
 }
@@ -434,28 +358,104 @@ pub fn writeUtf16LeJsonEscaped_simd_utf16(w: anytype, utf16le: []const u8, num_c
 }
 
 pub fn writeUtf16LeJsonEscaped_scalar(w: anytype, utf16le: []const u8, num_chars: usize) !void {
-    return writeUtf16LeWithEscaper(w, utf16le, num_chars, jsonEscapeUtf8);
-}
+    var out_buf: [2048]u8 = undefined;
+    var out_len: usize = 0;
 
-// Baseline implementation kept for microbench comparison
+    const max_chars: usize = @min(num_chars, utf16le.len / 2);
+    if (max_chars == 0) return;
 
-// Write UTF-16LE input as JSON-escaped UTF-8
-pub fn writeUtf16LeJsonEscaped(w: anytype, utf16le: []const u8, num_chars: usize) !void {
-    const builtin = @import("builtin");
-    if (builtin.cpu.arch == .aarch64 or builtin.cpu.arch == .x86_64) {
-        return writeUtf16LeJsonEscaped_simd_utf16(w, utf16le, num_chars);
-    }
-    return writeUtf16LeWithEscaper(w, utf16le, num_chars, jsonEscapeUtf8);
-}
+    var i: usize = 0;
+    var p: usize = 0;
+    while (i < max_chars) : (i += 1) {
+        const b0: u8 = utf16le[p];
+        const b1: u8 = utf16le[p + 1];
+        p += 2;
 
-// Write UTF-16LE input as raw UTF-8 (no XML escaping). Suitable for CDATA bodies.
-pub fn writeUtf16LeRawToUtf8(w: anytype, utf16le: []const u8, num_chars: usize) !void {
-    const Raw = struct {
-        pub fn apply(ww: anytype, s: []const u8) !void {
-            try ww.writeAll(s);
+        if (b1 == 0) {
+            const c: u8 = b0;
+            // JSON escape handling for ASCII
+            const esc: ?[]const u8 = switch (c) {
+                '"' => "\\\"",
+                '\\' => "\\\\",
+                0x08 => "\\b",
+                0x0c => "\\f",
+                '\n' => "\\n",
+                '\r' => "\\r",
+                '\t' => "\\t",
+                else => if (c < 0x20) blk: {
+                    // Control char: \uXXXX
+                    if (out_len + 6 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                    out_buf[out_len] = '\\';
+                    out_buf[out_len + 1] = 'u';
+                    out_buf[out_len + 2] = '0';
+                    out_buf[out_len + 3] = '0';
+                    const hex = "0123456789abcdef";
+                    out_buf[out_len + 4] = hex[c >> 4];
+                    out_buf[out_len + 5] = hex[c & 0xf];
+                    out_len += 6;
+                    break :blk null;
+                } else null,
+            };
+            if (esc) |e| {
+                if (out_len + e.len > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                @memcpy(out_buf[out_len..][0..e.len], e);
+                out_len += e.len;
+                continue;
+            }
+            if (c >= 0x20 and c < 0x80) {
+                if (out_len == out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                out_buf[out_len] = c;
+                out_len += 1;
+                continue;
+            }
+            // 0x80..0xFF -> 2-byte UTF-8
+            if (out_len + 2 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+            out_buf[out_len] = 0xC0 | (c >> 6);
+            out_buf[out_len + 1] = 0x80 | (c & 0x3F);
+            out_len += 2;
+            continue;
         }
-    };
-    return writeUtf16LeWithEscaper(w, utf16le, num_chars, Raw.apply);
+
+        // BMP / surrogate handling (same as XML - no escaping needed for non-ASCII)
+        const u: u16 = @as(u16, b0) | (@as(u16, b1) << 8);
+        if (u < 0xD800 or u > 0xDFFF) {
+            const cp: u21 = u;
+            if (cp <= 0x07FF) {
+                if (out_len + 2 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                out_buf[out_len] = 0xC0 | (@as(u8, @truncate(cp >> 6)));
+                out_buf[out_len + 1] = 0x80 | (@as(u8, @truncate(cp & 0x3F)));
+                out_len += 2;
+            } else {
+                if (out_len + 3 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+                out_buf[out_len] = 0xE0 | (@as(u8, @truncate(cp >> 12)));
+                out_buf[out_len + 1] = 0x80 | (@as(u8, @truncate((cp >> 6) & 0x3F)));
+                out_buf[out_len + 2] = 0x80 | (@as(u8, @truncate(cp & 0x3F)));
+                out_len += 3;
+            }
+            continue;
+        }
+
+        if (u >= 0xD800 and u <= 0xDBFF) {
+            if (i + 1 >= max_chars) break;
+            const b20: u8 = utf16le[p];
+            const b21: u8 = utf16le[p + 1];
+            const lo_sur: u16 = @as(u16, b20) | (@as(u16, b21) << 8);
+            if (lo_sur < 0xDC00 or lo_sur > 0xDFFF) continue;
+            p += 2;
+            i += 1;
+            const high_ten: u21 = @as(u21, u - 0xD800);
+            const low_ten: u21 = @as(u21, lo_sur - 0xDC00);
+            const cp: u21 = 0x10000 + (high_ten << 10) + low_ten;
+            if (out_len + 4 > out_buf.len) try flushOut2048(w, &out_buf, &out_len);
+            out_buf[out_len] = 0xF0 | (@as(u8, @truncate(cp >> 18)));
+            out_buf[out_len + 1] = 0x80 | (@as(u8, @truncate((cp >> 12) & 0x3F)));
+            out_buf[out_len + 2] = 0x80 | (@as(u8, @truncate((cp >> 6) & 0x3F)));
+            out_buf[out_len + 3] = 0x80 | (@as(u8, @truncate(cp & 0x3F)));
+            out_len += 4;
+            continue;
+        }
+    }
+    try flushOut2048(w, &out_buf, &out_len);
 }
 
 pub fn cp1252ToCodepoint(b: u8) u21 {
@@ -493,27 +493,6 @@ pub fn cp1252ToCodepoint(b: u8) u21 {
     };
 }
 
-fn writeAnsiCp1252WithEscaper(w: anytype, bytes: []const u8, comptime escape: anytype) !void {
-    var out_buf: [8]u8 = undefined;
-    var i: usize = 0;
-    while (i < bytes.len) : (i += 1) {
-        const codepoint: u21 = cp1252ToCodepoint(bytes[i]);
-        const n = std.unicode.utf8Encode(codepoint, &out_buf) catch 0;
-        if (n == 0) continue;
-        try escape(w, out_buf[0..n]);
-    }
-}
-
-pub fn writeAnsiCp1252Escaped(w: anytype, bytes: []const u8) !void {
-    // Best-effort CP-1252 decode to UTF-8 then XML-escape
-    return writeAnsiCp1252WithEscaper(w, bytes, writeXmlEscaped);
-}
-
-// CP-1252 decode to UTF-8 then JSON-escape
-pub fn writeAnsiCp1252JsonEscaped(w: anytype, bytes: []const u8) !void {
-    return writeAnsiCp1252WithEscaper(w, bytes, jsonEscapeUtf8);
-}
-
 pub fn utf16EqualsAscii(utf16le: []const u8, num_chars: usize, ascii: []const u8) bool {
     if (ascii.len != num_chars) return false;
     for (ascii, 0..) |c, i| {
@@ -524,8 +503,332 @@ pub fn utf16EqualsAscii(utf16le: []const u8, num_chars: usize, ascii: []const u8
     return true;
 }
 
-pub fn normalizeAndWriteSystemTimeAscii(w: anytype, ascii: []const u8) !void {
-    // Some manifests include '+' markers around components. Strip them before parsing.
+const DateTimeParts = struct {
+    year: i64,
+    month: i64,
+    day: i64,
+    hour: u32,
+    minute: u32,
+    second: u32,
+};
+
+fn computeUtcFromUnixSeconds(unix_seconds: i64) DateTimeParts {
+    const z0: i64 = @divFloor(unix_seconds, 86_400);
+    const sod: i64 = unix_seconds - z0 * 86_400;
+    const z = z0 + 719_468;
+    const era = @divFloor(z, 146_097);
+    const doe = z - era * 146_097;
+    const yoe = @divFloor(doe - @divFloor(doe, 1_460) + @divFloor(doe, 36_524) - @divFloor(doe, 146_096), 365);
+    var y: i64 = yoe + era * 400;
+    const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
+    const mp = @divFloor(5 * doy + 2, 153);
+    const d = doy - @divFloor(153 * mp + 2, 5) + 1;
+    const m = mp + 3 - 12 * @as(i32, @intFromBool(mp >= 10));
+    y += @as(i64, @intFromBool(m <= 2));
+    const hour: u32 = @intCast(@divFloor(sod, 3_600));
+    const sod_rem: i64 = sod - @as(i64, hour) * 3_600;
+    const minute: u32 = @intCast(@divFloor(sod_rem, 60));
+    const second: u32 = @intCast(sod_rem - @as(i64, minute) * 60);
+    return .{ .year = y, .month = m, .day = d, .hour = hour, .minute = minute, .second = second };
+}
+
+pub fn formatIso8601UtcFromFiletimeMicros(buf: []u8, filetime: u64) ![]const u8 {
+    const TICKS_PER_SEC: u64 = 10_000_000;
+    const TICKS_PER_MICRO: u64 = 10;
+    const EPOCH_DIFF_SECS: u64 = 11_644_473_600;
+
+    if (filetime < EPOCH_DIFF_SECS * TICKS_PER_SEC) {
+        return std.fmt.bufPrint(buf, "1970-01-01T00:00:00.000000Z", .{});
+    }
+
+    const total_seconds_1601: u64 = filetime / TICKS_PER_SEC;
+    const unix_seconds: u64 = total_seconds_1601 - EPOCH_DIFF_SECS;
+    const ticks_remainder: u64 = filetime % TICKS_PER_SEC;
+    const micros: u32 = @intCast(ticks_remainder / TICKS_PER_MICRO);
+
+    const parts = computeUtcFromUnixSeconds(@as(i64, @intCast(unix_seconds)));
+    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>6}Z", .{
+        parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second, micros,
+    });
+}
+
+pub fn utf16FromAscii(alloc: std.mem.Allocator, ascii: []const u8) ![]u8 {
+    if (ascii.len == 0) return try alloc.alloc(u8, 0);
+    const buf = try alloc.alloc(u8, ascii.len * 2);
+    for (ascii, 0..) |c, i| {
+        buf[i * 2] = c;
+        buf[i * 2 + 1] = 0;
+    }
+    return buf;
+}
+
+// ============================================================================
+// Concrete std.Io.Writer Variants (Zig 0.15+)
+// ============================================================================
+// These functions use the non-generic std.Io.Writer interface for better
+// debug-mode performance and reduced code bloat.
+
+/// Writer error type for concrete Io functions.
+pub const WriterError = std.Io.Writer.Error;
+
+/// Write UTF-16LE input as XML-escaped UTF-8 to concrete std.Io.Writer.
+pub fn writeUtf16LeXmlEscaped(w: *std.Io.Writer, utf16le: []const u8, num_chars: usize) WriterError!void {
+    // Use buffered approach for performance - aggregate into local buffer then write
+    var out_buf: [2048]u8 = undefined;
+    var out_len: usize = 0;
+
+    const esc_table = comptime blk: {
+        var t: [128]u8 = [_]u8{0} ** 128;
+        t['&'] = 1;
+        t['<'] = 1;
+        t['>'] = 1;
+        t['"'] = 1;
+        t['\''] = 1;
+        break :blk t;
+    };
+
+    const max_chars: usize = @min(num_chars, utf16le.len / 2);
+    if (max_chars == 0) return;
+
+    var i: usize = 0;
+    var p: usize = 0;
+    while (i < max_chars) : (i += 1) {
+        const b0: u8 = utf16le[p];
+        const b1: u8 = utf16le[p + 1];
+        p += 2;
+
+        if (b1 == 0) {
+            const c: u8 = b0;
+            if (c < 0x80) {
+                if (esc_table[c] != 0) {
+                    const e: []const u8 = switch (c) {
+                        '&' => "&amp;",
+                        '<' => "&lt;",
+                        '>' => "&gt;",
+                        '"' => "&quot;",
+                        '\'' => "&apos;",
+                        else => unreachable,
+                    };
+                    if (out_len + e.len > out_buf.len) {
+                        try w.writeAll(out_buf[0..out_len]);
+                        out_len = 0;
+                    }
+                    @memcpy(out_buf[out_len..][0..e.len], e);
+                    out_len += e.len;
+                } else {
+                    if (out_len == out_buf.len) {
+                        try w.writeAll(out_buf[0..out_len]);
+                        out_len = 0;
+                    }
+                    out_buf[out_len] = c;
+                    out_len += 1;
+                }
+                continue;
+            }
+            if (out_len + 2 > out_buf.len) {
+                try w.writeAll(out_buf[0..out_len]);
+                out_len = 0;
+            }
+            out_buf[out_len] = 0xC0 | (c >> 6);
+            out_buf[out_len + 1] = 0x80 | (c & 0x3F);
+            out_len += 2;
+            continue;
+        }
+
+        const u: u16 = @as(u16, b0) | (@as(u16, b1) << 8);
+        if (u < 0xD800 or u > 0xDFFF) {
+            const cp: u21 = u;
+            if (cp <= 0x07FF) {
+                if (out_len + 2 > out_buf.len) {
+                    try w.writeAll(out_buf[0..out_len]);
+                    out_len = 0;
+                }
+                out_buf[out_len] = 0xC0 | (@as(u8, @truncate(cp >> 6)));
+                out_buf[out_len + 1] = 0x80 | (@as(u8, @truncate(cp & 0x3F)));
+                out_len += 2;
+            } else {
+                if (out_len + 3 > out_buf.len) {
+                    try w.writeAll(out_buf[0..out_len]);
+                    out_len = 0;
+                }
+                out_buf[out_len] = 0xE0 | (@as(u8, @truncate(cp >> 12)));
+                out_buf[out_len + 1] = 0x80 | (@as(u8, @truncate((cp >> 6) & 0x3F)));
+                out_buf[out_len + 2] = 0x80 | (@as(u8, @truncate(cp & 0x3F)));
+                out_len += 3;
+            }
+            continue;
+        }
+
+        if (u >= 0xD800 and u <= 0xDBFF) {
+            if (i + 1 >= max_chars) break;
+            const b20: u8 = utf16le[p];
+            const b21: u8 = utf16le[p + 1];
+            const lo_sur: u16 = @as(u16, b20) | (@as(u16, b21) << 8);
+            if (lo_sur < 0xDC00 or lo_sur > 0xDFFF) continue;
+            p += 2;
+            i += 1;
+            const high_ten: u21 = @as(u21, u - 0xD800);
+            const low_ten: u21 = @as(u21, lo_sur - 0xDC00);
+            const cp: u21 = 0x10000 + (high_ten << 10) + low_ten;
+            if (out_len + 4 > out_buf.len) {
+                try w.writeAll(out_buf[0..out_len]);
+                out_len = 0;
+            }
+            out_buf[out_len] = 0xF0 | (@as(u8, @truncate(cp >> 18)));
+            out_buf[out_len + 1] = 0x80 | (@as(u8, @truncate((cp >> 12) & 0x3F)));
+            out_buf[out_len + 2] = 0x80 | (@as(u8, @truncate((cp >> 6) & 0x3F)));
+            out_buf[out_len + 3] = 0x80 | (@as(u8, @truncate(cp & 0x3F)));
+            out_len += 4;
+            continue;
+        }
+    }
+    if (out_len > 0) try w.writeAll(out_buf[0..out_len]);
+}
+
+/// Write UTF-16LE input as raw UTF-8 (no escaping) to concrete std.Io.Writer.
+pub fn writeUtf16LeRawToUtf8(w: *std.Io.Writer, utf16le: []const u8, num_chars: usize) WriterError!void {
+    var out_buf: [512]u8 = undefined;
+    var out_len: usize = 0;
+
+    const max_chars: usize = @min(num_chars, utf16le.len / 2);
+    if (max_chars == 0) return;
+
+    var i: usize = 0;
+    while (i < max_chars and (i * 2 + 1) < utf16le.len) : (i += 1) {
+        const lo = @as(u16, utf16le[i * 2]) | (@as(u16, utf16le[i * 2 + 1]) << 8);
+        var codepoint: u21 = lo;
+        if (lo >= 0xD800 and lo <= 0xDBFF) {
+            if (i + 1 >= max_chars or (i + 1) * 2 + 1 >= utf16le.len) break;
+            const lo2 = @as(u16, utf16le[(i + 1) * 2]) | (@as(u16, utf16le[(i + 1) * 2 + 1]) << 8);
+            if (lo2 >= 0xDC00 and lo2 <= 0xDFFF) {
+                const high_ten = lo - 0xD800;
+                const low_ten = lo2 - 0xDC00;
+                codepoint = 0x10000 + (@as(u21, high_ten) << 10) + @as(u21, low_ten);
+                i += 1;
+            } else {
+                continue;
+            }
+        } else if (lo >= 0xDC00 and lo <= 0xDFFF) {
+            continue;
+        }
+        var buf: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(codepoint, &buf) catch 0;
+        if (len == 0) continue;
+        if (out_len + len > out_buf.len) {
+            try w.writeAll(out_buf[0..out_len]);
+            out_len = 0;
+        }
+        @memcpy(out_buf[out_len..][0..len], buf[0..len]);
+        out_len += len;
+    }
+    if (out_len > 0) try w.writeAll(out_buf[0..out_len]);
+}
+
+/// Write UTF-16LE input as JSON-escaped UTF-8 to concrete std.Io.Writer.
+pub fn writeUtf16LeJsonEscaped(w: *std.Io.Writer, utf16le: []const u8, num_chars: usize) WriterError!void {
+    var out_buf: [2048]u8 = undefined;
+    var out_len: usize = 0;
+
+    const max_chars: usize = @min(num_chars, utf16le.len / 2);
+    if (max_chars == 0) return;
+
+    var i: usize = 0;
+    while (i < max_chars and (i * 2 + 1) < utf16le.len) : (i += 1) {
+        const lo = @as(u16, utf16le[i * 2]) | (@as(u16, utf16le[i * 2 + 1]) << 8);
+        var codepoint: u21 = lo;
+
+        if (lo >= 0xD800 and lo <= 0xDBFF) {
+            if (i + 1 >= max_chars or (i + 1) * 2 + 1 >= utf16le.len) break;
+            const lo2 = @as(u16, utf16le[(i + 1) * 2]) | (@as(u16, utf16le[(i + 1) * 2 + 1]) << 8);
+            if (lo2 >= 0xDC00 and lo2 <= 0xDFFF) {
+                const high_ten = lo - 0xD800;
+                const low_ten = lo2 - 0xDC00;
+                codepoint = 0x10000 + (@as(u21, high_ten) << 10) + @as(u21, low_ten);
+                i += 1;
+            } else {
+                continue;
+            }
+        } else if (lo >= 0xDC00 and lo <= 0xDFFF) {
+            continue;
+        }
+
+        var buf: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(codepoint, &buf) catch 0;
+        if (len == 0) continue;
+
+        // JSON escape each UTF-8 byte
+        for (buf[0..len]) |c| {
+            const esc: ?[]const u8 = switch (c) {
+                '"' => "\\\"",
+                '\\' => "\\\\",
+                0x08 => "\\b",
+                0x0c => "\\f",
+                '\n' => "\\n",
+                '\r' => "\\r",
+                '\t' => "\\t",
+                else => null,
+            };
+            if (esc) |e| {
+                if (out_len + e.len > out_buf.len) {
+                    try w.writeAll(out_buf[0..out_len]);
+                    out_len = 0;
+                }
+                @memcpy(out_buf[out_len..][0..e.len], e);
+                out_len += e.len;
+            } else if (c < 0x20) {
+                if (out_len + 6 > out_buf.len) {
+                    try w.writeAll(out_buf[0..out_len]);
+                    out_len = 0;
+                }
+                const HEX = "0123456789ABCDEF";
+                out_buf[out_len] = '\\';
+                out_buf[out_len + 1] = 'u';
+                out_buf[out_len + 2] = '0';
+                out_buf[out_len + 3] = '0';
+                out_buf[out_len + 4] = HEX[@as(usize, c >> 4)];
+                out_buf[out_len + 5] = HEX[@as(usize, c & 0xF)];
+                out_len += 6;
+            } else {
+                if (out_len == out_buf.len) {
+                    try w.writeAll(out_buf[0..out_len]);
+                    out_len = 0;
+                }
+                out_buf[out_len] = c;
+                out_len += 1;
+            }
+        }
+    }
+    if (out_len > 0) try w.writeAll(out_buf[0..out_len]);
+}
+
+/// JSON escape UTF-8 string to concrete std.Io.Writer.
+pub fn jsonEscapeUtf8(w: *std.Io.Writer, s: []const u8) WriterError!void {
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        const c = s[i];
+        switch (c) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            0x08 => try w.writeAll("\\b"),
+            0x0c => try w.writeAll("\\f"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            else => {
+                if (c < 0x20) {
+                    var buf: [6]u8 = undefined;
+                    _ = std.fmt.bufPrint(&buf, "\\u{X:0>4}", .{c}) catch {};
+                    try w.writeAll(&buf);
+                } else {
+                    try w.writeByte(c);
+                }
+            },
+        }
+    }
+}
+
+/// Normalize and write SystemTime ASCII string to concrete std.Io.Writer.
+pub fn normalizeAndWriteSystemTimeAscii(w: *std.Io.Writer, ascii: []const u8) WriterError!void {
     var sanitized_buf: [64]u8 = undefined;
     var s_len: usize = 0;
     var i_s: usize = 0;
@@ -595,61 +898,53 @@ pub fn normalizeAndWriteSystemTimeAscii(w: anytype, ascii: []const u8) !void {
     try w.writeByte('Z');
 }
 
-const DateTimeParts = struct {
-    year: i64,
-    month: i64,
-    day: i64,
-    hour: u32,
-    minute: u32,
-    second: u32,
-};
-
-fn computeUtcFromUnixSeconds(unix_seconds: i64) DateTimeParts {
-    const z0: i64 = @divFloor(unix_seconds, 86_400);
-    const sod: i64 = unix_seconds - z0 * 86_400;
-    const z = z0 + 719_468;
-    const era = @divFloor(z, 146_097);
-    const doe = z - era * 146_097;
-    const yoe = @divFloor(doe - @divFloor(doe, 1_460) + @divFloor(doe, 36_524) - @divFloor(doe, 146_096), 365);
-    var y: i64 = yoe + era * 400;
-    const doy = doe - (365 * yoe + @divFloor(yoe, 4) - @divFloor(yoe, 100));
-    const mp = @divFloor(5 * doy + 2, 153);
-    const d = doy - @divFloor(153 * mp + 2, 5) + 1;
-    const m = mp + 3 - 12 * @as(i32, @intFromBool(mp >= 10));
-    y += @as(i64, @intFromBool(m <= 2));
-    const hour: u32 = @intCast(@divFloor(sod, 3_600));
-    const sod_rem: i64 = sod - @as(i64, hour) * 3_600;
-    const minute: u32 = @intCast(@divFloor(sod_rem, 60));
-    const second: u32 = @intCast(sod_rem - @as(i64, minute) * 60);
-    return .{ .year = y, .month = m, .day = d, .hour = hour, .minute = minute, .second = second };
+/// Write ANSI CP-1252 bytes as XML-escaped UTF-8 to concrete std.Io.Writer.
+pub fn writeAnsiCp1252Escaped(w: *std.Io.Writer, bytes: []const u8) WriterError!void {
+    var out_buf: [8]u8 = undefined;
+    var i: usize = 0;
+    while (i < bytes.len) : (i += 1) {
+        const codepoint: u21 = cp1252ToCodepoint(bytes[i]);
+        const n = std.unicode.utf8Encode(codepoint, &out_buf) catch 0;
+        if (n == 0) continue;
+        // XML escape inline
+        for (out_buf[0..n]) |c| {
+            if (xmlEntityFor(c)) |e| {
+                try w.writeAll(e);
+            } else {
+                try w.writeByte(c);
+            }
+        }
+    }
 }
 
-pub fn formatIso8601UtcFromFiletimeMicros(buf: []u8, filetime: u64) ![]const u8 {
-    const TICKS_PER_SEC: u64 = 10_000_000;
-    const TICKS_PER_MICRO: u64 = 10;
-    const EPOCH_DIFF_SECS: u64 = 11_644_473_600;
-
-    if (filetime < EPOCH_DIFF_SECS * TICKS_PER_SEC) {
-        return std.fmt.bufPrint(buf, "1970-01-01T00:00:00.000000Z", .{});
+/// Write ANSI CP-1252 bytes as JSON-escaped UTF-8 to concrete std.Io.Writer.
+pub fn writeAnsiCp1252JsonEscaped(w: *std.Io.Writer, bytes: []const u8) WriterError!void {
+    var out_buf: [8]u8 = undefined;
+    var i: usize = 0;
+    while (i < bytes.len) : (i += 1) {
+        const codepoint: u21 = cp1252ToCodepoint(bytes[i]);
+        const n = std.unicode.utf8Encode(codepoint, &out_buf) catch 0;
+        if (n == 0) continue;
+        // JSON escape inline
+        for (out_buf[0..n]) |c| {
+            switch (c) {
+                '"' => try w.writeAll("\\\""),
+                '\\' => try w.writeAll("\\\\"),
+                0x08 => try w.writeAll("\\b"),
+                0x0c => try w.writeAll("\\f"),
+                '\n' => try w.writeAll("\\n"),
+                '\r' => try w.writeAll("\\r"),
+                '\t' => try w.writeAll("\\t"),
+                else => {
+                    if (c < 0x20) {
+                        var buf: [6]u8 = undefined;
+                        _ = std.fmt.bufPrint(&buf, "\\u{X:0>4}", .{c}) catch {};
+                        try w.writeAll(&buf);
+                    } else {
+                        try w.writeByte(c);
+                    }
+                },
+            }
+        }
     }
-
-    const total_seconds_1601: u64 = filetime / TICKS_PER_SEC;
-    const unix_seconds: u64 = total_seconds_1601 - EPOCH_DIFF_SECS;
-    const ticks_remainder: u64 = filetime % TICKS_PER_SEC;
-    const micros: u32 = @intCast(ticks_remainder / TICKS_PER_MICRO);
-
-    const parts = computeUtcFromUnixSeconds(@as(i64, @intCast(unix_seconds)));
-    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>6}Z", .{
-        parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second, micros,
-    });
-}
-
-pub fn utf16FromAscii(alloc: std.mem.Allocator, ascii: []const u8) ![]u8 {
-    if (ascii.len == 0) return try alloc.alloc(u8, 0);
-    const buf = try alloc.alloc(u8, ascii.len * 2);
-    for (ascii, 0..) |c, i| {
-        buf[i * 2] = c;
-        buf[i * 2 + 1] = 0;
-    }
-    return buf;
 }

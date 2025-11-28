@@ -9,8 +9,7 @@ pub const FileHeader = format.FileHeader;
 pub const Chunk = format.Chunk;
 pub const EventRecordView = format.EventRecordView;
 pub const RecordIterator = format.RecordIterator;
-pub const Output = output.Output;
-pub const OutputImpl = output.OutputImpl;
+pub const OutputWriter = output.OutputWriter;
 
 /// Output format mode for streaming.
 pub const OutputMode = enum { xml, json_lines };
@@ -29,7 +28,7 @@ pub const RecordStream = struct {
 
     // Format state
     mode: OutputMode,
-    out: OutputImpl(std.io.NullWriter),
+    out: OutputWriter,
 
     // Parse state
     hdr: FileHeader,
@@ -48,23 +47,16 @@ pub const RecordStream = struct {
 
     /// Initialize a streaming iterator from an abstract reader.
     pub fn init(allocator: std.mem.Allocator, read_ctx: *anyopaque, read_fn: ReadFn, opts: ParserOptions, fmt: []const u8) !RecordStream {
+        const mode: OutputMode = if (std.mem.eql(u8, fmt, "xml")) .xml else .json_lines;
         var tmp = RecordStream{
             .allocator = allocator,
             .opts = opts,
             .read_ctx = read_ctx,
             .read_fn = read_fn,
-            .mode = if (std.mem.eql(u8, fmt, "xml")) .xml else .json_lines,
-            .out = blk: {
-                const nullw = std.io.null_writer;
-                break :blk Output.json(nullw, .lines);
-            },
+            .mode = mode,
+            .out = OutputWriter.initSerializeOnly(if (mode == .xml) .xml else .json_lines),
             .hdr = undefined,
             .ctx = try binxml.Context.init(allocator),
-        };
-        // Configure output for selected mode
-        tmp.out = switch (tmp.mode) {
-            .xml => Output.xml(std.io.null_writer),
-            .json_lines => Output.json(std.io.null_writer, .lines),
         };
 
         // Read and validate header sequentially from the same reader
@@ -74,12 +66,14 @@ pub const RecordStream = struct {
     }
 
     pub fn deinit(self: *RecordStream) void {
+        self.out.deinit();
         self.ctx.deinit();
     }
 
     fn ensureIterator(self: *RecordStream) !bool {
         if (self.have_iter) return true;
         if (self.chunk_index >= self.hdr.core.num_chunks) return false;
+
         // Strictly sequential: read next chunk from the same reader
         self.current_chunk = try Chunk.read(self);
         if (self.opts.validate_checksums) try self.current_chunk.validateChecksums();

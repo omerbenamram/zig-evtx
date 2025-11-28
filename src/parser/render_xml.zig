@@ -1,5 +1,8 @@
 //! XML rendering for BinXML IR structures.
 //! Converts the intermediate representation into properly formatted XML output.
+//!
+//! This module uses Zig 0.15's concrete std.Io.Writer interface for all output,
+//! enabling better debug-mode performance and eliminating generic code bloat.
 
 const IRModule = @import("ir.zig");
 const IR = IRModule.IR;
@@ -7,31 +10,27 @@ const logger = @import("../logger.zig");
 const std = @import("std");
 const util = @import("util.zig");
 const normalizeAndWriteSystemTimeAscii = util.normalizeAndWriteSystemTimeAscii;
-const writeUtf16LeRawToUtf8 = util.writeUtf16LeRawToUtf8;
 const binxml = @import("binxml/mod.zig");
 const Context = binxml.Context;
 const logNameTrace = @import("binxml/name.zig").logNameTrace;
 const attrNameIsSystemTime = @import("binxml/name.zig").attrNameIsSystemTime;
 const vf = @import("value_format.zig");
 
+/// Writer error type for all rendering functions.
+pub const WriterError = std.Io.Writer.Error;
+
 // ============================================================================
 // Low-Level Writing Helpers
 // ============================================================================
 
-/// Write N spaces for indentation
-inline fn writeSpaces(writer: anytype, count: usize) !void {
+/// Write N spaces for indentation using efficient splatting.
+inline fn writeSpaces(writer: *std.Io.Writer, count: usize) WriterError!void {
     if (count == 0) return;
-    const SPACES = "                                                                "; // 64 spaces
-    var remaining: usize = count;
-    while (remaining > 0) {
-        const take = @min(remaining, SPACES.len);
-        try writer.writeAll(SPACES[0..take]);
-        remaining -= take;
-    }
+    try writer.splatByteAll(' ', count);
 }
 
 /// Write an element name from UTF-16LE
-fn writeNameXml(name: IR.Name, writer: anytype) !void {
+fn writeNameXml(name: IR.Name, writer: *std.Io.Writer) WriterError!void {
     try util.writeUtf16LeXmlEscaped(writer, name.bytes, name.num_chars);
 }
 
@@ -40,7 +39,7 @@ fn writeNameXml(name: IR.Name, writer: anytype) !void {
 // ============================================================================
 
 /// Write the closing tag for an element: </Name>\n
-fn writeCloseTag(element: *const IR.Element, writer: anytype) !void {
+fn writeCloseTag(element: *const IR.Element, writer: *std.Io.Writer) WriterError!void {
     try writer.writeAll("</");
     try writeNameXml(element.name, writer);
     try writer.writeByte('>');
@@ -48,7 +47,7 @@ fn writeCloseTag(element: *const IR.Element, writer: anytype) !void {
 }
 
 /// Render a single attribute: name="value"
-fn renderAttribute(attr: *const IR.Attr, writer: anytype) !void {
+fn renderAttribute(attr: *const IR.Attr, writer: *std.Io.Writer) WriterError!void {
     try writer.writeByte(' ');
     try writeNameXml(attr.name, writer);
     try writer.writeAll("=\"");
@@ -56,9 +55,10 @@ fn renderAttribute(attr: *const IR.Attr, writer: anytype) !void {
     if (attrNameIsSystemTime(attr.name)) {
         // SystemTime attributes need normalization - buffer first, then normalize
         var buffer: [512]u8 = undefined;
-        var fbs = std.io.fixedBufferStream(&buffer);
-        try renderAttrValueNodes(attr.value.items, fbs.writer());
-        try normalizeAndWriteSystemTimeAscii(writer, fbs.getWritten());
+        var fixed_writer = std.Io.Writer.fixed(&buffer);
+        renderAttrValueNodes(attr.value.items, &fixed_writer) catch {};
+        const written = fixed_writer.buffer[0..fixed_writer.end];
+        try normalizeAndWriteSystemTimeAscii(writer, written);
     } else {
         try renderAttrValueNodes(attr.value.items, writer);
     }
@@ -67,7 +67,7 @@ fn renderAttribute(attr: *const IR.Attr, writer: anytype) !void {
 }
 
 /// Render the opening tag start with all attributes (without closing >)
-fn renderOpenTagStart(element: *const IR.Element, writer: anytype, indent: usize) !void {
+fn renderOpenTagStart(element: *const IR.Element, writer: *std.Io.Writer, indent: usize) WriterError!void {
     try writeSpaces(writer, indent);
     try writer.writeByte('<');
     try writeNameXml(element.name, writer);
@@ -81,8 +81,8 @@ fn renderOpenTagStart(element: *const IR.Element, writer: anytype, indent: usize
 // Content Rendering
 // ============================================================================
 
-/// Render attribute value tokens to any writer
-fn renderAttrValueNodes(nodes: []const IR.Node, writer: anytype) !void {
+/// Render attribute value tokens to writer
+fn renderAttrValueNodes(nodes: []const IR.Node, writer: *std.Io.Writer) WriterError!void {
     for (nodes) |node| switch (node) {
         .Text => |text| try util.writeUtf16LeXmlEscaped(writer, text.utf16, text.num_chars),
         .Pad => {},
@@ -101,7 +101,7 @@ fn renderAttrValueNodes(nodes: []const IR.Node, writer: anytype) !void {
         },
         .PIData => |pidata| {
             try writer.writeByte(' ');
-            try writeUtf16LeRawToUtf8(writer, pidata.utf16, pidata.num_chars);
+            try util.writeUtf16LeRawToUtf8(writer, pidata.utf16, pidata.num_chars);
             try writer.writeAll("?>");
         },
         .Element => {},
@@ -109,7 +109,7 @@ fn renderAttrValueNodes(nodes: []const IR.Node, writer: anytype) !void {
 }
 
 /// Render text content from IR nodes
-fn renderTextContentFromIR(nodes: []const IR.Node, writer: anytype) !void {
+fn renderTextContentFromIR(nodes: []const IR.Node, writer: *std.Io.Writer) WriterError!void {
     for (nodes) |node| {
         switch (node) {
             .Text => |text| try util.writeUtf16LeXmlEscaped(writer, text.utf16, text.num_chars),
@@ -124,7 +124,7 @@ fn renderTextContentFromIR(nodes: []const IR.Node, writer: anytype) !void {
             },
             .CData => |cdata| {
                 try writer.writeAll("<![CDATA[");
-                try writeUtf16LeRawToUtf8(writer, cdata.utf16, cdata.num_chars);
+                try util.writeUtf16LeRawToUtf8(writer, cdata.utf16, cdata.num_chars);
                 try writer.writeAll("]]>");
             },
             .PITarget => |name| {
@@ -133,7 +133,7 @@ fn renderTextContentFromIR(nodes: []const IR.Node, writer: anytype) !void {
             },
             .PIData => |pidata| {
                 try writer.writeByte(' ');
-                try writeUtf16LeRawToUtf8(writer, pidata.utf16, pidata.num_chars);
+                try util.writeUtf16LeRawToUtf8(writer, pidata.utf16, pidata.num_chars);
                 try writer.writeAll("?>");
             },
             .Element => {},
@@ -146,7 +146,7 @@ fn renderTextContentFromIR(nodes: []const IR.Node, writer: anytype) !void {
 // ============================================================================
 
 /// Recursively render an IR element to XML
-fn renderElementIRXml(element: *const IR.Element, writer: anytype, indent: usize) anyerror!void {
+fn renderElementIRXml(element: *const IR.Element, writer: *std.Io.Writer, indent: usize) WriterError!void {
     // Render opening tag with attributes
     try renderOpenTagStart(element, writer, indent);
 
@@ -191,8 +191,8 @@ fn renderElementIRXml(element: *const IR.Element, writer: anytype, indent: usize
 // Public API
 // ============================================================================
 
-/// Render XML from BinXML with context
-pub fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, writer: anytype) anyerror!void {
+/// Render XML from BinXML with context using concrete std.Io.Writer.
+pub fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, writer: *std.Io.Writer) anyerror!void {
     if (ctx.verbose) logger.setModuleLevel("binxml", .trace);
 
     var builder = binxml.Builder.init(ctx);
@@ -207,6 +207,6 @@ pub fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w
 
 /// Render a single value payload to XML text according to its Binary XML type.
 /// Uses the typed value_format module for clean, well-structured formatting.
-pub fn writeValueXml(writer: anytype, raw_type: u8, data: []const u8) !void {
+pub fn writeValueXml(writer: *std.Io.Writer, raw_type: u8, data: []const u8) WriterError!void {
     try vf.formatValueXmlFromRaw(writer, raw_type, data);
 }

@@ -261,8 +261,9 @@ pub fn dump_file_bytes(args: struct {
     var read_buf: [8192]u8 = undefined;
     var reader = infile.reader(&read_buf);
 
-    var buf = std.ArrayList(u8).initCapacity(allocator, 0) catch return;
-    const out_writer = buf.writer(allocator);
+    // Use Allocating writer to collect output
+    var scratch = std.Io.Writer.Allocating.initCapacity(allocator, 64 * 1024) catch std.Io.Writer.Allocating.init(allocator);
+    defer scratch.deinit();
 
     var parser = try evtx.EvtxParser.init(allocator, .{
         .validate_checksums = args.validate_checksums,
@@ -274,20 +275,20 @@ pub fn dump_file_bytes(args: struct {
 
     var output = blk: {
         if (std.mem.eql(u8, args.format, "xml")) {
-            break :blk evtx.Output.xml(out_writer);
+            break :blk evtx.OutputWriter.initXml(&scratch.writer);
         } else if (std.mem.eql(u8, args.format, "json")) {
-            break :blk evtx.Output.json(out_writer, .single);
+            break :blk evtx.OutputWriter.initJson(&scratch.writer, .single);
         } else if (std.mem.eql(u8, args.format, "jsonl") or std.mem.eql(u8, args.format, "jsonlines")) {
-            break :blk evtx.Output.json(out_writer, .lines);
+            break :blk evtx.OutputWriter.initJson(&scratch.writer, .lines);
         } else {
             return error.InvalidFormat;
         }
     };
+    defer output.deinit();
 
     try parser.parse(&reader, &output);
     output.flush();
-    const py_str = try py.PyString(@This()).create(buf.items);
-    buf.deinit();
+    const py_str = try py.PyString(@This()).create(scratch.written());
     return py_str.obj;
 }
 
@@ -310,7 +311,7 @@ pub fn dump_file_to_file(args: struct {
     var outfile = try std.fs.cwd().createFile(args.out_path, .{ .truncate = true });
     defer outfile.close();
     var write_buf: [8192]u8 = undefined;
-    const out_writer = outfile.writer(&write_buf);
+    var out_writer = outfile.writer(&write_buf);
 
     var parser = try evtx.EvtxParser.init(allocator, .{
         .validate_checksums = args.validate_checksums,
@@ -322,15 +323,16 @@ pub fn dump_file_to_file(args: struct {
 
     var output = blk: {
         if (std.mem.eql(u8, args.format, "xml")) {
-            break :blk evtx.Output.xml(out_writer);
+            break :blk evtx.OutputWriter.initXml(&out_writer.interface);
         } else if (std.mem.eql(u8, args.format, "json")) {
-            break :blk evtx.Output.json(out_writer, .single);
+            break :blk evtx.OutputWriter.initJson(&out_writer.interface, .single);
         } else if (std.mem.eql(u8, args.format, "jsonl") or std.mem.eql(u8, args.format, "jsonlines")) {
-            break :blk evtx.Output.json(out_writer, .lines);
+            break :blk evtx.OutputWriter.initJson(&out_writer.interface, .lines);
         } else {
             return error.InvalidFormat;
         }
     };
+    defer output.deinit();
 
     try parser.parse(&reader, &output);
     output.flush();

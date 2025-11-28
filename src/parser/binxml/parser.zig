@@ -13,10 +13,26 @@ const utf16EqualsAscii = util.utf16EqualsAscii;
 const binxml_name = @import("name.zig");
 const common = @import("common.zig");
 
-/// Defines the source context for parsing, whether we are parsing a record or a template definition.
-pub const Source = enum {
-    rec,
-    def,
+/// Context required for parsing BinXML elements.
+///
+/// BinXML element headers have two variations based on where they appear:
+/// - **Template definitions**: headers include a dependency ID (2 bytes)
+/// - **Direct elements**: headers omit the dependency ID
+///
+/// Additionally, element names can be stored inline or referenced by offset:
+/// - **Inline**: name immediately follows the offset field (offset == current chunk position)
+/// - **Offset-based**: name is stored elsewhere in the chunk
+///
+/// This context provides the information needed to handle both variations automatically.
+pub const ElementContext = struct {
+    /// Absolute offset where this BinXML data starts within the chunk.
+    /// Used to determine if name offsets point to inline names (offset == chunk_base + reader.pos)
+    /// or to names stored elsewhere in the chunk.
+    chunk_base: usize,
+
+    /// Whether element headers contain a dependency ID field.
+    /// True for template definitions, false for direct record elements.
+    has_dep_id: bool,
 };
 
 /// Bundles common parsing state to reduce function signature noise.
@@ -24,11 +40,17 @@ pub const ParseState = struct {
     ctx: *Context,
     chunk: []const u8,
     r: *Reader,
-    src: Source,
-    chunk_base: usize = 0,
+    chunk_base: usize,
+    has_dep_id: bool,
 
-    pub fn init(ctx: *Context, chunk: []const u8, r: *Reader, src: Source, chunk_base: usize) ParseState {
-        return .{ .ctx = ctx, .chunk = chunk, .r = r, .src = src, .chunk_base = chunk_base };
+    pub fn init(ctx: *Context, chunk: []const u8, r: *Reader, elem_ctx: ElementContext) ParseState {
+        return .{
+            .ctx = ctx,
+            .chunk = chunk,
+            .r = r,
+            .chunk_base = elem_ctx.chunk_base,
+            .has_dep_id = elem_ctx.has_dep_id,
+        };
     }
 
     /// Returns the arena allocator for all chunk-local allocations.
@@ -40,9 +62,8 @@ pub const ParseState = struct {
 /// Parses an element and returns its IR representation.
 /// This function is the entry point for parsing a BinXML element.
 /// All allocations use the context's arena allocator.
-/// Pass chunk_base=0 for records, or the template data_start offset for definitions.
-pub fn parseElementIR(ctx: *Context, chunk: []const u8, r: *Reader, src: Source, chunk_base: usize) !*IR.Element {
-    var ps = ParseState.init(ctx, chunk, r, src, chunk_base);
+pub fn parseElementIR(ctx: *Context, chunk: []const u8, r: *Reader, elem_ctx: ElementContext) !*IR.Element {
+    var ps = ParseState.init(ctx, chunk, r, elem_ctx);
     return parseElementIRImpl(&ps);
 }
 
@@ -123,7 +144,7 @@ fn parseElementIRImpl(ps: *ParseState) !*IR.Element {
     const element_start_pos = ps.r.pos;
 
     if (log.enabled(.trace)) {
-        logTraceContext("parseElementIR", ps.src, ps.r, null);
+        logTraceContext("parseElementIR", ps.r, null);
     }
 
     // 1. Validate OpenStart Token
@@ -173,7 +194,7 @@ fn parseElementIRImpl(ps: *ParseState) !*IR.Element {
     // 7. Expect CloseStart Token (start of content)
     if (!tokens.isToken(close_token, tokens.TOK_CLOSE_START)) {
         if (log.enabled(.trace)) {
-            logTraceContext("unexpected nxt window", ps.src, ps.r, pos_before_close);
+            logTraceContext("unexpected nxt window", ps.r, pos_before_close);
         }
         log.err("expected CloseStart, got 0x{x} at 0x{x}", .{ close_token, ps.r.pos - 1 });
         return BinXmlError.BadToken;
@@ -377,46 +398,77 @@ fn parseValueToken(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize
                 const payload = try ps.r.readFixedBytesBounded(sz, end_pos);
                 try out.append(ps.alloc(), .{ .Value = .{ .vtype = vtype, .bytes = payload } });
             } else {
-                log.err("unknown value vtype=0x{x} at pos=0x{x} src={s}", .{ vtype, ps.r.pos, @tagName(ps.src) });
+                log.err("unknown value vtype=0x{x} at pos=0x{x} has_dep_id={}", .{ vtype, ps.r.pos, ps.has_dep_id });
                 return BinXmlError.BadToken;
             }
         },
     }
 }
 
-// --- Name Handling Helpers ---
+// --- Unified Name Resolution ---
 
-fn readNameIRBounded(ps: *ParseState, end_pos: usize) !IR.Name {
-    return switch (ps.src) {
-        .rec => blk: {
-            if (ps.r.pos + 4 > end_pos) break :blk BinXmlError.UnexpectedEof;
-            const h = try ps.r.readStruct(types.NameOffsetHeader);
-            break :blk try ps.ctx.getOrReadName(ps.chunk, h.offset);
-        },
-        .def => try parseDefNameIR(ps),
-    };
-}
+/// Resolves a name from a name offset.
+/// Automatically handles inline names (when offset == current chunk position)
+/// vs offset-based names (when offset points elsewhere in the chunk).
+fn resolveName(ps: *ParseState, name_offset: u32) !IR.Name {
+    const current_chunk_pos = ps.chunk_base + ps.r.pos;
 
-fn parseDefNameIR(ps: *ParseState) !IR.Name {
-    const h = try ps.r.readStruct(types.NameOffsetHeader);
-    const name_off = h.offset;
-
-    if (log.enabled(.trace)) log.trace("def name_off=0x{x} cur_after_off=0x{x}", .{ name_off, ps.r.pos });
-
-    const abs_after_off: usize = ps.chunk_base + ps.r.pos;
-
-    // Check for inline name optimization (offset points to current position)
-    if (name_off == @as(u32, @intCast(abs_after_off))) {
-        const view = try ps.r.readTemplateNameLinkInlineView();
-        if (log.enabled(.trace)) log.trace("inline NameLink next+hash read inl_start to end; num={d}", .{view.num_chars});
-
-        const buf = try ps.alloc().alloc(u8, view.bytes.len);
-        @memcpy(buf, view.bytes);
-
-        return IR.Name{ .bytes = buf, .num_chars = view.num_chars };
+    if (log.enabled(.trace)) {
+        log.trace("resolveName: name_off=0x{x} current_chunk_pos=0x{x} chunk_base=0x{x}", .{ name_offset, current_chunk_pos, ps.chunk_base });
     }
 
-    return ps.ctx.getOrReadName(ps.chunk, name_off);
+    // If offset points to current position, name is inline
+    if (name_offset == @as(u32, @intCast(current_chunk_pos))) {
+        return readNameInline(ps);
+    }
+
+    // Otherwise, name is stored elsewhere in the chunk
+    return ps.ctx.getOrReadName(ps.chunk, name_offset);
+}
+
+/// Reads a name that is stored inline at the current reader position.
+/// The name format is: NameHeader (8 bytes) + UTF-16 string + null terminator (2 bytes)
+fn readNameInline(ps: *ParseState) !IR.Name {
+    const name_block_start = ps.r.pos;
+    const hdr = try ps.r.readStruct(types.NameHeader);
+    const num_chars = hdr.num_chars;
+    const byte_len = @as(usize, num_chars) * 2;
+
+    if (log.enabled(.debug)) {
+        log.debug("readNameInline: next_off=0x{x} hash=0x{x} num_chars={d}", .{ hdr.next_offset, hdr.hash, num_chars });
+    }
+
+    if (ps.r.rem() < byte_len) return BinXmlError.UnexpectedEof;
+    const str_start = ps.r.pos;
+    const slice = ps.r.buf[str_start .. str_start + byte_len];
+    ps.r.pos += byte_len;
+
+    // Allocate and copy name (names persist beyond chunk processing)
+    const buf = try ps.alloc().alloc(u8, byte_len);
+    @memcpy(buf, slice);
+
+    // Skip null terminator (2 bytes for UTF-16).
+    // Name block: NameHeader (8) + string (byte_len) + null (2)
+    const name_block_size = 8 + byte_len + 2;
+    const name_block_end = name_block_start + name_block_size;
+
+    if (log.enabled(.debug)) {
+        log.debug("readNameInline: block_size={d} block_start=0x{x} block_end=0x{x}", .{ name_block_size, name_block_start, name_block_end });
+    }
+
+    // Position reader at end of name block
+    if (name_block_end <= ps.r.buf.len) {
+        ps.r.pos = name_block_end;
+    }
+
+    return IR.Name{ .bytes = buf, .num_chars = num_chars };
+}
+
+/// Reads a name offset and resolves it, with bounds checking.
+fn readNameIRBounded(ps: *ParseState, end_pos: usize) !IR.Name {
+    if (ps.r.pos + 4 > end_pos) return BinXmlError.UnexpectedEof;
+    const h = try ps.r.readStruct(types.NameOffsetHeader);
+    return resolveName(ps, h.offset);
 }
 
 // --- Element Header Parsing ---
@@ -429,10 +481,7 @@ const ElementHeader = struct {
 };
 
 fn parseElementHeaderAndEnd(ps: *ParseState, element_start: usize) !ElementHeader {
-    const hdr = switch (ps.src) {
-        .rec => try parseRecElementHeader(ps),
-        .def => try parseDefElementHeader(ps),
-    };
+    const hdr = try parseElementHeader(ps);
 
     const element_end = element_start + hdr.header_len + @as(usize, hdr.data_size);
 
@@ -463,100 +512,35 @@ const PartialElementHeader = struct {
     header_len: usize,
 };
 
-fn parseRecElementHeader(ps: *ParseState) !PartialElementHeader {
+/// Parses an element header (after the OpenStart token).
+/// Handles both formats:
+/// - Template definitions: dep_id (2 bytes) + data_size (4 bytes) + name_offset (4 bytes)
+/// - Direct elements: data_size (4 bytes) + name_offset (4 bytes)
+fn parseElementHeader(ps: *ParseState) !PartialElementHeader {
     const pos_before = ps.r.pos;
 
-    // For direct elements in records (non-template path), there's NO dependency ID.
-    // Per MS-EVEN6: "the dependency identifier is not present when the element start
-    // is used in a substitution token with value type: Binary XML (0x21)"
-    // This also applies to direct (non-template) record elements.
-    const h = try ps.r.readStruct(types.ElementStartHeaderNoDep);
-
-    if (log.enabled(.debug)) {
-        log.debug("parseRecElementHeader: pos=0x{x} data_size=0x{x} ({d})", .{ pos_before, h.data_size, h.data_size });
+    // Template definitions have a dependency ID, direct elements don't
+    if (ps.has_dep_id) {
+        _ = try ps.r.readInt(u16); // Read and discard dep_id
     }
 
-    // Per spec: 1 byte token + 4 bytes data_size (no dep_id for direct elements)
-    const header_len: usize = 1 + 4;
-    const h2 = try ps.r.readStruct(types.NameOffsetHeader);
-    const name_off = h2.offset;
-
-    // Compute current chunk position: chunk_base + reader position
-    const current_chunk_pos = ps.chunk_base + ps.r.pos;
+    const data_size = try ps.r.readInt(u32);
 
     if (log.enabled(.debug)) {
-        log.debug("parseRecElementHeader: name_off=0x{x} current_chunk_pos=0x{x} chunk_base=0x{x}", .{ name_off, current_chunk_pos, ps.chunk_base });
+        log.debug("parseElementHeader: pos=0x{x} has_dep_id={} data_size=0x{x} ({d})", .{ pos_before, ps.has_dep_id, data_size, data_size });
     }
 
-    // Determine if name is inline or at a separate offset:
-    // - If name_off == current_chunk_pos, name is stored inline right here
-    // - Otherwise, name is stored elsewhere in the chunk, look it up
-    const name = if (name_off == @as(u32, @intCast(current_chunk_pos)))
-        try readRecNameInline(ps)
-    else
-        try ps.ctx.getOrReadName(ps.chunk, name_off);
+    // Read name offset and resolve name (inline or from chunk)
+    const name_offset_header = try ps.r.readStruct(types.NameOffsetHeader);
+    const name = try resolveName(ps, name_offset_header.offset);
 
-    return .{ .name = name, .data_size = h.data_size, .header_len = header_len };
+    // Header length: 1 byte token + optional 2 bytes dep_id + 4 bytes data_size
+    const header_len: usize = 1 + (if (ps.has_dep_id) @as(usize, 2) else 0) + 4;
+
+    return .{ .name = name, .data_size = data_size, .header_len = header_len };
 }
 
-/// Reads an inline name for record direct elements.
-/// The name is stored as NameHeader (next_offset, hash, num_chars) followed by UTF-16 string + null terminator.
-fn readRecNameInline(ps: *ParseState) !IR.Name {
-    // Read NameHeader: next_offset (u32) + hash (u16) + num_chars (u16) = 8 bytes
-    const name_block_start = ps.r.pos;
-    const hdr = try ps.r.readStruct(types.NameHeader);
-    const num_chars = hdr.num_chars;
-    const byte_len = @as(usize, num_chars) * 2;
-
-    if (log.enabled(.debug)) {
-        log.debug("readRecNameInline: next_off=0x{x} hash=0x{x} num_chars={d}", .{ hdr.next_offset, hdr.hash, num_chars });
-    }
-
-    if (ps.r.rem() < byte_len) return BinXmlError.UnexpectedEof;
-    const str_start = ps.r.pos;
-    const slice = ps.r.buf[str_start .. str_start + byte_len];
-    ps.r.pos += byte_len;
-
-    // Allocate and copy name (names need to persist beyond chunk processing)
-    const buf = try ps.alloc().alloc(u8, byte_len);
-    @memcpy(buf, slice);
-
-    // Skip null terminator (2 bytes for UTF-16).
-    // Name block: NameHeader (8) + string (byte_len) + null (2)
-    // Note: NO alignment padding in BinXML name blocks.
-    const name_block_size = 8 + byte_len + 2;
-    const name_block_end = name_block_start + name_block_size;
-
-    if (log.enabled(.debug)) {
-        log.debug("readRecNameInline: block_size={d} block_start=0x{x} block_end=0x{x}", .{ name_block_size, name_block_start, name_block_end });
-    }
-
-    // Position reader at end of name block (skip null terminator)
-    if (name_block_end <= ps.r.buf.len) {
-        ps.r.pos = name_block_end;
-    }
-
-    if (log.enabled(.debug)) {
-        log.debug("readRecNameInline: new_pos=0x{x}", .{ps.r.pos});
-    }
-
-    return IR.Name{ .bytes = buf, .num_chars = num_chars };
-}
-
-fn parseDefElementHeader(ps: *ParseState) !PartialElementHeader {
-    const h = try ps.r.readStruct(types.ElementStartHeader);
-
-    if (log.enabled(.trace)) {
-        logTraceContext("def pre-name (with dep)", .def, ps.r, null);
-    }
-
-    const nm = try parseDefNameIR(ps);
-    // Per spec: 1 byte token + 2 bytes dep_id + 4 bytes data_size
-    const header_len: usize = 1 + 2 + 4;
-    return .{ .name = nm, .data_size = h.data_size, .header_len = header_len };
-}
-
-fn logTraceContext(msg: []const u8, src: Source, r: *Reader, pos_override: ?usize) void {
+fn logTraceContext(msg: []const u8, r: *Reader, pos_override: ?usize) void {
     const pos = pos_override orelse r.pos;
     var tmp: [24]u8 = undefined;
     const rem = if (pos < r.buf.len) r.buf.len - pos else 0;
@@ -564,7 +548,7 @@ fn logTraceContext(msg: []const u8, src: Source, r: *Reader, pos_override: ?usiz
     @memcpy(tmp[0..take], r.buf[pos .. pos + take]);
 
     var hex_buf: [48]u8 = undefined;
-    log.trace("{s} src={s} pos=0x{x} data: {s}", .{ msg, @tagName(src), pos, fmtHexSliceLower(tmp[0..take], &hex_buf) });
+    log.trace("{s} pos=0x{x} data: {s}", .{ msg, pos, fmtHexSliceLower(tmp[0..take], &hex_buf) });
 }
 
 fn fmtHexSliceLower(buf: []const u8, out: []u8) []const u8 {

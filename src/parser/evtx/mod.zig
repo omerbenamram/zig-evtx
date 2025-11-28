@@ -8,8 +8,8 @@
 pub const ParserOptions = @import("parser.zig").ParserOptions;
 pub const EvtxParser = @import("parser.zig").EvtxParser;
 
-pub const Output = @import("output.zig").Output;
-pub const OutputImpl = @import("output.zig").OutputImpl;
+pub const OutputWriter = @import("output.zig").OutputWriter;
+pub const JsonMode = @import("output.zig").JsonMode;
 
 pub const RecordStream = @import("stream.zig").RecordStream;
 pub const OutputMode = @import("stream.zig").OutputMode;

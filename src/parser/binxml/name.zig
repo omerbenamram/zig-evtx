@@ -13,11 +13,10 @@ pub fn attrNameIsSystemTime(name: IR.Name) bool {
 pub fn logNameTrace(name: IR.Name, label: []const u8) !void {
     if (!log.enabled(.trace)) return;
     var tmp: [256]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&tmp);
-    const w = fbs.writer();
+    var w = std.Io.Writer.fixed(&tmp);
     try w.writeAll("[");
     try w.writeAll(label);
     try w.writeAll("] ");
-    try util.writeUtf16LeXmlEscaped(w, name.bytes, name.num_chars);
-    log.trace("{s}", .{fbs.getWritten()});
+    try util.writeUtf16LeXmlEscaped(&w, name.bytes, name.num_chars);
+    log.trace("{s}", .{tmp[0..w.end]});
 }

@@ -186,8 +186,10 @@ pub const EventRecordView = struct {
         var buf = std.ArrayList(u8).initCapacity(alloc_mod.get(), 0) catch return;
         defer buf.deinit(alloc_mod.get());
         var bw = buf.writer(alloc_mod.get());
-        try render_xml.renderXmlWithContext(&ctx, self.chunk_buf, self.raw_xml, bw);
-        try bw.writeByte('\n');
+        var adapter = bw.adaptToNewApi(&.{});
+        const writer: *std.Io.Writer = &adapter.new_interface;
+        try render_xml.renderXmlWithContext(&ctx, self.chunk_buf, self.raw_xml, writer);
+        try writer.writeByte('\n');
         try w.interface.writeAll(buf.items);
     }
 
@@ -196,14 +198,16 @@ pub const EventRecordView = struct {
         var buf = std.ArrayList(u8).initCapacity(alloc_mod.get(), 0) catch return;
         defer buf.deinit(alloc_mod.get());
         var bw = buf.writer(alloc_mod.get());
-        try bw.writeAll("{");
-        try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ self.id, self.timestamp_filetime });
+        var adapter = bw.adaptToNewApi(&.{});
+        const writer: *std.Io.Writer = &adapter.new_interface;
+        try writer.writeAll("{");
+        try writer.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ self.id, self.timestamp_filetime });
         var ctx = try binxml.Context.init(alloc_mod.get());
         defer ctx.deinit();
         var builder = binxml.Builder.init(&ctx);
         const root = try builder.build(self.chunk_buf, self.raw_xml);
-        try render_json.renderElementJson(root, ctx.arena.allocator(), bw);
-        try bw.writeAll("}\n");
+        try render_json.renderElementJson(root, ctx.arena.allocator(), writer);
+        try writer.writeAll("}\n");
         try w.interface.writeAll(buf.items);
     }
 };

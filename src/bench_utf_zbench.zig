@@ -58,7 +58,7 @@ fn bench_new_ascii(_: std.mem.Allocator) void {
 }
 
 fn bench_simd_ascii(_: std.mem.Allocator) void {
-    util.writeUtf16LeXmlEscaped(g_writer, g_utf, g_num_chars) catch unreachable;
+    util.writeUtf16LeXmlEscaped_simd_utf16(g_writer, g_utf, g_num_chars) catch unreachable;
 }
 
 pub fn main() !void {

@@ -70,11 +70,13 @@ pub fn main() !void {
     if (num_threads <= 1) {
         var write_buf: [8192]u8 = undefined;
         var stdout_file = std.fs.File.stdout();
+        var stdout_writer = stdout_file.writer(&write_buf);
         var output = switch (output_mode) {
-            .xml => evtx.Output.xml(stdout_file.writer(&write_buf)),
-            .json => evtx.Output.json(stdout_file.writer(&write_buf), .single),
-            .jsonl => evtx.Output.json(stdout_file.writer(&write_buf), .lines),
+            .xml => evtx.OutputWriter.initXml(&stdout_writer.interface),
+            .json => evtx.OutputWriter.initJson(&stdout_writer.interface, .single),
+            .jsonl => evtx.OutputWriter.initJson(&stdout_writer.interface, .lines),
         };
+        defer output.deinit();
         try parser.parse(&reader, &output);
         output.flush();
     } else {

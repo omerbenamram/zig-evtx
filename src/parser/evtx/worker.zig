@@ -12,7 +12,7 @@ const output = @import("output.zig");
 pub const FileHeader = format.FileHeader;
 pub const Chunk = format.Chunk;
 pub const EventRecordView = format.EventRecordView;
-pub const Output = output.Output;
+pub const OutputWriter = output.OutputWriter;
 
 pub const OutKind = enum { xml, json_single, json_lines };
 
@@ -39,15 +39,13 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
     const allocator = shared.allocator;
     const opts = shared.opts;
 
-    // Use a null writer for serialization - we'll write the result directly
-    const null_writer = std.io.null_writer;
-
-    // Per-task output and context
-    var out = switch (shared.out_kind) {
-        .xml => Output.xml(null_writer),
-        .json_single => Output.json(null_writer, .single),
-        .json_lines => Output.json(null_writer, .lines),
-    };
+    // Serialize-only mode: we get bytes from serializeRecord and write them manually
+    var out = OutputWriter.initSerializeOnly(switch (shared.out_kind) {
+        .xml => .xml,
+        .json_single => .json_single,
+        .json_lines => .json_lines,
+    });
+    defer out.deinit();
     var ctx = binxml.Context.init(allocator) catch return;
     defer ctx.deinit();
 

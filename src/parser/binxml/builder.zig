@@ -123,7 +123,10 @@ pub const Builder = struct {
     /// Parses a direct BinXML element (not wrapped in a template).
     /// After parsing, scans for any nested BinXML values that need recursive parsing.
     fn buildElement(self: *Builder, chunk: []const u8, r: *Reader, chunk_base: usize) !*IR.Element {
-        const root = try binxml_parser.parseElementIR(self.ctx, chunk, r, .rec, chunk_base);
+        const root = try binxml_parser.parseElementIR(self.ctx, chunk, r, .{
+            .chunk_base = chunk_base,
+            .has_dep_id = false, // Direct elements have no dependency ID
+        });
 
         // Scan for nested BinXML (type 0x21) and parse recursively
         try self.scanAndExpandNestedBinXml(chunk, root);
@@ -264,8 +267,10 @@ pub const Builder = struct {
         var def_r = Reader.init(chunk[data_start..data_end]);
         try common.skipFragmentHeaderIfPresent(&def_r);
 
-        // .def source mode handles specific name parsing rules for templates
-        return binxml_parser.parseElementIR(self.ctx, chunk, &def_r, .def, data_start);
+        return binxml_parser.parseElementIR(self.ctx, chunk, &def_r, .{
+            .chunk_base = data_start,
+            .has_dep_id = true, // Template definitions include dependency IDs
+        });
     }
 
     // =========================================================================
