@@ -88,8 +88,8 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
         }
 
         shared.write_mutex.lock();
-        // Write directly to stdout fd, bypassing buffering issues
-        _ = std.posix.write(shared.stdout_file.handle, chunk_out.items) catch {};
+        // Write directly to file, bypassing buffered writer issues
+        shared.stdout_file.writeAll(chunk_out.items) catch {};
         shared.write_mutex.unlock();
     } else {
         // Slow path: global skip/max limits require per-record locking
@@ -118,7 +118,7 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
             if (opts.max_records != 0 and shared.emitted.* >= opts.max_records) {
                 continue;
             }
-            _ = std.posix.write(shared.stdout_file.handle, bytes) catch continue;
+            shared.stdout_file.writeAll(bytes) catch continue;
             if (opts.max_records != 0) {
                 shared.emitted.* += 1;
             }

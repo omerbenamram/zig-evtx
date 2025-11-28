@@ -86,6 +86,10 @@ pub const Builder = struct {
             return self.buildEmpty();
         }
 
+        // Compute chunk_base: the offset where bin starts within chunk.
+        // This is needed for name offset calculations in direct elements.
+        const chunk_base = @intFromPtr(bin.ptr) - @intFromPtr(chunk.ptr);
+
         // Dispatch based on whether this is a template instance or direct element
         if (try self.isTemplateInstance(&r)) {
             return self.buildTemplate(chunk, &r);
@@ -93,10 +97,10 @@ pub const Builder = struct {
 
         if (log.enabled(.debug)) {
             const pk = r.peekByte() catch 0;
-            log.debug("build: direct element path, bin_len={d} pos={d} first_token=0x{x}", .{ bin.len, r.pos, pk });
+            log.debug("build: direct element path, bin_len={d} pos={d} first_token=0x{x} chunk_base=0x{x}", .{ bin.len, r.pos, pk, chunk_base });
         }
 
-        return self.buildElement(chunk, &r);
+        return self.buildElement(chunk, &r, chunk_base);
     }
 
     /// Creates a minimal <Event/> element for empty records.
@@ -118,8 +122,8 @@ pub const Builder = struct {
 
     /// Parses a direct BinXML element (not wrapped in a template).
     /// After parsing, scans for any nested BinXML values that need recursive parsing.
-    fn buildElement(self: *Builder, chunk: []const u8, r: *Reader) !*IR.Element {
-        const root = try binxml_parser.parseElementIR(self.ctx, chunk, r, .rec, 0);
+    fn buildElement(self: *Builder, chunk: []const u8, r: *Reader, chunk_base: usize) !*IR.Element {
+        const root = try binxml_parser.parseElementIR(self.ctx, chunk, r, .rec, chunk_base);
 
         // Scan for nested BinXML (type 0x21) and parse recursively
         try self.scanAndExpandNestedBinXml(chunk, root);

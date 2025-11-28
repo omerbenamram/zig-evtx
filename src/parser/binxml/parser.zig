@@ -481,31 +481,20 @@ fn parseRecElementHeader(ps: *ParseState) !PartialElementHeader {
     const h2 = try ps.r.readStruct(types.NameOffsetHeader);
     const name_off = h2.offset;
 
+    // Compute current chunk position: chunk_base + reader position
+    const current_chunk_pos = ps.chunk_base + ps.r.pos;
+
     if (log.enabled(.debug)) {
-        log.debug("parseRecElementHeader: name_off=0x{x} chunk_len=0x{x} r.pos=0x{x}", .{ name_off, ps.chunk.len, ps.r.pos });
+        log.debug("parseRecElementHeader: name_off=0x{x} current_chunk_pos=0x{x} chunk_base=0x{x}", .{ name_off, current_chunk_pos, ps.chunk_base });
     }
 
-    // Calculate the absolute chunk position after reading the name offset.
-    // For direct elements, we use chunk_base=0 (the BinXML starts at the record's binxml offset).
-    // The name offset is relative to chunk start, not BinXML start.
-    // BinXML buffer = chunk[binxml_start..binxml_end], but we don't have binxml_start here.
-    // However, we can detect inline names by checking if name_off points within the current region.
-
-    // Check if name is inline (offset points to current position in chunk).
-    // For records parsed from chunk buffer slices, we need to compute the chunk offset
-    // corresponding to current reader position. The record's BinXML starts at some offset
-    // in the chunk, and r.pos is relative to that start.
-    //
-    // To handle this, we check: if name_off - (chunk binxml start) == r.pos, name is inline.
-    // But we don't directly know the binxml start offset. Instead, use a heuristic:
-    // if the name offset seems to point near the current position, try reading inline.
-    //
-    // Alternative: always try inline first if name points within a reasonable range.
-
-    // Actually, for direct element records, the simpler approach is:
-    // The name is always inline right after the name_offset field.
-    // Read it inline and skip over it.
-    const name = try readRecNameInline(ps);
+    // Determine if name is inline or at a separate offset:
+    // - If name_off == current_chunk_pos, name is stored inline right here
+    // - Otherwise, name is stored elsewhere in the chunk, look it up
+    const name = if (name_off == @as(u32, @intCast(current_chunk_pos)))
+        try readRecNameInline(ps)
+    else
+        try ps.ctx.getOrReadName(ps.chunk, name_off);
 
     return .{ .name = name, .data_size = h.data_size, .header_len = header_len };
 }
