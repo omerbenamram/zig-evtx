@@ -3,6 +3,7 @@ const IRModule = @import("../ir.zig");
 const IR = IRModule.IR;
 const Context = @import("context.zig").Context;
 const types = @import("types.zig");
+const value_reader = @import("value_reader.zig");
 
 pub const JoinerPolicy = enum { Attr, Text };
 
@@ -229,11 +230,8 @@ const ArrayIterator = struct {
                 return self.data[start..end];
             },
             0x13 => { // SID
-                // SID structure: Revision(1) + SubAuthorityCount(1) + IdentifierAuthority(6) + SubAuthorities(SubAuthorityCount * 4)
-                // Total header = 8 bytes.
-                if (start + 8 > self.data.len) return null;
-                const sub_count = self.data[start + 1];
-                const size = 8 + @as(usize, sub_count) * 4;
+                // Use shared SID size calculation
+                const size = value_reader.sidSize(self.data[start..]) orelse return null;
                 if (start + size > self.data.len) return null;
                 self.cursor = start + size;
                 return self.data[start .. start + size];

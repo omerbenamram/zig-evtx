@@ -2,6 +2,7 @@
 const BinXmlError = @import("err.zig").BinXmlError;
 const tokens = @import("binxml/tokens.zig");
 const types = @import("binxml/types.zig");
+const value_reader = @import("binxml/value_reader.zig");
 
 const std = @import("std");
 
@@ -104,15 +105,11 @@ pub const Reader = struct {
     pub fn readSidBytesBounded(self: *Reader, end_pos: usize) ![]const u8 {
         if (self.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
         const start = self.pos;
-        // Peek subcount from offset 1 (rev is at offset 0)
-        if (start + 1 >= self.buf.len) return BinXmlError.UnexpectedEof;
-        const subc = self.buf[start + 1];
 
-        // 1 byte rev + 1 byte subcount + 6 bytes authority + subcount * 4 bytes subauths
-        const needed: usize = 8 + @as(usize, subc) * 4;
+        // Use shared SID size calculation from value_reader
+        const needed = value_reader.sidSize(self.buf[start..]) orelse return BinXmlError.UnexpectedEof;
 
         if (start + needed > end_pos) return BinXmlError.UnexpectedEof;
-        // Also check absolute buffer bounds
         if (start + needed > self.buf.len) return BinXmlError.UnexpectedEof;
 
         const slice = self.buf[start .. start + needed];
