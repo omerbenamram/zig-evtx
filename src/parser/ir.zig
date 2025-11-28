@@ -8,20 +8,23 @@ pub const IR = struct {
 
     pub const NodeTag = enum { Element, Text, Value, Subst, CharRef, EntityRef, CData, Pad, PITarget, PIData };
 
-    pub const Node = struct {
-        tag: NodeTag,
-        elem: ?*Element = null,
-        text_utf16: []const u8 = &[_]u8{},
-        text_num_chars: usize = 0,
-        vtype: u8 = 0,
-        vbytes: []const u8 = &[_]u8{},
-        subst_id: u16 = 0,
-        subst_vtype: u8 = 0,
-        subst_optional: bool = false,
-        charref_value: u16 = 0,
-        entity_name: Name = Name{ .bytes = &[_]u8{}, .num_chars = 0 },
-        // PI
-        pi_target: Name = Name{ .bytes = &[_]u8{}, .num_chars = 0 },
+    /// Payload types for each node variant
+    pub const TextPayload = struct { utf16: []const u8, num_chars: usize };
+    pub const ValuePayload = struct { vtype: u8, bytes: []const u8 };
+    pub const SubstPayload = struct { id: u16, vtype: u8, optional: bool };
+
+    /// Tagged union for IR nodes - replaces struct with tag pattern
+    pub const Node = union(NodeTag) {
+        Element: *Element,
+        Text: TextPayload,
+        Value: ValuePayload,
+        Subst: SubstPayload,
+        CharRef: u16,
+        EntityRef: Name,
+        CData: TextPayload,
+        Pad: void,
+        PITarget: Name,
+        PIData: TextPayload,
     };
 
     pub const Attr = struct {

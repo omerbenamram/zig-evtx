@@ -63,9 +63,9 @@ pub const Expander = struct {
         }
 
         for (nodes) |nd| {
-            switch (nd.tag) {
-                .Subst => try self.handleSubstitution(nd, values, policy, &out),
-                .Element => try self.handleRecursiveElement(nd, values, &out),
+            switch (nd) {
+                .Subst => |subst| try self.handleSubstitution(subst, values, policy, &out),
+                .Element => |elem| try self.handleRecursiveElement(elem, values, &out),
                 else => try out.append(self.allocator, nd),
             }
         }
@@ -74,22 +74,22 @@ pub const Expander = struct {
 
     fn handleSubstitution(
         self: *Expander,
-        nd: IR.Node,
+        subst: IR.SubstPayload,
         values: []const types.TemplateValue,
         policy: JoinerPolicy,
         out: *std.ArrayList(IR.Node),
     ) !void {
-        if (nd.subst_id >= values.len) return; // Out of bounds substitution, ignore
+        if (subst.id >= values.len) return; // Out of bounds substitution, ignore
 
-        const val = values[nd.subst_id];
+        const val = values[subst.id];
 
         // Skip optional empty substitutions
-        if (nd.subst_optional and (val.t == 0x00 or val.data.len == 0)) {
+        if (subst.optional and (val.t == 0x00 or val.data.len == 0)) {
             return;
         }
 
-        const is_array = (nd.subst_vtype & types.ValueType.ARRAY_FLAG) != 0;
-        const base_type = nd.subst_vtype & 0x7f;
+        const is_array = (subst.vtype & types.ValueType.ARRAY_FLAG) != 0;
+        const base_type = subst.vtype & 0x7f;
 
         if (is_array) {
             try self.expandArrayValue(base_type, val, policy, out);
@@ -114,15 +114,11 @@ pub const Expander = struct {
             }
 
             try out.append(self.allocator, .{
-                .tag = .Text,
-                .text_utf16 = val.data[0 .. num_chars * 2],
-                .text_num_chars = num_chars,
+                .Text = .{ .utf16 = val.data[0 .. num_chars * 2], .num_chars = num_chars },
             });
         } else {
             try out.append(self.allocator, .{
-                .tag = .Value,
-                .vtype = val.t,
-                .vbytes = val.data,
+                .Value = .{ .vtype = val.t, .bytes = val.data },
             });
         }
     }
@@ -151,7 +147,7 @@ pub const Expander = struct {
         while (iter.next()) |item_bytes| {
             if (!first) {
                 if (sep_utf16) |sep| {
-                    try out.append(self.allocator, .{ .tag = .Text, .text_utf16 = sep.bytes, .text_num_chars = sep.num_chars });
+                    try out.append(self.allocator, .{ .Text = .{ .utf16 = sep.bytes, .num_chars = sep.num_chars } });
                 }
             }
             first = false;
@@ -165,16 +161,14 @@ pub const Expander = struct {
 
     fn handleRecursiveElement(
         self: *Expander,
-        nd: IR.Node,
+        child_elem: *IR.Element,
         values: []const types.TemplateValue,
         out: *std.ArrayList(IR.Node),
     ) !void {
-        const child_elem = nd.elem.?;
         var sub_expander = Expander.init(self.ctx, self.allocator);
-        // Pass pointer to child_elem since expand expects *const IR.Element
         const expanded_child = sub_expander.expand(child_elem, values) catch |err| return err;
 
-        try out.append(self.allocator, .{ .tag = .Element, .elem = expanded_child });
+        try out.append(self.allocator, .{ .Element = expanded_child });
     }
 };
 

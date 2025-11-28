@@ -19,16 +19,36 @@ pub const Source = enum {
     def,
 };
 
+/// Bundles common parsing state to reduce function signature noise.
+pub const ParseState = struct {
+    ctx: *Context,
+    chunk: []const u8,
+    r: *Reader,
+    allocator: std.mem.Allocator,
+    src: Source,
+    chunk_base: usize = 0,
+
+    pub fn init(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source) ParseState {
+        return .{ .ctx = ctx, .chunk = chunk, .r = r, .allocator = allocator, .src = src };
+    }
+
+    pub fn withBase(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, chunk_base: usize) ParseState {
+        return .{ .ctx = ctx, .chunk = chunk, .r = r, .allocator = allocator, .src = src, .chunk_base = chunk_base };
+    }
+};
+
 /// Parses an element and returns its IR representation.
 /// This function is the entry point for parsing a BinXML element.
 pub fn parseElementIR(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source) !*IR.Element {
-    return parseElementIRBase(ctx, chunk, r, allocator, src, 0);
+    var ps = ParseState.init(ctx, chunk, r, allocator, src);
+    return parseElementIRImpl(&ps);
 }
 
 /// Parses an element with an explicit chunk base offset.
 /// Useful when parsing elements that are relative to a specific chunk start.
 pub fn parseElementIRWithBase(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, chunk_base: usize) !*IR.Element {
-    return parseElementIRBase(ctx, chunk, r, allocator, src, chunk_base);
+    var ps = ParseState.withBase(ctx, chunk, r, allocator, src, chunk_base);
+    return parseElementIRImpl(&ps);
 }
 
 // --- Template Instance Value Parsing ---
@@ -106,54 +126,47 @@ fn readTemplateValuesFromDescriptors(r: *Reader, allocator: std.mem.Allocator, s
 
 /// Parses an element in the Intermediate Representation (IR).
 /// This is the recursive core of the parser.
-fn parseElementIRBase(
-    ctx: *Context,
-    chunk: []const u8,
-    r: *Reader,
-    allocator: std.mem.Allocator,
-    src: Source,
-    chunk_base: usize,
-) !*IR.Element {
-    const element_start_pos = r.pos;
+fn parseElementIRImpl(ps: *ParseState) !*IR.Element {
+    const element_start_pos = ps.r.pos;
 
     if (log.enabled(.trace)) {
-        logTraceContext("parseElementIR", src, r, null);
+        logTraceContext("parseElementIR", ps.src, ps.r, null);
     }
 
     // 1. Validate OpenStart Token
-    const start_token = try r.readInt(u8);
+    const start_token = try ps.r.readInt(u8);
     if (!tokens.isToken(start_token, tokens.TOK_OPEN_START)) {
         return BinXmlError.BadToken;
     }
 
     // 2. Parse Element Header (Name, DataSize, etc.)
-    const header = try parseElementHeaderAndEnd(ctx, chunk, r, allocator, src, chunk_base, element_start_pos);
+    const header = try parseElementHeaderAndEnd(ps, element_start_pos);
     const element_end_pos = header.element_end;
 
     // 3. Create IR Element
-    const element = try IRModule.irNewElement(allocator, header.name);
+    const element = try IRModule.irNewElement(ps.allocator, header.name);
 
     // 4. Parse Attributes (if present)
     if (tokens.hasMore(start_token, tokens.TOK_OPEN_START)) {
-        element.attrs = try parseAttributeListIR(ctx, chunk, r, allocator, src, element_end_pos, chunk_base);
+        element.attrs = try parseAttributeListIR(ps, element_end_pos);
     }
 
     // 5. Handle Optional Padding (usually null bytes)
     var pad: usize = 0;
-    while (pad < 4 and r.pos < element_end_pos and (r.peekByte() catch 0) == 0) : (pad += 1) {
-        r.pos += 1;
+    while (pad < 4 and ps.r.pos < element_end_pos and (ps.r.peekByte() catch 0) == 0) : (pad += 1) {
+        ps.r.pos += 1;
     }
 
     // Check for early exit (empty element or EOF)
-    if (r.pos >= element_end_pos or r.rem() == 0) {
+    if (ps.r.pos >= element_end_pos or ps.r.rem() == 0) {
         return element;
     }
 
-    const pos_before_close = r.pos;
-    const close_token = try r.readInt(u8);
+    const pos_before_close = ps.r.pos;
+    const close_token = try ps.r.readInt(u8);
 
     if (log.enabled(.trace)) {
-        log.trace("parseElementIR nxt=0x{x} pos=0x{x} end=0x{x}", .{ close_token, r.pos, element_end_pos });
+        log.trace("parseElementIR nxt=0x{x} pos=0x{x} end=0x{x}", .{ close_token, ps.r.pos, element_end_pos });
     }
 
     // 6. Check for CloseEmpty Token
@@ -164,38 +177,38 @@ fn parseElementIRBase(
     // 7. Expect CloseStart Token (start of content)
     if (!tokens.isToken(close_token, tokens.TOK_CLOSE_START)) {
         if (log.enabled(.trace)) {
-            logTraceContext("unexpected nxt window", src, r, pos_before_close);
+            logTraceContext("unexpected nxt window", ps.src, ps.r, pos_before_close);
         }
-        log.err("expected CloseStart, got 0x{x} at 0x{x}", .{ close_token, r.pos - 1 });
+        log.err("expected CloseStart, got 0x{x} at 0x{x}", .{ close_token, ps.r.pos - 1 });
         return BinXmlError.BadToken;
     }
 
     // 8. Parse Content (Children, Text, Values, etc.)
-    while (r.pos < element_end_pos and r.rem() > 0) {
-        const token = r.peekByte() catch break;
-        if (log.enabled(.trace)) log.trace("content token 0x{x} at 0x{x}/0x{x}", .{ token, r.pos, element_end_pos });
+    while (ps.r.pos < element_end_pos and ps.r.rem() > 0) {
+        const token = ps.r.peekByte() catch break;
+        if (log.enabled(.trace)) log.trace("content token 0x{x} at 0x{x}/0x{x}", .{ token, ps.r.pos, element_end_pos });
 
         switch (token & 0x1f) {
             tokens.TOK_END_ELEMENT => {
-                _ = try r.readInt(u8); // Consume EndElement
+                _ = try ps.r.readInt(u8); // Consume EndElement
                 break;
             },
             tokens.TOK_OPEN_START => {
                 // Recursive call for child element
-                const child = try parseElementIRBase(ctx, chunk, r, allocator, src, chunk_base);
-                try element.children.append(allocator, .{ .tag = .Element, .elem = child });
+                const child = try parseElementIRImpl(ps);
+                try element.children.append(ps.allocator, .{ .Element = child });
                 element.has_element_child = true;
             },
             tokens.TOK_VALUE, tokens.TOK_NORMAL_SUBST, tokens.TOK_OPTIONAL_SUBST, tokens.TOK_CDATA, tokens.TOK_CHARREF, tokens.TOK_ENTITYREF, tokens.TOK_PITARGET, tokens.TOK_PIDATA => {
                 // Accumulate sequence of value/text tokens
-                var content_sequence = std.ArrayList(IR.Node).initCapacity(allocator, 0) catch unreachable;
-                try collectValueTokensIRWithCtx(ctx, chunk, r, &content_sequence, src, element_end_pos, allocator, chunk_base);
+                var content_sequence = std.ArrayList(IR.Node).initCapacity(ps.allocator, 0) catch unreachable;
+                try collectValueTokens(ps, &content_sequence, element_end_pos);
 
                 // Ensure we don't overshoot
-                if (r.pos > element_end_pos) r.pos = element_end_pos;
+                if (ps.r.pos > element_end_pos) ps.r.pos = element_end_pos;
 
                 for (content_sequence.items) |node| {
-                    try element.children.append(allocator, node);
+                    try element.children.append(ps.allocator, node);
                 }
             },
             else => break,
@@ -206,97 +219,80 @@ fn parseElementIRBase(
 }
 
 /// Parses the attribute list of an element.
-fn parseAttributeListIR(
-    ctx: *Context,
-    chunk: []const u8,
-    r: *Reader,
-    allocator: std.mem.Allocator,
-    src: Source,
-    max_end: usize,
-    chunk_base: usize,
-) !std.ArrayList(IR.Attr) {
-    const header = try r.readStruct(types.AttributeListHeader);
+fn parseAttributeListIR(ps: *ParseState, max_end: usize) !std.ArrayList(IR.Attr) {
+    const header = try ps.r.readStruct(types.AttributeListHeader);
     const list_size = header.data_size;
-    const list_start = r.pos;
+    const list_start = ps.r.pos;
     const list_end = list_start + list_size;
 
     if (log.enabled(.trace)) {
-        log.trace("attr list_start=0x{x} size=0x{x} list_end=0x{x} max_end=0x{x} buf_len=0x{x}", .{ list_start, list_size, list_end, max_end, r.buf.len });
+        log.trace("attr list_start=0x{x} size=0x{x} list_end=0x{x} max_end=0x{x} buf_len=0x{x}", .{ list_start, list_size, list_end, max_end, ps.r.buf.len });
     }
 
     if (list_end > max_end or list_end < list_start) return BinXmlError.UnexpectedEof;
 
-    var attributes = std.ArrayList(IR.Attr).initCapacity(allocator, 0) catch unreachable;
+    var attributes = std.ArrayList(IR.Attr).initCapacity(ps.allocator, 0) catch unreachable;
 
     // Pre-scan to estimate capacity (optional optimization)
-    var scan_pos = r.pos;
+    var scan_pos = ps.r.pos;
     var attr_count: usize = 0;
-    while (scan_pos < list_end and scan_pos < r.buf.len and tokens.isToken(r.buf[scan_pos], tokens.TOK_ATTRIBUTE)) : (scan_pos += 1) {
+    while (scan_pos < list_end and scan_pos < ps.r.buf.len and tokens.isToken(ps.r.buf[scan_pos], tokens.TOK_ATTRIBUTE)) : (scan_pos += 1) {
         attr_count += 1;
         break; // Just counting existence of list for now, or use a more robust loop if needed
     }
-    if (attr_count > 0) try attributes.ensureTotalCapacityPrecise(allocator, attr_count);
+    if (attr_count > 0) try attributes.ensureTotalCapacityPrecise(ps.allocator, attr_count);
 
-    while (r.pos < list_end and r.rem() > 0 and tokens.isToken(r.peekByte() catch 0, tokens.TOK_ATTRIBUTE)) {
-        _ = try r.readInt(u8); // Consume Attribute Token
+    while (ps.r.pos < list_end and ps.r.rem() > 0 and tokens.isToken(ps.r.peekByte() catch 0, tokens.TOK_ATTRIBUTE)) {
+        _ = try ps.r.readInt(u8); // Consume Attribute Token
 
         // Parse Attribute Name
-        const name = try readNameIRBounded(ctx, chunk, r, allocator, src, list_end, chunk_base);
+        const name = try readNameIRBounded(ps, list_end);
         if (log.enabled(.trace)) try binxml_name.logNameTrace(name, "attr");
 
         // Parse Attribute Value (sequence of tokens)
-        var value_tokens = std.ArrayList(IR.Node).initCapacity(allocator, 0) catch unreachable;
-        try collectValueTokensIRWithCtx(ctx, chunk, r, &value_tokens, src, list_end, allocator, chunk_base);
+        var value_tokens = std.ArrayList(IR.Node).initCapacity(ps.allocator, 0) catch unreachable;
+        try collectValueTokens(ps, &value_tokens, list_end);
 
-        try attributes.append(allocator, .{ .name = name, .value = value_tokens });
+        try attributes.append(ps.allocator, .{ .name = name, .value = value_tokens });
     }
 
     // Ensure we are exactly at the end of the list
-    if (r.pos != list_end) r.pos = list_end;
+    if (ps.r.pos != list_end) ps.r.pos = list_end;
 
     return attributes;
 }
 
 /// Collects a sequence of value tokens (Value, Subst, CharRef, etc.) into a list of IR Nodes.
-fn collectValueTokensIRWithCtx(
-    ctx: *Context,
-    chunk: []const u8,
-    r: *Reader,
-    out: *std.ArrayList(IR.Node),
-    src: Source,
-    end_pos: usize,
-    allocator: std.mem.Allocator,
-    chunk_base: usize,
-) !void {
-    while (r.rem() > 0 and r.pos < end_pos) {
-        const pk = r.peekByte() catch break;
-        if (log.enabled(.trace)) log.trace("valtok pk=0x{x} at 0x{x}", .{ pk, r.pos });
+fn collectValueTokens(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize) !void {
+    while (ps.r.rem() > 0 and ps.r.pos < end_pos) {
+        const pk = ps.r.peekByte() catch break;
+        if (log.enabled(.trace)) log.trace("valtok pk=0x{x} at 0x{x}", .{ pk, ps.r.pos });
 
         switch (pk & 0x1f) {
             tokens.TOK_ATTRIBUTE, tokens.TOK_CLOSE_START, tokens.TOK_CLOSE_EMPTY => break,
             tokens.TOK_VALUE => {
-                try parseValueToken(r, out, allocator, end_pos, src);
+                try parseValueToken(ps, out, end_pos);
             },
             tokens.TOK_NORMAL_SUBST, tokens.TOK_OPTIONAL_SUBST => {
-                const h = try readHeaderChecked(r, types.SubstitutionHeader, end_pos);
+                const h = try readHeaderChecked(ps.r, types.SubstitutionHeader, end_pos);
                 const optional = tokens.isToken(h.token, tokens.TOK_OPTIONAL_SUBST);
-                try out.append(allocator, .{ .tag = .Subst, .subst_id = h.id, .subst_vtype = h.vtype, .subst_optional = optional });
+                try out.append(ps.allocator, .{ .Subst = .{ .id = h.id, .vtype = h.vtype, .optional = optional } });
             },
             tokens.TOK_CHARREF => {
-                const h = try readHeaderChecked(r, types.CharRefHeader, end_pos);
-                try out.append(allocator, .{ .tag = .CharRef, .charref_value = h.value });
+                const h = try readHeaderChecked(ps.r, types.CharRefHeader, end_pos);
+                try out.append(ps.allocator, .{ .CharRef = h.value });
             },
             tokens.TOK_ENTITYREF => {
-                try parseNameToken(.EntityRef, "entity_name", ctx, chunk, r, out, allocator, src, end_pos, chunk_base);
+                try parseNameToken(.EntityRef, ps, out, end_pos);
             },
             tokens.TOK_CDATA => {
-                try parseStringToken(.CData, r, out, allocator, end_pos);
+                try parseStringToken(.CData, ps.r, out, ps.allocator, end_pos);
             },
             tokens.TOK_PITARGET => {
-                try parseNameToken(.PITarget, "pi_target", ctx, chunk, r, out, allocator, src, end_pos, chunk_base);
+                try parseNameToken(.PITarget, ps, out, end_pos);
             },
             tokens.TOK_PIDATA => {
-                try parseStringToken(.PIData, r, out, allocator, end_pos);
+                try parseStringToken(.PIData, ps.r, out, ps.allocator, end_pos);
             },
             else => break,
         }
@@ -314,24 +310,20 @@ fn readHeaderChecked(r: *Reader, comptime H: type, end_pos: usize) !H {
 /// Generic helper for tokens containing a simple Name payload (PITarget, EntityRef).
 fn parseNameToken(
     comptime Tag: IR.NodeTag,
-    comptime field_name: []const u8,
-    ctx: *Context,
-    chunk: []const u8,
-    r: *Reader,
+    ps: *ParseState,
     out: *std.ArrayList(IR.Node),
-    allocator: std.mem.Allocator,
-    src: Source,
     end_pos: usize,
-    chunk_base: usize,
 ) !void {
     // All these tokens start with a basic TokenHeader
-    _ = try readHeaderChecked(r, types.TokenHeader, end_pos);
-    const nm = try readNameIRBounded(ctx, chunk, r, allocator, src, end_pos, chunk_base);
+    _ = try readHeaderChecked(ps.r, types.TokenHeader, end_pos);
+    const nm = try readNameIRBounded(ps, end_pos);
 
-    var node: IR.Node = undefined;
-    node = .{ .tag = Tag };
-    @field(node, field_name) = nm;
-    try out.append(allocator, node);
+    const node: IR.Node = switch (Tag) {
+        .EntityRef => .{ .EntityRef = nm },
+        .PITarget => .{ .PITarget = nm },
+        else => @compileError("parseNameToken only supports EntityRef and PITarget"),
+    };
+    try out.append(ps.allocator, node);
 }
 
 /// Generic helper for tokens containing a string payload (CData, PIData).
@@ -344,44 +336,50 @@ fn parseStringToken(
 ) !void {
     _ = try readHeaderChecked(r, types.TokenHeader, end_pos);
     const data = try r.readLenPrefixedSlice(u16, 2, end_pos);
-    try out.append(allocator, .{ .tag = Tag, .text_utf16 = data, .text_num_chars = data.len / 2 });
+    const payload = IR.TextPayload{ .utf16 = data, .num_chars = data.len / 2 };
+    const node: IR.Node = switch (Tag) {
+        .CData => .{ .CData = payload },
+        .PIData => .{ .PIData = payload },
+        else => @compileError("parseStringToken only supports CData and PIData"),
+    };
+    try out.append(allocator, node);
 }
 
-fn parseValueToken(r: *Reader, out: *std.ArrayList(IR.Node), allocator: std.mem.Allocator, end_pos: usize, src: Source) !void {
-    const h = try readHeaderChecked(r, types.ValueTokenHeader, end_pos);
+fn parseValueToken(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize) !void {
+    const h = try readHeaderChecked(ps.r, types.ValueTokenHeader, end_pos);
     const vtype = h.vtype;
 
     if (log.enabled(.trace)) log.trace("  vtype=0x{x}", .{vtype});
 
     // BinXML type (0x21) or Array (0xA1)
     if ((vtype & 0x7f) == 0x21) {
-        if (r.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
-        const blen = try r.readInt(u16);
-        if (r.pos + @as(usize, blen) > end_pos) return BinXmlError.UnexpectedEof;
-        try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = r.buf[r.pos .. r.pos + blen] });
-        r.pos += blen;
+        if (ps.r.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
+        const blen = try ps.r.readInt(u16);
+        if (ps.r.pos + @as(usize, blen) > end_pos) return BinXmlError.UnexpectedEof;
+        try out.append(ps.allocator, .{ .Value = .{ .vtype = vtype, .bytes = ps.r.buf[ps.r.pos .. ps.r.pos + blen] } });
+        ps.r.pos += blen;
         return;
     }
 
     switch (vtype) {
         0x01 => { // String
-            const text = try r.readLenPrefixedSlice(u16, 2, end_pos);
-            try out.append(allocator, .{ .tag = .Text, .text_utf16 = text, .text_num_chars = text.len / 2 });
+            const text = try ps.r.readLenPrefixedSlice(u16, 2, end_pos);
+            try out.append(ps.allocator, .{ .Text = .{ .utf16 = text, .num_chars = text.len / 2 } });
         },
         0x02, 0x0e => { // Ansi String, Binary
-            const payload = try r.readLenPrefixedSlice(u16, 1, end_pos);
-            try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload });
+            const payload = try ps.r.readLenPrefixedSlice(u16, 1, end_pos);
+            try out.append(ps.allocator, .{ .Value = .{ .vtype = vtype, .bytes = payload } });
         },
         0x13 => { // SID
-            const payload = try r.readSidBytesBounded(end_pos);
-            try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload });
+            const payload = try ps.r.readSidBytesBounded(end_pos);
+            try out.append(ps.allocator, .{ .Value = .{ .vtype = vtype, .bytes = payload } });
         },
         else => {
             if (types.valueTypeFixedSize(vtype)) |sz| {
-                const payload = try r.readFixedBytesBounded(sz, end_pos);
-                try out.append(allocator, .{ .tag = .Value, .vtype = vtype, .vbytes = payload });
+                const payload = try ps.r.readFixedBytesBounded(sz, end_pos);
+                try out.append(ps.allocator, .{ .Value = .{ .vtype = vtype, .bytes = payload } });
             } else {
-                log.err("unknown value vtype=0x{x} at pos=0x{x} src={s}", .{ vtype, r.pos, @tagName(src) });
+                log.err("unknown value vtype=0x{x} at pos=0x{x} src={s}", .{ vtype, ps.r.pos, @tagName(ps.src) });
                 return BinXmlError.BadToken;
             }
         },
@@ -390,46 +388,38 @@ fn parseValueToken(r: *Reader, out: *std.ArrayList(IR.Node), allocator: std.mem.
 
 // --- Name Handling Helpers ---
 
-fn readNameIRBounded(
-    ctx: *Context,
-    chunk: []const u8,
-    r: *Reader,
-    allocator: std.mem.Allocator,
-    src: Source,
-    end_pos: usize,
-    chunk_base: usize,
-) !IR.Name {
-    return switch (src) {
+fn readNameIRBounded(ps: *ParseState, end_pos: usize) !IR.Name {
+    return switch (ps.src) {
         .rec => blk: {
-            if (r.pos + 4 > end_pos) break :blk BinXmlError.UnexpectedEof;
-            const h = try r.readStruct(types.NameOffsetHeader);
-            break :blk try ctx.getOrReadName(chunk, h.offset);
+            if (ps.r.pos + 4 > end_pos) break :blk BinXmlError.UnexpectedEof;
+            const h = try ps.r.readStruct(types.NameOffsetHeader);
+            break :blk try ps.ctx.getOrReadName(ps.chunk, h.offset);
         },
-        .def => try parseDefNameIR(ctx, chunk, r, allocator, chunk_base),
+        .def => try parseDefNameIR(ps),
     };
 }
 
-fn parseDefNameIR(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, chunk_base: usize) !IR.Name {
-    const h = try r.readStruct(types.NameOffsetHeader);
+fn parseDefNameIR(ps: *ParseState) !IR.Name {
+    const h = try ps.r.readStruct(types.NameOffsetHeader);
     const name_off = h.offset;
 
-    if (log.enabled(.trace)) log.trace("def name_off=0x{x} cur_after_off=0x{x}", .{ name_off, r.pos });
+    if (log.enabled(.trace)) log.trace("def name_off=0x{x} cur_after_off=0x{x}", .{ name_off, ps.r.pos });
 
-    const abs_after_off: usize = chunk_base + r.pos;
+    const abs_after_off: usize = ps.chunk_base + ps.r.pos;
 
     // Check for inline name optimization (offset points to current position)
     if (name_off == @as(u32, @intCast(abs_after_off))) {
-        const view = try r.readTemplateNameLinkInlineView();
+        const view = try ps.r.readTemplateNameLinkInlineView();
         if (log.enabled(.trace)) log.trace("inline NameLink next+hash read inl_start to end; num={d}", .{view.num_chars});
 
         const bytes = view.utf16.len;
-        const buf = try allocator.alloc(u8, bytes);
+        const buf = try ps.allocator.alloc(u8, bytes);
         @memcpy(buf, view.utf16);
 
         return IR.Name{ .bytes = buf, .num_chars = view.num_chars };
     }
 
-    return ctx.getOrReadName(chunk, name_off);
+    return ps.ctx.getOrReadName(ps.chunk, name_off);
 }
 
 // --- Element Header Parsing ---
@@ -441,29 +431,21 @@ const ElementHeader = struct {
     element_end: usize,
 };
 
-fn parseElementHeaderAndEnd(
-    ctx: *Context,
-    chunk: []const u8,
-    r: *Reader,
-    allocator: std.mem.Allocator,
-    src: Source,
-    chunk_base: usize,
-    element_start: usize,
-) !ElementHeader {
-    const hdr = switch (src) {
-        .rec => try parseRecElementHeader(ctx, chunk, r, allocator),
-        .def => try parseDefElementHeader(ctx, chunk, r, allocator, chunk_base, element_start),
+fn parseElementHeaderAndEnd(ps: *ParseState, element_start: usize) !ElementHeader {
+    const hdr = switch (ps.src) {
+        .rec => try parseRecElementHeader(ps),
+        .def => try parseDefElementHeader(ps),
     };
 
     const element_end = element_start + hdr.header_len + @as(usize, hdr.data_size);
 
     if (log.enabled(.trace)) {
         log.trace("elem hdr: start=0x{x} header_len=0x{x} data_size=0x{x} end=0x{x} buf_len=0x{x}", .{
-            element_start, hdr.header_len, hdr.data_size, element_end, r.buf.len,
+            element_start, hdr.header_len, hdr.data_size, element_end, ps.r.buf.len,
         });
     }
 
-    if (element_end > r.buf.len or element_end < element_start) return BinXmlError.UnexpectedEof;
+    if (element_end > ps.r.buf.len or element_end < element_start) return BinXmlError.UnexpectedEof;
 
     return .{
         .name = hdr.name,
@@ -479,25 +461,24 @@ const PartialElementHeader = struct {
     header_len: usize,
 };
 
-fn parseRecElementHeader(ctx: *Context, chunk: []const u8, r: *Reader, _: std.mem.Allocator) !PartialElementHeader {
-    const h = try r.readStruct(types.ElementStartHeader);
+fn parseRecElementHeader(ps: *ParseState) !PartialElementHeader {
+    const h = try ps.r.readStruct(types.ElementStartHeader);
     // Per spec: 1 byte token + 2 bytes dep_id + 4 bytes data_size
     const header_len: usize = 1 + 2 + 4;
-    const h2 = try r.readStruct(types.NameOffsetHeader);
+    const h2 = try ps.r.readStruct(types.NameOffsetHeader);
     const name_off = h2.offset;
-    const name = try ctx.getOrReadName(chunk, name_off);
+    const name = try ps.ctx.getOrReadName(ps.chunk, name_off);
     return .{ .name = name, .data_size = h.data_size, .header_len = header_len };
 }
 
-fn parseDefElementHeader(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, chunk_base: usize, element_start: usize) !PartialElementHeader {
-    _ = element_start;
-    const h = try r.readStruct(types.ElementStartHeader);
+fn parseDefElementHeader(ps: *ParseState) !PartialElementHeader {
+    const h = try ps.r.readStruct(types.ElementStartHeader);
 
     if (log.enabled(.trace)) {
-        logTraceContext("def pre-name (with dep)", .def, r, null);
+        logTraceContext("def pre-name (with dep)", .def, ps.r, null);
     }
 
-    const nm = try parseDefNameIR(ctx, chunk, r, allocator, chunk_base);
+    const nm = try parseDefNameIR(ps);
     // Per spec: 1 byte token + 2 bytes dep_id + 4 bytes data_size
     const header_len: usize = 1 + 2 + 4;
     return .{ .name = nm, .data_size = h.data_size, .header_len = header_len };

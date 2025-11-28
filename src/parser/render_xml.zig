@@ -21,27 +21,25 @@ const attrNameIsSystemTime = @import("binxml/name.zig").attrNameIsSystemTime;
 
 // Stream attribute value tokens directly to destination (no buffering)
 fn renderAttrValueFromIRStream(chunk: []const u8, nodes: []const IR.Node, _: []const TemplateValue, w: anytype) !void {
-    for (nodes) |nd| switch (nd.tag) {
-        .Text => try util.writeUtf16LeXmlEscaped(w, nd.text_utf16, nd.text_num_chars),
-        .Pad => {}, // Ignored/Dead
-        .Value => {
-            try writeValueXml(w, nd.vtype, nd.vbytes);
-        },
+    for (nodes) |nd| switch (nd) {
+        .Text => |text| try util.writeUtf16LeXmlEscaped(w, text.utf16, text.num_chars),
+        .Pad => {},
+        .Value => |val| try writeValueXml(w, val.vtype, val.bytes),
         .Subst => {},
-        .CharRef => try w.print("&#{d};", .{nd.charref_value}),
-        .EntityRef => {
+        .CharRef => |charref| try w.print("&#{d};", .{charref}),
+        .EntityRef => |name| {
             try w.writeByte('&');
-            try writeNameXml(chunk, nd.entity_name, w);
+            try writeNameXml(chunk, name, w);
             try w.writeByte(';');
         },
-        .CData => try util.writeUtf16LeXmlEscaped(w, nd.text_utf16, nd.text_num_chars),
-        .PITarget => {
+        .CData => |cdata| try util.writeUtf16LeXmlEscaped(w, cdata.utf16, cdata.num_chars),
+        .PITarget => |name| {
             try w.writeAll("<?");
-            try writeNameXml(chunk, nd.pi_target, w);
+            try writeNameXml(chunk, name, w);
         },
-        .PIData => {
+        .PIData => |pidata| {
             try w.writeByte(' ');
-            try writeUtf16LeRawToUtf8(w, nd.text_utf16, nd.text_num_chars);
+            try writeUtf16LeRawToUtf8(w, pidata.utf16, pidata.num_chars);
             try w.writeAll("?>");
         },
         .Element => {},
@@ -98,128 +96,134 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
 
     // Early: drop element if its only content is an optional substitution resolving to NULL
     if (!has_elem_child and el.children.items.len == 1) {
-        const only = el.children.items[0];
-        if (only.tag == .Subst and only.subst_optional and only.subst_id < eff_values.len) {
-            const vv0 = eff_values[only.subst_id];
-            if (vv0.t == 0x00 or vv0.data.len == 0) return;
+        if (el.children.items[0] == .Subst) {
+            const only = el.children.items[0].Subst;
+            if (only.optional and only.id < eff_values.len) {
+                const vv0 = eff_values[only.id];
+                if (vv0.t == 0x00 or vv0.data.len == 0) return;
+            }
         }
     }
     // Early: array substitution repetition for sole content
     if (!has_elem_child and el.children.items.len == 1 and !IRModule.nameEqualsAscii(chunk, el.name, "Data")) {
-        const c0 = el.children.items[0];
-        if (c0.tag == .Subst and (c0.subst_vtype & 0x80) != 0 and c0.subst_id < eff_values.len) {
-            const vv = eff_values[c0.subst_id];
-            const base: u8 = c0.subst_vtype & 0x7f;
-            if (base == 0x21) {
-                log.warn("array of 0x21 not supported; skipping repetition", .{});
-            } else if (base == 0x10 and !(vv.t == 0x94 or vv.t == 0x95)) {
-                log.warn("size array backing mismatch in element repetition: got 0x{x}", .{vv.t});
+        if (el.children.items[0] == .Subst) {
+            const c0 = el.children.items[0].Subst;
+            if ((c0.vtype & 0x80) != 0 and c0.id < eff_values.len) {
+                const vv = eff_values[c0.id];
+                const base: u8 = c0.vtype & 0x7f;
+                if (base == 0x21) {
+                    log.warn("array of 0x21 not supported; skipping repetition", .{});
+                } else if (base == 0x10 and !(vv.t == 0x94 or vv.t == 0x95)) {
+                    log.warn("size array backing mismatch in element repetition: got 0x{x}", .{vv.t});
+                    return;
+                }
+                // Helper lambdas
+                const write_open = struct {
+                    fn go(chunk_: []const u8, el_: *const IR.Element, w_: anytype, indent_spaces: usize) !void {
+                        var i_: usize = 0;
+                        while (i_ < indent_spaces) : (i_ += 1) try w_.writeByte(' ');
+                        try w_.writeByte('<');
+                        try writeNameXml(chunk_, el_.name, w_);
+                        // re-emit attributes
+                        var ai_: usize = 0;
+                        while (ai_ < el_.attrs.items.len) : (ai_ += 1) {
+                            const a_ = el_.attrs.items[ai_];
+                            const eff_vals_: []const TemplateValue = &[_]TemplateValue{};
+
+                            // Drop attribute if it is a single optional substitution resolving to NULL
+                            var drop_attr_: bool = false;
+                            if (a_.value.items.len == 1) {
+                                if (a_.value.items[0] == .Subst) {
+                                    const n0_ = a_.value.items[0].Subst;
+                                    if (n0_.optional and n0_.id < eff_vals_.len) {
+                                        const vv0_ = eff_vals_[n0_.id];
+                                        if (vv0_.t == 0x00 or vv0_.data.len == 0) drop_attr_ = true;
+                                    }
+                                }
+                            }
+                            if (drop_attr_) continue;
+
+                            try w_.writeByte(' ');
+                            try writeNameXml(chunk_, a_.name, w_);
+                            try w_.writeAll("=\"");
+                            if (attrNameIsSystemTime(a_.name)) {
+                                var tmp_: [512]u8 = undefined;
+                                var fbs_ = std.io.fixedBufferStream(&tmp_);
+                                try renderAttrValueFromIR(chunk_, a_.value.items, eff_vals_, fbs_.writer());
+                                const rendered_ = fbs_.getWritten();
+                                try normalizeAndWriteSystemTimeAscii(w_, rendered_);
+                            } else try renderAttrValueFromIRStream(chunk_, a_.value.items, eff_vals_, w_);
+                            try w_.writeByte('"');
+                        }
+                        try w_.writeByte('>');
+                    }
+                };
+
+                const write_close = struct {
+                    fn go(chunk_: []const u8, el_: *const IR.Element, w_: anytype, _: usize) !void {
+                        try w_.writeAll("</");
+                        try writeNameXml(chunk_, el_.name, w_);
+                        try w_.writeByte('>');
+                        try w_.writeByte('\n');
+                    }
+                };
+
+                // Determine iteration by base type
+                var any_item = false;
+                if (base == 0x01) { // Unicode string array: NUL-terminated items
+                    var j: usize = 0;
+                    while (j <= vv.data.len) {
+                        const start = j;
+                        var end = j;
+                        while (end + 1 < vv.data.len) : (end += 2) {
+                            if (std.mem.readInt(u16, vv.data[end .. end + 2][0..2], .little) == 0) break;
+                        }
+                        try write_open.go(chunk, el, w, indent);
+                        if (end > start) try util.writeUtf16LeXmlEscaped(w, vv.data[start..end], (end - start) / 2);
+                        try write_close.go(chunk, el, w, indent);
+                        any_item = true;
+                        if (end + 1 < vv.data.len) j = end + 2 else break;
+                    }
+                } else if (base == 0x02) { // ANSI string array: NUL-separated
+                    var j: usize = 0;
+                    while (j <= vv.data.len) {
+                        const start = j;
+                        var end = j;
+                        while (end < vv.data.len and vv.data[end] != 0) : (end += 1) {}
+                        try write_open.go(chunk, el, w, indent);
+                        if (end > start) try writeAnsiCp1252Escaped(w, vv.data[start..end]);
+                        try write_close.go(chunk, el, w, indent);
+                        any_item = true;
+                        if (end < vv.data.len and vv.data[end] == 0) j = end + 1 else break;
+                    }
+                } else if (valueTypeFixedSize(base)) |esz| {
+                    var j: usize = 0;
+                    while (j + esz <= vv.data.len) : (j += esz) {
+                        try write_open.go(chunk, el, w, indent);
+                        try writeValueXml(w, base, vv.data[j .. j + esz]);
+                        try write_close.go(chunk, el, w, indent);
+                        any_item = true;
+                    }
+                } else if (base == 0x13) { // SID array
+                    var j: usize = 0;
+                    while (j + 8 <= vv.data.len) {
+                        const subc: usize = vv.data[j + 1];
+                        const need: usize = 8 + subc * 4;
+                        if (j + need > vv.data.len) break;
+                        try write_open.go(chunk, el, w, indent);
+                        try writeValueXml(w, 0x13, vv.data[j .. j + need]);
+                        try write_close.go(chunk, el, w, indent);
+                        any_item = true;
+                        j += need;
+                    }
+                }
+                if (!any_item) {
+                    // zero-length arrays -> one empty element
+                    try write_open.go(chunk, el, w, indent);
+                    try write_close.go(chunk, el, w, indent);
+                }
                 return;
             }
-            // Helper lambdas
-            const write_open = struct {
-                fn go(chunk_: []const u8, el_: *const IR.Element, w_: anytype, indent_spaces: usize) !void {
-                    var i_: usize = 0;
-                    while (i_ < indent_spaces) : (i_ += 1) try w_.writeByte(' ');
-                    try w_.writeByte('<');
-                    try writeNameXml(chunk_, el_.name, w_);
-                    // re-emit attributes
-                    var ai_: usize = 0;
-                    while (ai_ < el_.attrs.items.len) : (ai_ += 1) {
-                        const a_ = el_.attrs.items[ai_];
-                        const eff_vals_: []const TemplateValue = &[_]TemplateValue{};
-
-                        // Drop attribute if it is a single optional substitution resolving to NULL
-                        var drop_attr_: bool = false;
-                        if (a_.value.items.len == 1) {
-                            const n0_ = a_.value.items[0];
-                            if (n0_.tag == .Subst and n0_.subst_optional and n0_.subst_id < eff_vals_.len) {
-                                const vv0_ = eff_vals_[n0_.subst_id];
-                                if (vv0_.t == 0x00 or vv0_.data.len == 0) drop_attr_ = true;
-                            }
-                        }
-                        if (drop_attr_) continue;
-
-                        try w_.writeByte(' ');
-                        try writeNameXml(chunk_, a_.name, w_);
-                        try w_.writeAll("=\"");
-                        if (attrNameIsSystemTime(a_.name)) {
-                            var tmp_: [512]u8 = undefined;
-                            var fbs_ = std.io.fixedBufferStream(&tmp_);
-                            try renderAttrValueFromIR(chunk_, a_.value.items, eff_vals_, fbs_.writer());
-                            const rendered_ = fbs_.getWritten();
-                            try normalizeAndWriteSystemTimeAscii(w_, rendered_);
-                        } else try renderAttrValueFromIRStream(chunk_, a_.value.items, eff_vals_, w_);
-                        try w_.writeByte('"');
-                    }
-                    try w_.writeByte('>');
-                }
-            };
-
-            const write_close = struct {
-                fn go(chunk_: []const u8, el_: *const IR.Element, w_: anytype, _: usize) !void {
-                    try w_.writeAll("</");
-                    try writeNameXml(chunk_, el_.name, w_);
-                    try w_.writeByte('>');
-                    try w_.writeByte('\n');
-                }
-            };
-
-            // Determine iteration by base type
-            var any_item = false;
-            if (base == 0x01) { // Unicode string array: NUL-terminated items
-                var j: usize = 0;
-                while (j <= vv.data.len) {
-                    const start = j;
-                    var end = j;
-                    while (end + 1 < vv.data.len) : (end += 2) {
-                        if (std.mem.readInt(u16, vv.data[end .. end + 2][0..2], .little) == 0) break;
-                    }
-                    try write_open.go(chunk, el, w, indent);
-                    if (end > start) try util.writeUtf16LeXmlEscaped(w, vv.data[start..end], (end - start) / 2);
-                    try write_close.go(chunk, el, w, indent);
-                    any_item = true;
-                    if (end + 1 < vv.data.len) j = end + 2 else break;
-                }
-            } else if (base == 0x02) { // ANSI string array: NUL-separated
-                var j: usize = 0;
-                while (j <= vv.data.len) {
-                    const start = j;
-                    var end = j;
-                    while (end < vv.data.len and vv.data[end] != 0) : (end += 1) {}
-                    try write_open.go(chunk, el, w, indent);
-                    if (end > start) try writeAnsiCp1252Escaped(w, vv.data[start..end]);
-                    try write_close.go(chunk, el, w, indent);
-                    any_item = true;
-                    if (end < vv.data.len and vv.data[end] == 0) j = end + 1 else break;
-                }
-            } else if (valueTypeFixedSize(base)) |esz| {
-                var j: usize = 0;
-                while (j + esz <= vv.data.len) : (j += esz) {
-                    try write_open.go(chunk, el, w, indent);
-                    try writeValueXml(w, base, vv.data[j .. j + esz]);
-                    try write_close.go(chunk, el, w, indent);
-                    any_item = true;
-                }
-            } else if (base == 0x13) { // SID array
-                var j: usize = 0;
-                while (j + 8 <= vv.data.len) {
-                    const subc: usize = vv.data[j + 1];
-                    const need: usize = 8 + subc * 4;
-                    if (j + need > vv.data.len) break;
-                    try write_open.go(chunk, el, w, indent);
-                    try writeValueXml(w, 0x13, vv.data[j .. j + need]);
-                    try write_close.go(chunk, el, w, indent);
-                    any_item = true;
-                    j += need;
-                }
-            }
-            if (!any_item) {
-                // zero-length arrays -> one empty element
-                try write_open.go(chunk, el, w, indent);
-                try write_close.go(chunk, el, w, indent);
-            }
-            return;
         }
     }
 
@@ -234,10 +238,12 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
         // Drop only if the attribute is a single optional substitution resolving NULL
         var drop_attr = false;
         if (a.value.items.len == 1) {
-            const n0 = a.value.items[0];
-            if (n0.tag == .Subst and n0.subst_optional and n0.subst_id < eff_values.len) {
-                const vv0 = eff_values[n0.subst_id];
-                if (vv0.t == 0x00 or vv0.data.len == 0) drop_attr = true;
+            if (a.value.items[0] == .Subst) {
+                const n0 = a.value.items[0].Subst;
+                if (n0.optional and n0.id < eff_values.len) {
+                    const vv0 = eff_values[n0.id];
+                    if (vv0.t == 0x00 or vv0.data.len == 0) drop_attr = true;
+                }
             }
         }
         if (drop_attr) continue;
@@ -278,18 +284,11 @@ fn renderElementIRXml(chunk: []const u8, el: *const IR.Element, values: []const 
     try w.writeByte('>');
     try w.writeByte('\n');
     // First render textual tokens (if any) as indented separate line(s)
-    var idx: usize = 0;
-    while (idx < el.children.items.len) : (idx += 1) {
-        const nd = el.children.items[idx];
-        switch (nd.tag) {
-            .Element => try renderElementIRXml(chunk, nd.elem.?, eff_values, w, indent + 2),
+    for (el.children.items) |nd| {
+        switch (nd) {
+            .Element => |elem| try renderElementIRXml(chunk, elem, eff_values, w, indent + 2),
             .Subst => {},
-            .Value => {
-                try writeSpaces(w, indent + 2);
-                try renderTextContentFromIR(chunk, &[_]IR.Node{nd}, eff_values, w);
-                try w.writeByte('\n');
-            },
-            .Text, .Pad, .CharRef, .EntityRef, .CData, .PITarget, .PIData => {
+            else => {
                 try writeSpaces(w, indent + 2);
                 try renderTextContentFromIR(chunk, &[_]IR.Node{nd}, eff_values, w);
                 try w.writeByte('\n');
@@ -344,27 +343,25 @@ fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, _: []const T
     var buf: [2048]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     const aw = fbs.writer();
-    for (nodes) |nd| switch (nd.tag) {
-        .Text => try util.writeUtf16LeXmlEscaped(aw, nd.text_utf16, nd.text_num_chars),
+    for (nodes) |nd| switch (nd) {
+        .Text => |text| try util.writeUtf16LeXmlEscaped(aw, text.utf16, text.num_chars),
         .Pad => {},
-        .Value => {
-            try writeValueXml(aw, nd.vtype, nd.vbytes);
-        },
-        .Subst => {}, // no Subst nodes remain post-expansion
-        .CharRef => try aw.print("&#{d};", .{nd.charref_value}),
-        .EntityRef => {
+        .Value => |val| try writeValueXml(aw, val.vtype, val.bytes),
+        .Subst => {},
+        .CharRef => |charref| try aw.print("&#{d};", .{charref}),
+        .EntityRef => |name| {
             try aw.writeByte('&');
-            try writeNameXml(chunk, nd.entity_name, aw);
+            try writeNameXml(chunk, name, aw);
             try aw.writeByte(';');
         },
-        .CData => try util.writeUtf16LeXmlEscaped(aw, nd.text_utf16, nd.text_num_chars),
-        .PITarget => {
+        .CData => |cdata| try util.writeUtf16LeXmlEscaped(aw, cdata.utf16, cdata.num_chars),
+        .PITarget => |name| {
             try aw.writeAll("<?");
-            try writeNameXml(chunk, nd.pi_target, aw);
+            try writeNameXml(chunk, name, aw);
         },
-        .PIData => {
+        .PIData => |pidata| {
             try aw.writeByte(' ');
-            try writeUtf16LeRawToUtf8(aw, nd.text_utf16, nd.text_num_chars);
+            try writeUtf16LeRawToUtf8(aw, pidata.utf16, pidata.num_chars);
             try aw.writeAll("?>");
         },
         .Element => {},
@@ -374,34 +371,30 @@ fn renderAttrValueFromIR(chunk: []const u8, nodes: []const IR.Node, _: []const T
 }
 
 fn renderTextContentFromIR(chunk: []const u8, nodes: []const IR.Node, _: []const TemplateValue, w: anytype) !void {
-    var i: usize = 0;
-    while (i < nodes.len) : (i += 1) {
-        const nd = nodes[i];
-        switch (nd.tag) {
-            .Text => try util.writeUtf16LeXmlEscaped(w, nd.text_utf16, nd.text_num_chars),
+    for (nodes) |nd| {
+        switch (nd) {
+            .Text => |text| try util.writeUtf16LeXmlEscaped(w, text.utf16, text.num_chars),
             .Pad => {},
-            .Value => {
-                try writeValueXml(w, nd.vtype, nd.vbytes);
-            },
-            .Subst => {}, // no Subst nodes remain post-expansion
-            .CharRef => try w.print("&#{d};", .{nd.charref_value}),
-            .EntityRef => {
+            .Value => |val| try writeValueXml(w, val.vtype, val.bytes),
+            .Subst => {},
+            .CharRef => |charref| try w.print("&#{d};", .{charref}),
+            .EntityRef => |name| {
                 try w.writeByte('&');
-                try writeNameXml(chunk, nd.entity_name, w);
+                try writeNameXml(chunk, name, w);
                 try w.writeByte(';');
             },
-            .CData => {
+            .CData => |cdata| {
                 try w.writeAll("<![CDATA[");
-                try writeUtf16LeRawToUtf8(w, nd.text_utf16, nd.text_num_chars);
+                try writeUtf16LeRawToUtf8(w, cdata.utf16, cdata.num_chars);
                 try w.writeAll("]]>");
             },
-            .PITarget => {
+            .PITarget => |name| {
                 try w.writeAll("<?");
-                try writeNameXml(chunk, nd.pi_target, w);
+                try writeNameXml(chunk, name, w);
             },
-            .PIData => {
+            .PIData => |pidata| {
                 try w.writeByte(' ');
-                try writeUtf16LeRawToUtf8(w, nd.text_utf16, nd.text_num_chars);
+                try writeUtf16LeRawToUtf8(w, pidata.utf16, pidata.num_chars);
                 try w.writeAll("?>");
             },
             .Element => {},

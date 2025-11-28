@@ -156,74 +156,64 @@ pub const Builder = struct {
 
     /// Recursively scans the expanded tree for nested BinXML values (EVT_XML)
     /// and splices them into the tree as proper children.
-    ///
-    /// This is necessary because some events embed full XML fragments as binary
-    /// values (type 0x21) which need to be promoted to first-class XML structure.
-    /// Explicitly use `anyerror` to avoid recursive inferred-error-set issues.
     fn spliceNestedBinXml(self: *Builder, chunk: []const u8, el: *IR.Element) anyerror!void {
-        // 1. Recurse into child elements first (depth-first)
-        for (el.children.items) |node| {
-            if (node.tag == .Element and node.elem != null) {
-                try self.spliceNestedBinXml(chunk, node.elem.?);
-            }
-        }
-
-        // 2. Scan for nested BinXML values in attributes or children
         var needs_splice = false;
 
-        for (el.attrs.items) |attr| {
-            for (attr.value.items) |node| {
-                if (self.isNestedBinXmlNode(node)) {
-                    needs_splice = true;
-                    break;
-                }
+        // 1. Recurse into children and check for nested content
+        for (el.children.items) |node| {
+            switch (node) {
+                .Element => |child| try self.spliceNestedBinXml(chunk, child),
+                .Value => |val| {
+                    if (isNestedBinXmlValue(val)) needs_splice = true;
+                },
+                else => {},
             }
-            if (needs_splice) break;
         }
 
+        // 2. Check attributes if not already found
         if (!needs_splice) {
-            for (el.children.items) |node| {
-                if (self.isNestedBinXmlNode(node)) {
-                    needs_splice = true;
-                    break;
+            outer: for (el.attrs.items) |attr| {
+                for (attr.value.items) |node| {
+                    if (node == .Value and isNestedBinXmlValue(node.Value)) {
+                        needs_splice = true;
+                        break :outer;
+                    }
                 }
             }
         }
 
         if (!needs_splice) return;
 
-        // 3. If found, rebuild children list
-        // Pre-allocate based on existing children count (plus a guess for expansion)
-        var new_children = std.ArrayList(IR.Node).initCapacity(self.allocator, el.children.items.len + 4) catch unreachable;
+        // 3. Rebuild children
+        var new_children = try std.ArrayList(IR.Node).initCapacity(self.allocator, el.children.items.len + 4);
 
-        // Collect/copy from children
         for (el.children.items) |node| {
-            if (self.isNestedBinXmlNode(node)) {
-                // Expand this node into multiple children
-                try self.collectNestedChildren(chunk, node.vbytes, &new_children);
-            } else {
-                try new_children.append(self.allocator, node);
+            switch (node) {
+                .Value => |val| {
+                    if (isNestedBinXmlValue(val)) {
+                        try self.collectNestedChildren(chunk, val.bytes, &new_children);
+                    } else {
+                        try new_children.append(self.allocator, node);
+                    }
+                },
+                else => try new_children.append(self.allocator, node),
             }
         }
 
-        // Collect children from attributes (append to end)
         for (el.attrs.items) |attr| {
             for (attr.value.items) |node| {
-                if (self.isNestedBinXmlNode(node)) {
-                    try self.collectNestedChildren(chunk, node.vbytes, &new_children);
+                if (node == .Value and isNestedBinXmlValue(node.Value)) {
+                    try self.collectNestedChildren(chunk, node.Value.bytes, &new_children);
                 }
             }
         }
 
         el.children = new_children;
-        // We expanded nested BinXML, which produces elements, so ensure the flag is set.
         el.has_element_child = true;
     }
 
-    fn isNestedBinXmlNode(_: *Builder, node: IR.Node) bool {
-        return node.tag == .Value and
-            (node.vtype & 0x7f) == 0x21 and
-            node.vbytes.len > 0;
+    fn isNestedBinXmlValue(val: IR.ValuePayload) bool {
+        return (val.vtype & 0x7f) == 0x21 and val.bytes.len > 0;
     }
 
     /// Parses a nested BinXML blob and appends resulting elements/nodes to `out`.
@@ -236,25 +226,9 @@ pub const Builder = struct {
             const pk = r.peekByte() catch break;
             if (pk != tokens.TOK_TEMPLATE_INSTANCE) break;
 
-            // Parse the nested template instance
-            // We recurse by calling buildTemplate logic essentially
-            const header = r.readStruct(types.TemplateInstanceStart) catch break;
-
-            common.skipInlineTemplateDefinition(&r, header.def_data_off) catch break;
-            common.skipInlineCachedTemplateDefs(&r);
-
-            const def_ptr = try self.getOrParseTemplateDef(chunk, header.def_data_off);
-            const def = def_ptr.*;
-
-            const vals = try binxml_parser.parseTemplateInstanceValues(&r, self.allocator);
-
-            var expander = Expander.init(self.ctx, self.allocator);
-            const expanded_child = try expander.expand(def, vals);
-
-            // Recurse for deeper nesting
-            try self.spliceNestedBinXml(chunk, expanded_child);
-
-            try out.append(self.allocator, .{ .tag = .Element, .elem = expanded_child });
+            // buildTemplate handles parsing, expansion, and recursive splicing
+            const elem = try self.buildTemplate(chunk, &r);
+            try out.append(self.allocator, .{ .Element = elem });
         }
     }
 };
