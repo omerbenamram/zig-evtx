@@ -104,18 +104,32 @@ pub fn formatSystemTimeJson(w: anytype, st: vr.SystemTime) !void {
 // Numeric Formatting
 // ============================================================================
 
-/// Format a signed integer as decimal
-pub fn formatSignedDecimal(w: anytype, comptime T: type, value: T) !void {
+/// Format any integer as decimal using comptime type dispatch.
+/// Uses @typeInfo to determine signedness at compile time.
+pub fn formatDecimal(w: anytype, comptime T: type, value: T) !void {
     var buf: [24]u8 = undefined;
     const s = try std.fmt.bufPrint(&buf, "{d}", .{value});
     try w.writeAll(s);
 }
 
-/// Format an unsigned integer as decimal
+/// Format a signed integer as decimal (alias for compatibility)
+pub fn formatSignedDecimal(w: anytype, comptime T: type, value: T) !void {
+    try formatDecimal(w, T, value);
+}
+
+/// Format an unsigned integer as decimal (alias for compatibility)
 pub fn formatUnsignedDecimal(w: anytype, comptime T: type, value: T) !void {
-    var buf: [24]u8 = undefined;
-    const s = try std.fmt.bufPrint(&buf, "{d}", .{value});
-    try w.writeAll(s);
+    try formatDecimal(w, T, value);
+}
+
+/// Read and format an integer from bytes using comptime type dispatch.
+/// Returns true if value was read and formatted, false if data insufficient.
+pub fn readAndFormatInt(w: anytype, comptime T: type, data: []const u8) !bool {
+    if (vr.readValue(T, data)) |v| {
+        try formatDecimal(w, T, v);
+        return true;
+    }
+    return false;
 }
 
 /// Format a hex integer (uppercase, with 0x prefix)
@@ -248,19 +262,21 @@ pub fn formatAnsiStringJson(w: anytype, data: []const u8) !void {
 
 /// Format a binary value to XML based on its ValueType.
 /// Returns without writing anything if data is insufficient.
+/// Uses comptime type dispatch for integer types via readAndFormatInt.
 pub fn formatValueXml(w: anytype, vtype: ValueType, data: []const u8) !void {
     switch (vtype) {
         .null => {},
         .string => try formatUtf16StringXml(w, data),
         .ansi_string => try formatAnsiStringXml(w, data),
-        .int8 => if (vr.readInt(i8, data)) |v| try formatSignedDecimal(w, i8, v),
-        .uint8 => if (vr.readInt(u8, data)) |v| try formatUnsignedDecimal(w, u8, v),
-        .int16 => if (vr.readInt(i16, data)) |v| try formatSignedDecimal(w, i16, v),
-        .uint16 => if (vr.readInt(u16, data)) |v| try formatUnsignedDecimal(w, u16, v),
-        .int32 => if (vr.readInt(i32, data)) |v| try formatSignedDecimal(w, i32, v),
-        .uint32 => if (vr.readInt(u32, data)) |v| try formatUnsignedDecimal(w, u32, v),
-        .int64 => if (vr.readInt(i64, data)) |v| try formatSignedDecimal(w, i64, v),
-        .uint64 => if (vr.readInt(u64, data)) |v| try formatUnsignedDecimal(w, u64, v),
+        // Integer types use comptime type dispatch
+        .int8 => _ = try readAndFormatInt(w, i8, data),
+        .uint8 => _ = try readAndFormatInt(w, u8, data),
+        .int16 => _ = try readAndFormatInt(w, i16, data),
+        .uint16 => _ = try readAndFormatInt(w, u16, data),
+        .int32 => _ = try readAndFormatInt(w, i32, data),
+        .uint32 => _ = try readAndFormatInt(w, u32, data),
+        .int64 => _ = try readAndFormatInt(w, i64, data),
+        .uint64 => _ = try readAndFormatInt(w, u64, data),
         .real32 => if (vr.readFloat32(data)) |f| try formatFloat32Xml(w, f),
         .real64 => if (vr.readFloat64(data)) |f| try formatFloat64Xml(w, f),
         .bool => if (vr.readBool(data)) |b| try formatBoolXml(w, b),
@@ -268,22 +284,22 @@ pub fn formatValueXml(w: anytype, vtype: ValueType, data: []const u8) !void {
         .guid => if (vr.readGuid(data)) |g| try formatGuidXml(w, g),
         .size_t => {
             // Variable size: 8 bytes preferred, 4 bytes fallback
-            if (vr.readInt(u64, data)) |v| {
+            if (vr.readValue(u64, data)) |v| {
                 try formatHexUpper(w, u64, v);
-            } else if (vr.readInt(u32, data)) |v| {
+            } else if (vr.readValue(u32, data)) |v| {
                 try formatHexUpper(w, u32, v);
             }
         },
         .filetime => if (vr.readFileTime(data)) |ft| try formatFileTimeXml(w, ft),
         .systime => if (vr.readSystemTime(data)) |st| try formatSystemTimeXml(w, st),
         .sid => if (vr.readSid(data)) |s| try formatSidXml(w, s),
-        .hex_int32 => if (vr.readInt(u32, data)) |v| try formatHexUpper(w, u32, v),
-        .hex_int64 => if (vr.readInt(u64, data)) |v| try formatHexUpper(w, u64, v),
+        .hex_int32 => if (vr.readValue(u32, data)) |v| try formatHexUpper(w, u32, v),
+        .hex_int64 => if (vr.readValue(u64, data)) |v| try formatHexUpper(w, u64, v),
         .evt_handle => {
-            if (vr.readInt(u64, data)) |v| {
-                try formatUnsignedDecimal(w, u64, v);
-            } else if (vr.readInt(u32, data)) |v| {
-                try formatUnsignedDecimal(w, u32, v);
+            if (vr.readValue(u64, data)) |v| {
+                try formatDecimal(w, u64, v);
+            } else if (vr.readValue(u32, data)) |v| {
+                try formatDecimal(w, u32, v);
             }
         },
         .bin_xml => {}, // Nested BinXML - handled specially by caller
@@ -294,41 +310,43 @@ pub fn formatValueXml(w: anytype, vtype: ValueType, data: []const u8) !void {
 }
 
 /// Format a binary value to JSON based on its ValueType.
+/// Uses comptime type dispatch for integer types via readAndFormatInt.
 pub fn formatValueJson(w: anytype, vtype: ValueType, data: []const u8) !void {
     switch (vtype) {
         .null => try w.writeAll("null"),
         .string => try formatUtf16StringJson(w, data),
         .ansi_string => try formatAnsiStringJson(w, data),
-        .int8 => if (vr.readInt(i8, data)) |v| try formatSignedDecimal(w, i8, v) else try w.writeAll("null"),
-        .uint8 => if (vr.readInt(u8, data)) |v| try formatUnsignedDecimal(w, u8, v) else try w.writeAll("null"),
-        .int16 => if (vr.readInt(i16, data)) |v| try formatSignedDecimal(w, i16, v) else try w.writeAll("null"),
-        .uint16 => if (vr.readInt(u16, data)) |v| try formatUnsignedDecimal(w, u16, v) else try w.writeAll("null"),
-        .int32 => if (vr.readInt(i32, data)) |v| try formatSignedDecimal(w, i32, v) else try w.writeAll("null"),
-        .uint32 => if (vr.readInt(u32, data)) |v| try formatUnsignedDecimal(w, u32, v) else try w.writeAll("null"),
-        .int64 => if (vr.readInt(i64, data)) |v| try formatSignedDecimal(w, i64, v) else try w.writeAll("null"),
-        .uint64 => if (vr.readInt(u64, data)) |v| try formatUnsignedDecimal(w, u64, v) else try w.writeAll("null"),
+        // Integer types use comptime type dispatch
+        .int8 => if (!try readAndFormatInt(w, i8, data)) try w.writeAll("null"),
+        .uint8 => if (!try readAndFormatInt(w, u8, data)) try w.writeAll("null"),
+        .int16 => if (!try readAndFormatInt(w, i16, data)) try w.writeAll("null"),
+        .uint16 => if (!try readAndFormatInt(w, u16, data)) try w.writeAll("null"),
+        .int32 => if (!try readAndFormatInt(w, i32, data)) try w.writeAll("null"),
+        .uint32 => if (!try readAndFormatInt(w, u32, data)) try w.writeAll("null"),
+        .int64 => if (!try readAndFormatInt(w, i64, data)) try w.writeAll("null"),
+        .uint64 => if (!try readAndFormatInt(w, u64, data)) try w.writeAll("null"),
         .real32 => if (vr.readFloat32(data)) |f| try formatFloat32Json(w, f) else try w.writeAll("null"),
         .real64 => if (vr.readFloat64(data)) |f| try formatFloat64Json(w, f) else try w.writeAll("null"),
         .bool => if (vr.readBool(data)) |b| try formatBoolJson(w, b) else try w.writeAll("null"),
         .binary => try formatHexBytesLowerJson(w, data),
         .guid => if (vr.readGuid(data)) |g| try formatGuidJson(w, g) else try w.writeAll("null"),
         .size_t => {
-            if (vr.readInt(u64, data)) |v| {
+            if (vr.readValue(u64, data)) |v| {
                 try formatHexUpperJson(w, u64, v);
-            } else if (vr.readInt(u32, data)) |v| {
+            } else if (vr.readValue(u32, data)) |v| {
                 try formatHexUpperJson(w, u32, v);
             } else try w.writeAll("null");
         },
         .filetime => if (vr.readFileTime(data)) |ft| try formatFileTimeJson(w, ft) else try w.writeAll("null"),
         .systime => if (vr.readSystemTime(data)) |st| try formatSystemTimeJson(w, st) else try w.writeAll("null"),
         .sid => if (vr.readSid(data)) |s| try formatSidJson(w, s) else try w.writeAll("null"),
-        .hex_int32 => if (vr.readInt(u32, data)) |v| try formatHexUpperJson(w, u32, v) else try w.writeAll("null"),
-        .hex_int64 => if (vr.readInt(u64, data)) |v| try formatHexUpperJson(w, u64, v) else try w.writeAll("null"),
+        .hex_int32 => if (vr.readValue(u32, data)) |v| try formatHexUpperJson(w, u32, v) else try w.writeAll("null"),
+        .hex_int64 => if (vr.readValue(u64, data)) |v| try formatHexUpperJson(w, u64, v) else try w.writeAll("null"),
         .evt_handle => {
-            if (vr.readInt(u64, data)) |v| {
-                try formatUnsignedDecimal(w, u64, v);
-            } else if (vr.readInt(u32, data)) |v| {
-                try formatUnsignedDecimal(w, u32, v);
+            if (vr.readValue(u64, data)) |v| {
+                try formatDecimal(w, u64, v);
+            } else if (vr.readValue(u32, data)) |v| {
+                try formatDecimal(w, u32, v);
             } else try w.writeAll("0");
         },
         .bin_xml => try w.writeAll("null"),

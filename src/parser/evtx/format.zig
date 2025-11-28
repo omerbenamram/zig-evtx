@@ -92,6 +92,13 @@ pub const Chunk = struct {
     }
 };
 
+/// Packed struct for chunk header core fields at offset 40-52 (comptime type dispatch)
+const ChunkHeaderCore = packed struct {
+    header_size: u32,
+    last_event_record_offset: u32,
+    free_space_offset: u32,
+};
+
 pub const ChunkHeader = struct {
     header_size: u32,
     last_event_record_offset: u32,
@@ -104,26 +111,36 @@ pub const ChunkHeader = struct {
 
     pub fn parse(buf: *const [65536]u8) !ChunkHeader {
         if (!std.mem.eql(u8, buf[0..8], "ElfChnk\x00")) return error.BadChunkSignature;
-        const header_size = std.mem.readInt(u32, buf[40..44], .little);
-        const last_event_record_offset = std.mem.readInt(u32, buf[44..48], .little);
-        const free_space_offset = std.mem.readInt(u32, buf[48..52], .little);
-        var ch: ChunkHeader = .{ .header_size = header_size, .last_event_record_offset = last_event_record_offset, .free_space_offset = free_space_offset };
+
+        // Read core header fields via packed struct (comptime type dispatch)
+        const core = std.mem.bytesToValue(ChunkHeaderCore, buf[40..52]);
+        var ch: ChunkHeader = .{
+            .header_size = core.header_size,
+            .last_event_record_offset = core.last_event_record_offset,
+            .free_space_offset = core.free_space_offset,
+        };
+
         // Common string offset array at 128: 64 u32
-        var i: usize = 0;
-        while (i < 64) : (i += 1) {
-            const off = std.mem.readInt(u32, buf[128 + i * 4 .. 128 + i * 4 + 4][0..4], .little);
+        for (0..64) |i| {
+            const off = std.mem.readInt(u32, buf[128 + i * 4 ..][0..4], .little);
             ch.common_string_offsets[i] = off;
             if (off != 0 and off < buf.len) ch.common_strings_count += 1;
         }
         // TemplatePtr array at 384: 32 u32
-        i = 0;
-        while (i < 32) : (i += 1) {
-            const off = std.mem.readInt(u32, buf[384 + i * 4 .. 384 + i * 4 + 4][0..4], .little);
+        for (0..32) |i| {
+            const off = std.mem.readInt(u32, buf[384 + i * 4 ..][0..4], .little);
             ch.template_ptrs[i] = off;
             if (off != 0 and off < buf.len) ch.template_ptrs_count += 1;
         }
         return ch;
     }
+};
+
+/// Packed struct for record header fields at offset 4-24 (comptime type dispatch)
+const RecordHeaderCore = packed struct {
+    size: u32,
+    identifier: u64,
+    written_time: u64,
 };
 
 pub const RecordIterator = struct {
@@ -136,19 +153,20 @@ pub const RecordIterator = struct {
         if (self.offset >= self.chunk.header.free_space_offset) return null;
         const slice = self.chunk.buf[self.offset..];
         if (!std.mem.eql(u8, slice[0..4], &[_]u8{ 0x2a, 0x2a, 0x00, 0x00 })) return null;
-        const size = std.mem.readInt(u32, slice[4..8], .little);
+
+        // Read header fields via packed struct (comptime type dispatch)
+        const hdr = std.mem.bytesToValue(RecordHeaderCore, slice[4..24]);
+        const size = hdr.size;
+
         // Treat structurally bad tail as end-of-records rather than hard error
         if (size < 32) return null;
         // If the record claims to run past the free-space boundary or chunk buffer, stop
         if (self.offset + size > self.chunk.buf.len or (self.offset + size) > self.chunk.header.free_space_offset) return null;
-        const identifier = std.mem.readInt(u64, slice[8..16], .little);
-        const written = std.mem.readInt(u64, slice[16..24], .little);
-        const end_slice = slice[size - 4 .. size][0..4];
-        const end_copy = std.mem.readInt(u32, end_slice, .little);
+        const end_copy = std.mem.readInt(u32, slice[size - 4 .. size][0..4], .little);
         // Mismatched end size indicates a truncated tail; stop record iteration
         if (end_copy != size) return null;
         const event_data = slice[24 .. size - 4];
-        const rec = EventRecordRaw{ .identifier = identifier, .written_time = written, .binxml = event_data, .chunk_buf = &self.chunk.buf };
+        const rec = EventRecordRaw{ .identifier = hdr.identifier, .written_time = hdr.written_time, .binxml = event_data, .chunk_buf = &self.chunk.buf };
         self.offset += size;
         return rec;
     }

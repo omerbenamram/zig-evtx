@@ -35,10 +35,11 @@ pub const Reader = struct {
     }
 
     /// Reads a little-endian integer of type T from the current position.
+    /// Delegates to value_reader.readValue for the actual byte interpretation.
     pub fn readInt(self: *Reader, comptime T: type) !T {
         const size = @sizeOf(T);
         if (self.pos + size > self.buf.len) return BinXmlError.UnexpectedEof;
-        const val = std.mem.readInt(T, self.buf[self.pos..][0..size], .little);
+        const val = value_reader.readValue(T, self.buf[self.pos..]) orelse return BinXmlError.UnexpectedEof;
         self.pos += size;
         return val;
     }
@@ -59,16 +60,37 @@ pub const Reader = struct {
         return result;
     }
 
+    /// Comptime type dispatch for reading values.
+    /// Delegates to value_reader.readValue for primitives, handles compound types locally.
     fn readAny(self: *Reader, comptime T: type) !T {
         const type_info = @typeInfo(T);
-        switch (type_info) {
-            .int => return self.readInt(T),
-            .@"enum" => {
-                const TagType = type_info.@"enum".tag_type;
-                const val = try self.readInt(TagType);
+        const size = @sizeOf(T);
+
+        return switch (type_info) {
+            // Primitives: delegate to value_reader.readValue (single source of truth)
+            .int, .float, .bool => {
+                if (self.pos + size > self.buf.len) return BinXmlError.UnexpectedEof;
+                const val = value_reader.readValue(T, self.buf[self.pos..]) orelse return BinXmlError.UnexpectedEof;
+                self.pos += size;
+                return val;
+            },
+            // Enums: read underlying int, then convert
+            .@"enum" => |e| {
+                const TagType = e.tag_type;
+                const val = try self.readAny(TagType);
                 return std.meta.intToEnum(T, val) catch return BinXmlError.BadToken;
             },
-            .@"struct" => return self.readStruct(T),
+            // Structs: packed use bytesToValue, others read field-by-field
+            .@"struct" => |s| {
+                if (s.layout == .@"packed") {
+                    if (self.pos + size > self.buf.len) return BinXmlError.UnexpectedEof;
+                    const val = value_reader.readValue(T, self.buf[self.pos..]) orelse return BinXmlError.UnexpectedEof;
+                    self.pos += size;
+                    return val;
+                }
+                return self.readStruct(T);
+            },
+            // Arrays: read element-by-element
             .array => |arr_info| {
                 var arr: T = undefined;
                 for (&arr) |*elem| {
@@ -77,7 +99,7 @@ pub const Reader = struct {
                 return arr;
             },
             else => @compileError("Unsupported type in readAny: " ++ @typeName(T)),
-        }
+        };
     }
 
     /// Reads a 16-byte GUID from the current position.

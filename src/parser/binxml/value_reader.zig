@@ -35,8 +35,8 @@ pub const FileTime = struct {
     raw: u64,
 };
 
-/// Windows SYSTEMTIME structure
-pub const SystemTime = struct {
+/// Windows SYSTEMTIME structure - packed for direct memory mapping
+pub const SystemTime = packed struct {
     year: u16,
     month: u16,
     day_of_week: u16,
@@ -94,65 +94,91 @@ pub fn sidSize(data: []const u8) ?usize {
     return 8 + sub_count * 4;
 }
 
-/// Read a FILETIME from 8 bytes
+/// Read a FILETIME from 8 bytes.
+/// Uses readValue for the underlying u64 read.
 pub fn readFileTime(data: []const u8) ?FileTime {
-    if (data.len < 8) return null;
-    return FileTime{
-        .raw = std.mem.readInt(u64, data[0..8], .little),
-    };
+    const raw = readValue(u64, data) orelse return null;
+    return FileTime{ .raw = raw };
 }
 
-/// Read a SYSTEMTIME from 16 bytes
+/// Read a SYSTEMTIME from 16 bytes using comptime type dispatch
 pub fn readSystemTime(data: []const u8) ?SystemTime {
     if (data.len < 16) return null;
-    return SystemTime{
-        .year = std.mem.readInt(u16, data[0..2], .little),
-        .month = std.mem.readInt(u16, data[2..4], .little),
-        .day_of_week = std.mem.readInt(u16, data[4..6], .little),
-        .day = std.mem.readInt(u16, data[6..8], .little),
-        .hour = std.mem.readInt(u16, data[8..10], .little),
-        .minute = std.mem.readInt(u16, data[10..12], .little),
-        .second = std.mem.readInt(u16, data[12..14], .little),
-        .milliseconds = std.mem.readInt(u16, data[14..16], .little),
-    };
+    return std.mem.bytesToValue(SystemTime, data[0..16]);
 }
 
-/// Generic integer reader with bounds checking
+/// Generic integer reader with bounds checking.
+/// Delegates to readValue for the actual implementation.
 pub fn readInt(comptime T: type, data: []const u8) ?T {
+    return readValue(T, data);
+}
+
+/// Read a signed integer with bounds checking (alias for readInt)
+pub fn readIntSigned(comptime T: type, data: []const u8) ?T {
+    return readValue(T, data);
+}
+
+/// Read an unsigned integer with bounds checking (alias for readInt)
+pub fn readIntUnsigned(comptime T: type, data: []const u8) ?T {
+    return readValue(T, data);
+}
+
+/// Read f32 from little-endian bytes.
+/// Delegates to readValue for the actual implementation.
+pub fn readFloat32(data: []const u8) ?f32 {
+    return readValue(f32, data);
+}
+
+/// Read f64 from little-endian bytes.
+/// Delegates to readValue for the actual implementation.
+pub fn readFloat64(data: []const u8) ?f64 {
+    return readValue(f64, data);
+}
+
+/// Read a boolean (DWORD, 4 bytes).
+/// Delegates to readValue for the actual implementation.
+pub fn readBool(data: []const u8) ?bool {
+    return readValue(bool, data);
+}
+
+// ============================================================================
+// Generic Reader with Comptime Type Dispatch
+// ============================================================================
+
+/// Read any fixed-size value from bytes using comptime type dispatch.
+/// Supports: integers, floats, packed structs, bool.
+/// Uses @typeInfo to select the appropriate reading strategy at compile time.
+pub fn readValue(comptime T: type, data: []const u8) ?T {
     const size = @sizeOf(T);
     if (data.len < size) return null;
-    return std.mem.readInt(T, data[0..size], .little);
-}
 
-/// Read a signed integer with bounds checking
-pub fn readIntSigned(comptime T: type, data: []const u8) ?T {
-    return readInt(T, data);
-}
-
-/// Read an unsigned integer with bounds checking
-pub fn readIntUnsigned(comptime T: type, data: []const u8) ?T {
-    return readInt(T, data);
-}
-
-/// Read f32 from little-endian bytes
-pub fn readFloat32(data: []const u8) ?f32 {
-    if (data.len < 4) return null;
-    const bits = std.mem.readInt(u32, data[0..4], .little);
-    return @bitCast(bits);
-}
-
-/// Read f64 from little-endian bytes
-pub fn readFloat64(data: []const u8) ?f64 {
-    if (data.len < 8) return null;
-    const bits = std.mem.readInt(u64, data[0..8], .little);
-    return @bitCast(bits);
-}
-
-/// Read a boolean (DWORD, 4 bytes)
-pub fn readBool(data: []const u8) ?bool {
-    if (data.len < 4) return null;
-    const v = std.mem.readInt(u32, data[0..4], .little);
-    return v != 0;
+    const info = @typeInfo(T);
+    return switch (info) {
+        .int => std.mem.readInt(T, data[0..size], .little),
+        .float => blk: {
+            if (T == f32) {
+                const bits = std.mem.readInt(u32, data[0..4], .little);
+                break :blk @bitCast(bits);
+            } else if (T == f64) {
+                const bits = std.mem.readInt(u64, data[0..8], .little);
+                break :blk @bitCast(bits);
+            } else {
+                @compileError("Unsupported float type: " ++ @typeName(T));
+            }
+        },
+        .@"struct" => |s| blk: {
+            if (s.layout == .@"packed") {
+                break :blk std.mem.bytesToValue(T, data[0..size]);
+            } else {
+                @compileError("Only packed structs supported in readValue: " ++ @typeName(T));
+            }
+        },
+        .bool => blk: {
+            const v = std.mem.readInt(u32, data[0..4], .little);
+            break :blk v != 0;
+        },
+        else => @compileError("Unsupported type in readValue: " ++ @typeName(T)),
+    };
 }
 
 // ============================================================================
@@ -245,4 +271,34 @@ test "readBool interprets zero as false" {
     try std.testing.expectEqual(false, readBool(&false_data).?);
     try std.testing.expectEqual(true, readBool(&true_data).?);
     try std.testing.expectEqual(true, readBool(&nonzero_data).?);
+}
+
+test "readValue with comptime type dispatch" {
+    // Test integers
+    const data32 = [_]u8{ 0x78, 0x56, 0x34, 0x12 };
+    try std.testing.expectEqual(@as(u32, 0x12345678), readValue(u32, &data32).?);
+    try std.testing.expectEqual(@as(i32, 0x12345678), readValue(i32, &data32).?);
+
+    // Test floats
+    const float_data = [_]u8{ 0x00, 0x00, 0x80, 0x3F }; // 1.0f
+    try std.testing.expectEqual(@as(f32, 1.0), readValue(f32, &float_data).?);
+
+    // Test packed struct (SystemTime)
+    const st_data = [_]u8{
+        0xE8, 0x07, // year 2024
+        0x01, 0x00, // month 1
+        0x01, 0x00, // day of week
+        0x0F, 0x00, // day 15
+        0x0A, 0x00, // hour 10
+        0x1E, 0x00, // minute 30
+        0x2D, 0x00, // second 45
+        0x7B, 0x00, // milliseconds 123
+    };
+    const st = readValue(SystemTime, &st_data).?;
+    try std.testing.expectEqual(@as(u16, 2024), st.year);
+    try std.testing.expectEqual(@as(u16, 123), st.milliseconds);
+
+    // Test bool via readValue
+    const bool_data = [_]u8{ 0x01, 0x00, 0x00, 0x00 };
+    try std.testing.expectEqual(true, readValue(bool, &bool_data).?);
 }
