@@ -14,10 +14,6 @@ pub fn build(b: *std.Build) void {
     const use_c_alloc = b.option(bool, "use-c-alloc", "Link libc and use std.heap.c_allocator via alloc module") orelse true;
     // python-exe already declared above for CLI pass-through even if with_python=false
 
-    // Original executable target
-    const dep_opts = .{ .target = target_query, .optimize = optimize };
-    const zbench_mod = b.dependency("zbench", dep_opts).module("zbench");
-
     // Provide alloc module and optionally link libc
     const alloc_mod = b.createModule(.{
         .root_source_file = b.path("src/alloc.zig"),
@@ -68,6 +64,8 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&test_run.step);
 
     // zBench microbench executable
+    const dep_opts = .{ .target = target_query, .optimize = optimize };
+    const zbench_mod = b.dependency("zbench", dep_opts).module("zbench");
     const zbench_exe_root_mod = b.createModule(.{
         .root_source_file = b.path("src/bench_utf_zbench.zig"),
         .target = target,

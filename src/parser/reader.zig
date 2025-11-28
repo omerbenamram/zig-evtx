@@ -6,10 +6,8 @@
 const std = @import("std");
 
 const BinXmlError = @import("err.zig").BinXmlError;
-const tokens = @import("binxml/tokens.zig");
 const types = @import("binxml/types.zig");
 const value_reader = @import("binxml/value_reader.zig");
-const IR = @import("ir.zig").IR;
 
 /// Zero-copy binary reader for parsing EVTX BinXML data.
 ///
@@ -163,28 +161,5 @@ pub const Reader = struct {
         const slice = self.buf[start .. start + needed];
         self.pos = start + needed;
         return slice;
-    }
-
-    /// Reads an inline NameLink definition used in template definitions.
-    ///
-    /// Format: 4 bytes next_offset, 2 bytes hash, 2 bytes num_chars, UTF-16 name.
-    /// After reading, advances to end-of-block alignment (name data + 4 byte padding).
-    /// Returns an IR.Name pointing into the buffer (caller must copy if persistence needed).
-    pub fn readTemplateNameLinkInlineView(self: *Reader) !IR.Name {
-        const block_start = self.pos;
-        const header = try self.readStruct(types.NameHeader);
-        const num_chars = header.num_chars;
-        const byte_len = @as(usize, num_chars) * 2;
-
-        if (self.rem() < byte_len) return BinXmlError.UnexpectedEof;
-        const slice = self.buf[self.pos .. self.pos + byte_len];
-        self.pos += byte_len;
-
-        // Align to end of name block: header(6) + string + padding(4)
-        const block_end = block_start + 6 + byte_len + 4;
-        if (self.pos < block_end and block_end <= self.buf.len) {
-            self.pos = block_end;
-        }
-        return .{ .bytes = slice, .num_chars = num_chars };
     }
 };

@@ -15,17 +15,6 @@ const vf = @import("value_format.zig");
 pub const WriterError = std.Io.Writer.Error;
 
 // ============================================================================
-// Name and Value Writing
-// ============================================================================
-
-/// Write a value inline within a JSON string (no surrounding quotes).
-/// This is used when a value appears as part of text content within a string.
-fn writeValueInlineJson(writer: *std.Io.Writer, raw_type: u8, data: []const u8) WriterError!void {
-    // For inline values in strings, we want the XML-style formatting (no quotes)
-    try vf.formatValueXmlFromRaw(writer, raw_type, data);
-}
-
-// ============================================================================
 // Content Rendering
 // ============================================================================
 
@@ -36,7 +25,7 @@ fn renderTextToJsonString(nodes: []const IR.Node, writer: *std.Io.Writer) Writer
         switch (node) {
             .Text => |text| try util.writeUtf16LeJsonEscaped(writer, text.utf16, text.num_chars),
             .Pad => {},
-            .Value => |val| try writeValueInlineJson(writer, val.vtype, val.bytes),
+            .Value => |val| try vf.formatValueXmlFromRaw(writer, val.vtype, val.bytes),
             .CharRef => |charref| try writer.print("&#{d};", .{charref}),
             .EntityRef => try writer.writeByte('&'),
             .CData => |cdata| try util.writeUtf16LeJsonEscaped(writer, cdata.utf16, cdata.num_chars),

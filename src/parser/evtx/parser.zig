@@ -79,7 +79,7 @@ pub const EvtxParser = struct {
             // Pre-cache common strings from chunk header for faster lookups
             ctx.preCacheFromChunkHeader(&chunk.buf, &chunk.header.common_string_offsets);
             // Only enable deepest renderer-specific traces at -vvv
-            ctx.verbose = (self.opts.verbosity >= 3);
+            if (self.opts.verbosity >= 3) logger.setModuleLevel("binxml", .trace);
             // Provide output with reusable context for this chunk
             if (@hasDecl(@TypeOf(out_mut.*), "setContext")) {
                 out_mut.setContext(&ctx);

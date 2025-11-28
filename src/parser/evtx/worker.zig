@@ -63,7 +63,7 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
 
     ctx.resetPerChunk();
     ctx.preCacheFromChunkHeader(&mutable_chunk.buf, &mutable_chunk.header.common_string_offsets);
-    ctx.verbose = (opts.verbosity >= 3);
+    if (opts.verbosity >= 3) logger.setModuleLevel("binxml", .trace);
     out.setContext(&ctx);
 
     var rec_iter = mutable_chunk.records();

@@ -70,7 +70,8 @@ pub fn parseElementIR(ctx: *Context, chunk: []const u8, r: *Reader, elem_ctx: El
 // --- Template Instance Value Parsing ---
 
 /// Parses the values for a template instance.
-/// It reads the descriptor table first, then the value payloads.
+/// Single-pass: reads descriptor table to compute payload offset, then reads values directly.
+/// This avoids allocating intermediate arrays for sizes/vtypes.
 pub fn parseTemplateInstanceValues(r: *Reader, allocator: std.mem.Allocator) ![]types.TemplateValue {
     if (r.rem() < 4) return BinXmlError.UnexpectedEof;
 
@@ -80,46 +81,31 @@ pub fn parseTemplateInstanceValues(r: *Reader, allocator: std.mem.Allocator) ![]
     if (log.enabled(.trace)) log.trace("tmpl values declared={d}", .{declared});
 
     if (declared == 0) return allocator.alloc(types.TemplateValue, 0);
-    if (r.rem() < 4 * declared) return BinXmlError.UnexpectedEof;
 
-    // Read descriptor table then payloads using small helpers for clarity
-    const desc = try readTemplateValueDescriptorTable(r, allocator, declared);
-    defer allocator.free(desc.sizes);
-    defer allocator.free(desc.vtypes);
-    defer allocator.free(desc.reserved);
+    // Descriptor table is 4 bytes per entry (2 size + 1 type + 1 reserved)
+    const desc_table_size = declared * @sizeOf(types.ValueDescriptor);
+    if (r.rem() < desc_table_size) return BinXmlError.UnexpectedEof;
 
-    return try readTemplateValuesFromDescriptors(r, allocator, desc.sizes, desc.vtypes);
-}
+    // Remember where descriptor table starts - we'll read from it while parsing values
+    const desc_table_start = r.pos;
 
-const TemplateDescriptors = struct {
-    sizes: []u16,
-    vtypes: []u8,
-    reserved: []u8,
-};
+    // Skip past descriptor table to position at payloads
+    r.pos += desc_table_size;
 
-fn readTemplateValueDescriptorTable(r: *Reader, allocator: std.mem.Allocator, declared: usize) !TemplateDescriptors {
-    var sizes = try allocator.alloc(u16, declared);
-    errdefer allocator.free(sizes);
-    var vtypes = try allocator.alloc(u8, declared);
-    errdefer allocator.free(vtypes);
-    var reserved = try allocator.alloc(u8, declared);
-    errdefer allocator.free(reserved);
-
-    for (0..declared) |i| {
-        const desc = try r.readStruct(types.ValueDescriptor);
-        sizes[i] = desc.size;
-        vtypes[i] = @intFromEnum(desc.value_type);
-        reserved[i] = desc.unknown;
-        if (log.enabled(.trace)) log.trace("  desc[{d}]: size={d} type=0x{x} reserved={d}", .{ i, sizes[i], vtypes[i], reserved[i] });
-    }
-    return .{ .sizes = sizes, .vtypes = vtypes, .reserved = reserved };
-}
-
-fn readTemplateValuesFromDescriptors(r: *Reader, allocator: std.mem.Allocator, sizes: []const u16, vtypes: []const u8) ![]types.TemplateValue {
-    const declared = sizes.len;
+    // Allocate only the final values array
     var values = try allocator.alloc(types.TemplateValue, declared);
+    errdefer allocator.free(values);
 
-    for (sizes, vtypes, 0..) |size, vtype, i| {
+    // Single pass: for each value, read its descriptor from the table, then read payload
+    for (0..declared) |i| {
+        // Read descriptor from table (4 bytes each)
+        const desc_offset = desc_table_start + i * @sizeOf(types.ValueDescriptor);
+        const size = std.mem.readInt(u16, r.buf[desc_offset..][0..2], .little);
+        const vtype = r.buf[desc_offset + 2];
+        // Note: desc_offset + 3 is reserved/unused byte - we skip it entirely
+
+        if (log.enabled(.trace)) log.trace("  desc[{d}]: size={d} type=0x{x}", .{ i, size, vtype });
+
         const need: usize = @intCast(size);
         if (r.rem() < need) return BinXmlError.UnexpectedEof;
 
@@ -133,6 +119,7 @@ fn readTemplateValuesFromDescriptors(r: *Reader, allocator: std.mem.Allocator, s
 
         if (log.enabled(.trace)) log.trace("  payload[{d}]: t=0x{x} len={d}", .{ i, vtype, need });
     }
+
     return values;
 }
 

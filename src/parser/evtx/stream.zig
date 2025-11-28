@@ -3,6 +3,7 @@
 const std = @import("std");
 const binxml = @import("../binxml/mod.zig");
 const format = @import("format.zig");
+const logger = @import("../../logger.zig");
 const output = @import("output.zig");
 
 pub const FileHeader = format.FileHeader;
@@ -81,7 +82,7 @@ pub const RecordStream = struct {
         self.ctx.resetPerChunk();
         // Pre-cache common strings from chunk header for faster lookups
         self.ctx.preCacheFromChunkHeader(&self.current_chunk.buf, &self.current_chunk.header.common_string_offsets);
-        self.ctx.verbose = (self.opts.verbosity >= 3);
+        if (self.opts.verbosity >= 3) logger.setModuleLevel("binxml", .trace);
         self.out.setContext(&self.ctx);
         self.rec_iter = self.current_chunk.records();
         self.have_iter = true;

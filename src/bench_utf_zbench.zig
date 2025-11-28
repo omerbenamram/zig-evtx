@@ -11,25 +11,7 @@ fn makeUtf16FromAscii(alloc: std.mem.Allocator, ascii: []const u8) ![]u8 {
     return buf;
 }
 
-const DevNullWriter = struct {
-    pub const Error = error{};
-    pub fn writer(self: *DevNullWriter) std.io.AnyWriter {
-        return .{ .context = self, .writeFn = write };
-    }
-    fn write(ctx: *const anyopaque, bytes: []const u8) anyerror!usize {
-        _ = ctx;
-        if (bytes.len > 0) {
-            var tmp: u8 = 0;
-            const vp: *volatile u8 = &tmp;
-            vp.* = bytes[bytes.len - 1];
-        }
-        return bytes.len;
-    }
-};
-
-// Prebuilt input and writer to avoid per-iteration allocations
-var g_dev: DevNullWriter = .{};
-var g_writer: @TypeOf(g_dev.writer()) = undefined;
+// Prebuilt input to avoid per-iteration allocations
 var g_utf: []u8 = &[_]u8{};
 var g_num_chars: usize = 0;
 
@@ -37,28 +19,37 @@ fn beforeAll() void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
-    g_writer = g_dev.writer();
     const ascii_text = "A & B < C > D 'E' \"F\" and a long ASCII paragraph to stress escaping. ";
-    var list = std.ArrayList(u8).initCapacity(alloc, 0) catch @panic("alloc");
+    var list: std.ArrayList(u8) = .empty;
     // build once, reuse across iterations
     for (0..16384) |_| list.appendSlice(alloc, ascii_text) catch @panic("alloc");
     g_utf = makeUtf16FromAscii(alloc, list.items) catch @panic("alloc");
     g_num_chars = g_utf.len / 2;
-
-    // Keep a single dataset; benchmarks compare scalar vs SIMD wrapper on same input
 }
 
 fn afterAll() void {
-    // If arena is used, freeing is optional; keep function for completeness
     // Intentionally leaking benchmark data to keep hooks simple
 }
 
-fn bench_new_ascii(_: std.mem.Allocator) void {
-    util.writeUtf16LeXmlEscaped_scalar(g_writer, g_utf, g_num_chars) catch unreachable;
+fn bench_scalar(_: std.mem.Allocator) void {
+    // Use a fixed buffer writer for benchmarking
+    var buf: [1024 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    util.writeUtf16LeXmlEscaped_scalar(&writer, g_utf, g_num_chars) catch unreachable;
 }
 
-fn bench_simd_ascii(_: std.mem.Allocator) void {
-    util.writeUtf16LeXmlEscaped_simd_utf16(g_writer, g_utf, g_num_chars) catch unreachable;
+fn bench_simd(_: std.mem.Allocator) void {
+    // Use a fixed buffer writer for benchmarking
+    var buf: [1024 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    util.writeUtf16LeXmlEscaped_simd_utf16(&writer, g_utf, g_num_chars) catch unreachable;
+}
+
+fn bench_auto(_: std.mem.Allocator) void {
+    // Use a fixed buffer writer for benchmarking
+    var buf: [1024 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    util.writeUtf16LeXmlEscaped(&writer, g_utf, g_num_chars) catch unreachable;
 }
 
 pub fn main() !void {
@@ -69,8 +60,9 @@ pub fn main() !void {
         .hooks = .{ .before_all = beforeAll, .after_all = afterAll },
     });
     defer bench.deinit();
-    try bench.add("utf16 xml escaped new ascii", bench_new_ascii, .{});
-    try bench.add("utf16 xml escaped simd ascii", bench_simd_ascii, .{});
+    try bench.add("utf16 xml escaped scalar", bench_scalar, .{});
+    try bench.add("utf16 xml escaped simd", bench_simd, .{});
+    try bench.add("utf16 xml escaped auto", bench_auto, .{});
     var write_buf: [8192]u8 = undefined;
     var stdout_file = std.fs.File.stdout();
     var stdout_writer = stdout_file.writer(&write_buf);

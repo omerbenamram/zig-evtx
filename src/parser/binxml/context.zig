@@ -20,16 +20,6 @@ pub const NameCacheEntry = struct {
     num_chars: usize,
 };
 
-/// UTF-16 separator payload for array joining.
-pub const SeparatorPayload = struct {
-    bytes: []const u8,
-    num_chars: usize,
-};
-
-// Comptime UTF-16LE literals for common separators (no runtime allocation needed)
-const sep_space_utf16: []const u8 = &[_]u8{ ' ', 0 }; // U+0020
-const sep_comma_utf16: []const u8 = &[_]u8{ ',', 0 }; // U+002C
-
 /// Shared parsing context for BinXML processing.
 ///
 /// Manages per-chunk state including template caches, name caches, and a scoped
@@ -48,8 +38,6 @@ pub const Context = struct {
     arena: std.heap.ArenaAllocator,
     /// Template definition cache: DefKey -> parsed IR element.
     cache: std.AutoHashMap(DefKey, *IR.Element),
-    /// Enable verbose logging.
-    verbose: bool = false,
     /// Name cache: offset -> (UTF-16 bytes, char count).
     name_cache: std.AutoHashMap(u32, NameCacheEntry),
 
@@ -59,7 +47,6 @@ pub const Context = struct {
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
             .cache = std.AutoHashMap(DefKey, *IR.Element).init(allocator),
-            .verbose = false,
             .name_cache = std.AutoHashMap(u32, NameCacheEntry).init(allocator),
         };
     }
@@ -79,23 +66,6 @@ pub const Context = struct {
         self.cache.clearRetainingCapacity();
         self.name_cache.clearRetainingCapacity();
         _ = self.arena.reset(.retain_capacity);
-    }
-
-    /// Returns UTF-16 separator for array element joining.
-    /// Uses comptime literals for common separators (space, comma) - no allocation needed.
-    pub fn getSepUtf16(_: *Context, ascii: []const u8) SeparatorPayload {
-        if (ascii.len == 0) return .{ .bytes = &[_]u8{}, .num_chars = 0 };
-
-        if (ascii.len == 1) {
-            return switch (ascii[0]) {
-                ' ' => .{ .bytes = sep_space_utf16, .num_chars = 1 },
-                ',' => .{ .bytes = sep_comma_utf16, .num_chars = 1 },
-                else => .{ .bytes = &[_]u8{}, .num_chars = 0 },
-            };
-        }
-
-        // Unexpected separator - return empty (caller should only use space/comma)
-        return .{ .bytes = &[_]u8{}, .num_chars = 0 };
     }
 
     pub fn getOrReadName(self: *Context, chunk: []const u8, off_u32: u32) !IR.Name {

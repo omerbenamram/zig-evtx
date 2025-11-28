@@ -53,9 +53,10 @@ const value_reader = @import("value_reader.zig");
 const logger = @import("../../logger.zig");
 const log = logger.scoped("binxml");
 
-/// Policy for joining array elements when rendering.
-/// Attributes use space separator, text content uses comma for strings.
-const JoinerPolicy = enum { Attr, Text };
+// Comptime UTF-16LE literals (no runtime allocation needed)
+const event_name_utf16: []const u8 = &[_]u8{ 'E', 0, 'v', 0, 'e', 0, 'n', 0, 't', 0 };
+const sep_space_utf16: []const u8 = &[_]u8{ ' ', 0 };
+const sep_comma_utf16: []const u8 = &[_]u8{ ',', 0 };
 
 pub const Builder = struct {
     ctx: *Context,
@@ -105,8 +106,8 @@ pub const Builder = struct {
 
     /// Creates a minimal <Event/> element for empty records.
     fn buildEmpty(self: *Builder) !*IR.Element {
-        const bytes: []u8 = try util.utf16FromAscii(self.alloc(), "Event");
-        return IRMod.irNewElement(self.alloc(), IR.Name{ .bytes = bytes, .num_chars = 5 });
+        // Use comptime constant - no allocation needed for the name bytes
+        return IRMod.irNewElement(self.alloc(), IR.Name{ .bytes = event_name_utf16, .num_chars = 5 });
     }
 
     /// Checks if the next token indicates a template instance.
@@ -295,12 +296,12 @@ pub const Builder = struct {
 
         // Instantiate attributes
         for (def.attrs.items) |attr| {
-            const expanded_value = try self.instantiateNodes(chunk, attr.value.items, values, .Attr);
+            const expanded_value = try self.instantiateNodes(chunk, attr.value.items, values, true);
             try el.attrs.append(self.alloc(), .{ .name = attr.name, .value = expanded_value });
         }
 
         // Instantiate children
-        const expanded_children = try self.instantiateNodes(chunk, def.children.items, values, .Text);
+        const expanded_children = try self.instantiateNodes(chunk, def.children.items, values, false);
         if (expanded_children.items.len > 0) {
             try el.children.ensureTotalCapacityPrecise(self.alloc(), expanded_children.items.len);
         }
@@ -319,7 +320,7 @@ pub const Builder = struct {
         chunk: []const u8,
         nodes: []const IR.Node,
         values: []const types.TemplateValue,
-        policy: JoinerPolicy,
+        is_attr: bool,
     ) anyerror!std.ArrayList(IR.Node) {
         var out: std.ArrayList(IR.Node) = .empty;
         if (nodes.len > 0) {
@@ -328,7 +329,7 @@ pub const Builder = struct {
 
         for (nodes) |node| {
             switch (node) {
-                .Subst => |subst| try self.resolveSubstitution(chunk, subst, values, policy, &out),
+                .Subst => |subst| try self.resolveSubstitution(chunk, subst, values, is_attr, &out),
                 .Element => |child_def| {
                     // Recursively instantiate child elements
                     const child = try self.instantiate(chunk, child_def, values);
@@ -347,7 +348,7 @@ pub const Builder = struct {
         chunk: []const u8,
         subst: IR.SubstPayload,
         values: []const types.TemplateValue,
-        policy: JoinerPolicy,
+        is_attr: bool,
         out: *std.ArrayList(IR.Node),
     ) anyerror!void {
         if (subst.id >= values.len) return; // Out of bounds, ignore
@@ -363,7 +364,7 @@ pub const Builder = struct {
         const base_type = subst.vtype & 0x7f;
 
         if (is_array) {
-            try self.resolveArrayValue(chunk, base_type, val, policy, out);
+            try self.resolveArrayValue(chunk, base_type, val, is_attr, out);
         } else {
             try self.resolveSingleValue(chunk, base_type, val, out);
         }
@@ -409,7 +410,7 @@ pub const Builder = struct {
         chunk: []const u8,
         base_type: u8,
         val: types.TemplateValue,
-        policy: JoinerPolicy,
+        is_attr: bool,
         out: *std.ArrayList(IR.Node),
     ) anyerror!void {
         var iter = ArrayIterator{
@@ -418,12 +419,15 @@ pub const Builder = struct {
             .backing_type = val.t,
         };
 
-        var first = true;
-        const sep = self.ctx.getSepUtf16(joinerFor(policy, base_type));
+        // Separator: attrs always space, text uses comma for strings
+        const is_string = base_type == @intFromEnum(types.ValueType.string) or
+            base_type == @intFromEnum(types.ValueType.ansi_string);
+        const sep = if (is_attr or !is_string) sep_space_utf16 else sep_comma_utf16;
 
+        var first = true;
         while (iter.next()) |item_bytes| {
-            if (!first and sep.num_chars > 0) {
-                try out.append(self.alloc(), .{ .Text = .{ .utf16 = sep.bytes, .num_chars = sep.num_chars } });
+            if (!first) {
+                try out.append(self.alloc(), .{ .Text = .{ .utf16 = sep, .num_chars = 1 } });
             }
             first = false;
 
@@ -461,15 +465,6 @@ pub const Builder = struct {
 // =============================================================================
 // Array Iteration Helpers
 // =============================================================================
-
-/// Returns the separator string for array joining based on policy and type.
-fn joinerFor(policy: JoinerPolicy, base: u8) []const u8 {
-    return switch (policy) {
-        .Attr => " ",
-        .Text => if (base == @intFromEnum(types.ValueType.string) or
-            base == @intFromEnum(types.ValueType.ansi_string)) "," else " ",
-    };
-}
 
 /// Iterator for parsing binary array payloads.
 /// Handles variable-length types (strings, SIDs) and fixed-size types.

@@ -4,16 +4,14 @@
 //! This module uses Zig 0.15's concrete std.Io.Writer interface for all output,
 //! enabling better debug-mode performance and eliminating generic code bloat.
 
-const IRModule = @import("ir.zig");
-const IR = IRModule.IR;
-const logger = @import("../logger.zig");
 const std = @import("std");
-const util = @import("util.zig");
-const normalizeAndWriteSystemTimeAscii = util.normalizeAndWriteSystemTimeAscii;
 const binxml = @import("binxml/mod.zig");
 const Context = binxml.Context;
-const logNameTrace = @import("binxml/name.zig").logNameTrace;
 const attrNameIsSystemTime = @import("binxml/name.zig").attrNameIsSystemTime;
+const IRModule = @import("ir.zig");
+const IR = IRModule.IR;
+const util = @import("util.zig");
+const normalizeAndWriteSystemTimeAscii = util.normalizeAndWriteSystemTimeAscii;
 const vf = @import("value_format.zig");
 
 /// Writer error type for all rendering functions.
@@ -192,16 +190,10 @@ fn renderElementIRXml(element: *const IR.Element, writer: *std.Io.Writer, indent
 // ============================================================================
 
 /// Render XML from BinXML with context using concrete std.Io.Writer.
+/// Note: Callers should set logger level before calling if verbose output is needed.
 pub fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, writer: *std.Io.Writer) anyerror!void {
-    if (ctx.verbose) logger.setModuleLevel("binxml", .trace);
-
     var builder = binxml.Builder.init(ctx);
     const root = try builder.build(chunk, bin);
-
-    if (ctx.verbose) {
-        try logNameTrace(root.name, "root");
-    }
-
     try renderElementIRXml(root, writer, 0);
 }
 
