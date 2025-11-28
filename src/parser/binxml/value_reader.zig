@@ -113,16 +113,6 @@ pub fn readInt(comptime T: type, data: []const u8) ?T {
     return readValue(T, data);
 }
 
-/// Read a signed integer with bounds checking (alias for readInt)
-pub fn readIntSigned(comptime T: type, data: []const u8) ?T {
-    return readValue(T, data);
-}
-
-/// Read an unsigned integer with bounds checking (alias for readInt)
-pub fn readIntUnsigned(comptime T: type, data: []const u8) ?T {
-    return readValue(T, data);
-}
-
 /// Read f32 from little-endian bytes.
 /// Delegates to readValue for the actual implementation.
 pub fn readFloat32(data: []const u8) ?f32 {

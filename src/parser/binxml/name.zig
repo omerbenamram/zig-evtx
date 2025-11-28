@@ -35,22 +35,6 @@ pub fn writeNameFromUtf16(w: anytype, utf16le: []const u8, num_chars: usize) !vo
     try util.writeUtf16LeXmlEscaped(w, utf16le, num_chars);
 }
 
-fn isNameSystemTimeFromOffset(chunk: []const u8, name_offset: u32) bool {
-    if (name_offset >= chunk.len) return false;
-    var reader = Reader.init(chunk);
-    reader.pos = name_offset;
-
-    const header = reader.readStruct(types.NameHeader) catch return false;
-    const num_chars = header.num_chars;
-    const byte_len = @as(usize, num_chars) * 2;
-
-    if (reader.rem() < byte_len) return false;
-    const str_start = reader.pos;
-    const raw_slice = chunk[str_start .. str_start + byte_len];
-
-    return utf16EqualsAscii(raw_slice, num_chars, "SystemTime");
-}
-
 pub fn attrNameIsSystemTime(name: IR.Name) bool {
     return utf16EqualsAscii(name.bytes, name.num_chars, "SystemTime");
 }

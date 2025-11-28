@@ -16,31 +16,6 @@ inline fn xmlEntityFor(c: u8) ?[]const u8 {
     };
 }
 
-inline fn flushAsciiRun(w: anytype, ascii_buf: *[256]u8, ascii_len: *usize) !void {
-    if (ascii_len.* > 0) {
-        try w.writeAll(ascii_buf.*[0..ascii_len.*]);
-        ascii_len.* = 0;
-    }
-}
-
-inline fn queueAsciiOrEntity(
-    w: anytype,
-    c: u8,
-    ascii_buf: *[256]u8,
-    ascii_len: *usize,
-) !void {
-    if (xmlEntityFor(c)) |e| {
-        try flushAsciiRun(w, ascii_buf, ascii_len);
-        try w.writeAll(e);
-    } else {
-        if (ascii_len.* == ascii_buf.len) {
-            try flushAsciiRun(w, ascii_buf, ascii_len);
-        }
-        ascii_buf.*[ascii_len.*] = c;
-        ascii_len.* += 1;
-    }
-}
-
 pub fn writeXmlEscaped(w: anytype, s: []const u8) !void {
     // Fast path: scan and write contiguous safe spans; only emit entities when needed
     var i: usize = 0;
@@ -634,46 +609,6 @@ pub fn writePaddedInt(w: anytype, comptime T: type, value: T, pad_width: usize) 
     try w.writeAll(s);
 }
 
-pub fn writeUnicodeStringArrayCommaSeparated(w: anytype, utf16_data: []const u8) !void {
-    var i: usize = 0;
-    var item_index: usize = 0;
-    var last_non_empty: isize = -1;
-    while (i <= utf16_data.len) {
-        const start = i;
-        var end = i;
-        while (end + 1 < utf16_data.len) : (end += 2) {
-            const u = std.mem.readInt(u16, utf16_data[end .. end + 2][0..2], .little);
-            if (u == 0) break;
-        }
-        if (end > start) last_non_empty = @as(isize, @intCast(item_index));
-        item_index += 1;
-        if (end + 1 < utf16_data.len) {
-            i = end + 2;
-        } else break;
-    }
-    if (last_non_empty < 0) return;
-    i = 0;
-    var idx: usize = 0;
-    var first: bool = true;
-    while (i <= utf16_data.len and idx <= @as(usize, @intCast(last_non_empty))) {
-        const start = i;
-        var end = i;
-        while (end + 1 < utf16_data.len) : (end += 2) {
-            const u = std.mem.readInt(u16, utf16_data[end .. end + 2][0..2], .little);
-            if (u == 0) break;
-        }
-        if (!first) try w.writeByte(',') else first = false;
-        if (end > start) {
-            const num_chars = (end - start) / 2;
-            try writeUtf16LeXmlEscaped(w, utf16_data[start..end], num_chars);
-        }
-        idx += 1;
-        if (end + 1 < utf16_data.len) {
-            i = end + 2;
-        } else break;
-    }
-}
-
 const DateTimeParts = struct {
     year: i64,
     month: i64,
@@ -701,13 +636,6 @@ fn computeUtcFromUnixSeconds(unix_seconds: i64) DateTimeParts {
     const minute: u32 = @intCast(@divFloor(sod_rem, 60));
     const second: u32 = @intCast(sod_rem - @as(i64, minute) * 60);
     return .{ .year = y, .month = m, .day = d, .hour = hour, .minute = minute, .second = second };
-}
-
-pub fn formatIso8601UtcFromUnixMs(buf: []u8, unix_secs: i64, ms: u32) ![]const u8 {
-    const parts = computeUtcFromUnixSeconds(unix_secs);
-    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
-        parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second, ms,
-    });
 }
 
 pub fn formatIso8601UtcFromFiletimeMicros(buf: []u8, filetime: u64) ![]const u8 {

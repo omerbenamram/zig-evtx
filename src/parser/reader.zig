@@ -170,27 +170,6 @@ pub const Reader = struct {
         return slice;
     }
 
-    /// Reads a length-prefixed UTF-16LE string.
-    ///
-    /// Format: u16 num_chars, followed by num_chars * 2 bytes of UTF-16LE data.
-    /// If an immediate trailing UTF-16 NUL (0x0000) follows, it is consumed.
-    pub fn readLenPrefixedUtf16TrimEos(self: *Reader) !NameView {
-        const header = try self.readStruct(types.NameLengthHeader);
-        const num_chars = header.len;
-        const byte_len = @as(usize, num_chars) * 2;
-
-        if (self.rem() < byte_len) return BinXmlError.UnexpectedEof;
-        const slice = self.buf[self.pos .. self.pos + byte_len];
-        self.pos += byte_len;
-
-        // Consume trailing NUL if present
-        if (self.rem() >= 2) {
-            const maybe_nul = std.mem.readInt(u16, self.buf[self.pos..][0..2], .little);
-            if (maybe_nul == 0) self.pos += 2;
-        }
-        return .{ .utf16 = slice, .num_chars = num_chars };
-    }
-
     /// Reads an inline NameLink definition used in template definitions.
     ///
     /// Format: 4 bytes next_offset, 2 bytes hash, 2 bytes num_chars, UTF-16 name.

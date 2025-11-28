@@ -47,7 +47,6 @@ pub fn irNewElement(allocator: std.mem.Allocator, name: IR.Name) !*IR.Element {
     return el;
 }
 
-pub fn nameEqualsAscii(chunk: []const u8, name: IR.Name, ascii: []const u8) bool {
-    _ = chunk;
+pub fn nameEqualsAscii(name: IR.Name, ascii: []const u8) bool {
     return utf16EqualsAscii(name.bytes, name.num_chars, ascii);
 }

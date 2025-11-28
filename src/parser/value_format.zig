@@ -112,16 +112,6 @@ pub fn formatDecimal(w: anytype, comptime T: type, value: T) !void {
     try w.writeAll(s);
 }
 
-/// Format a signed integer as decimal (alias for compatibility)
-pub fn formatSignedDecimal(w: anytype, comptime T: type, value: T) !void {
-    try formatDecimal(w, T, value);
-}
-
-/// Format an unsigned integer as decimal (alias for compatibility)
-pub fn formatUnsignedDecimal(w: anytype, comptime T: type, value: T) !void {
-    try formatDecimal(w, T, value);
-}
-
 /// Read and format an integer from bytes using comptime type dispatch.
 /// Returns true if value was read and formatted, false if data insufficient.
 pub fn readAndFormatInt(w: anytype, comptime T: type, data: []const u8) !bool {

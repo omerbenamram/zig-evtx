@@ -121,23 +121,10 @@ pub const ElementStartHeader = packed struct {
     data_size: u32,
 };
 
-pub const ElementStartHeaderNoDep = packed struct {
-    data_size: u32,
-};
-
 pub const NameHeader = packed struct {
     next_offset: u32,
     hash: u16,
     num_chars: u16,
-};
-
-pub const SubstitutionToken = packed struct {
-    id: u16,
-    vtype: u8,
-};
-
-pub const CharRefToken = packed struct {
-    value: u16,
 };
 
 pub const AttributeListHeader = packed struct {
@@ -178,10 +165,6 @@ pub const CharRefHeader = packed struct {
 
 pub const TokenHeader = packed struct {
     token: u8,
-};
-
-pub const TemplateValuesCountHeader = packed struct {
-    count: u32,
 };
 
 pub const NameOffsetHeader = packed struct {
