@@ -244,7 +244,7 @@ pub fn parseConcurrent(
 
     // Producer: read chunks sequentially and enqueue
     var chunk_index: usize = 0;
-    while (chunk_index < hdr.num_chunks) : (chunk_index += 1) {
+    while (chunk_index < hdr.core.num_chunks) : (chunk_index += 1) {
         const chunk = Chunk.read(reader) catch |e| {
             log.err("failed to read chunk {d}: {s}", .{ chunk_index, @errorName(e) });
             break;

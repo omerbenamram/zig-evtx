@@ -7,7 +7,8 @@ const render_xml = @import("../render_xml.zig");
 const render_json = @import("../render_json.zig");
 const alloc_mod = @import("alloc");
 
-pub const FileHeader = struct {
+/// Packed struct for file header core fields at offset 8-44
+pub const FileHeaderCore = packed struct {
     first_chunk: u64,
     last_chunk: u64,
     next_record_id: u64,
@@ -16,41 +17,34 @@ pub const FileHeader = struct {
     major: u16,
     header_block_size: u16,
     num_chunks: u16,
+};
+
+/// Packed struct for file header tail fields at offset 120-128
+pub const FileHeaderTail = packed struct {
     flags: u32,
     checksum: u32,
+};
+
+pub const FileHeader = struct {
+    core: FileHeaderCore,
+    tail: FileHeaderTail,
 
     pub fn read(reader: anytype) !FileHeader {
         var buf: [4096]u8 = undefined;
         try reader.interface.readSliceAll(&buf);
         if (!std.mem.eql(u8, buf[0..8], "ElfFile\x00")) return error.BadSignature;
-        const first_chunk = std.mem.readInt(u64, buf[8..16], .little);
-        const last_chunk = std.mem.readInt(u64, buf[16..24], .little);
-        const next_record_id = std.mem.readInt(u64, buf[24..32], .little);
-        const header_size = std.mem.readInt(u32, buf[32..36], .little);
-        const minor = std.mem.readInt(u16, buf[36..38], .little);
-        const major = std.mem.readInt(u16, buf[38..40], .little);
-        const header_block_size = std.mem.readInt(u16, buf[40..42], .little);
-        const num_chunks = std.mem.readInt(u16, buf[42..44], .little);
-        const flags = std.mem.readInt(u32, buf[120..124], .little);
-        const checksum = std.mem.readInt(u32, buf[124..128], .little);
+
+        // Read contiguous fields via packed structs (comptime type dispatch)
+        const core = std.mem.bytesToValue(FileHeaderCore, buf[8..44]);
+        const tail = std.mem.bytesToValue(FileHeaderTail, buf[120..128]);
 
         // Verify header CRC32 over first 120 bytes
         var hasher = crc32.Crc32.init();
         hasher.update(buf[0..120]);
         const computed = hasher.final();
-        if (computed != checksum) return error.BadHeaderChecksum;
-        return .{
-            .first_chunk = first_chunk,
-            .last_chunk = last_chunk,
-            .next_record_id = next_record_id,
-            .header_size = header_size,
-            .minor = minor,
-            .major = major,
-            .header_block_size = header_block_size,
-            .num_chunks = num_chunks,
-            .flags = flags,
-            .checksum = checksum,
-        };
+        if (computed != tail.checksum) return error.BadHeaderChecksum;
+
+        return .{ .core = core, .tail = tail };
     }
 
     pub fn validateChecksum(self: *const FileHeader) !void {

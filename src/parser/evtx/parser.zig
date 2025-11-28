@@ -71,7 +71,7 @@ pub const EvtxParser = struct {
         defer ctx.deinit();
         // We need a mutable output to retain and reuse scratch capacity across records
         var out_mut = out;
-        while (chunk_index < hdr.num_chunks) : (chunk_index += 1) {
+        while (chunk_index < hdr.core.num_chunks) : (chunk_index += 1) {
             var chunk = try Chunk.read(reader);
             if (self.opts.verbosity >= 1) log.info("chunk {d}: free_off=0x{x}, last_rec_off=0x{x}", .{ chunk_index, chunk.header.free_space_offset, chunk.header.last_event_record_offset });
             if (self.opts.validate_checksums) try chunk.validateChecksums();

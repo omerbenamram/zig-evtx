@@ -79,7 +79,7 @@ pub const RecordStream = struct {
 
     fn ensureIterator(self: *RecordStream) !bool {
         if (self.have_iter) return true;
-        if (self.chunk_index >= self.hdr.num_chunks) return false;
+        if (self.chunk_index >= self.hdr.core.num_chunks) return false;
         // Strictly sequential: read next chunk from the same reader
         self.current_chunk = try Chunk.read(self);
         if (self.opts.validate_checksums) try self.current_chunk.validateChecksums();
@@ -109,7 +109,7 @@ pub const RecordStream = struct {
                 self.emitted += 1;
                 if (self.opts.max_records != 0 and self.emitted >= self.opts.max_records) {
                     // Mark exhausted so subsequent calls return null
-                    self.chunk_index = self.hdr.num_chunks;
+                    self.chunk_index = self.hdr.core.num_chunks;
                 }
                 return bytes;
             } else {
