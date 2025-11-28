@@ -27,11 +27,7 @@ pub const ParseState = struct {
     src: Source,
     chunk_base: usize = 0,
 
-    pub fn init(ctx: *Context, chunk: []const u8, r: *Reader, src: Source) ParseState {
-        return .{ .ctx = ctx, .chunk = chunk, .r = r, .src = src };
-    }
-
-    pub fn withBase(ctx: *Context, chunk: []const u8, r: *Reader, src: Source, chunk_base: usize) ParseState {
+    pub fn init(ctx: *Context, chunk: []const u8, r: *Reader, src: Source, chunk_base: usize) ParseState {
         return .{ .ctx = ctx, .chunk = chunk, .r = r, .src = src, .chunk_base = chunk_base };
     }
 
@@ -44,16 +40,9 @@ pub const ParseState = struct {
 /// Parses an element and returns its IR representation.
 /// This function is the entry point for parsing a BinXML element.
 /// All allocations use the context's arena allocator.
-pub fn parseElementIR(ctx: *Context, chunk: []const u8, r: *Reader, src: Source) !*IR.Element {
-    var ps = ParseState.init(ctx, chunk, r, src);
-    return parseElementIRImpl(&ps);
-}
-
-/// Parses an element with an explicit chunk base offset.
-/// Useful when parsing elements that are relative to a specific chunk start.
-/// All allocations use the context's arena allocator.
-pub fn parseElementIRWithBase(ctx: *Context, chunk: []const u8, r: *Reader, src: Source, chunk_base: usize) !*IR.Element {
-    var ps = ParseState.withBase(ctx, chunk, r, src, chunk_base);
+/// Pass chunk_base=0 for records, or the template data_start offset for definitions.
+pub fn parseElementIR(ctx: *Context, chunk: []const u8, r: *Reader, src: Source, chunk_base: usize) !*IR.Element {
+    var ps = ParseState.init(ctx, chunk, r, src, chunk_base);
     return parseElementIRImpl(&ps);
 }
 
@@ -384,7 +373,7 @@ fn parseValueToken(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize
             try out.append(ps.alloc(), .{ .Value = .{ .vtype = vtype, .bytes = payload } });
         },
         else => {
-            if (types.valueTypeFixedSize(vtype)) |sz| {
+            if (types.ValueType.fixedSizeFromRaw(vtype)) |sz| {
                 const payload = try ps.r.readFixedBytesBounded(sz, end_pos);
                 try out.append(ps.alloc(), .{ .Value = .{ .vtype = vtype, .bytes = payload } });
             } else {
@@ -453,7 +442,12 @@ fn parseElementHeaderAndEnd(ps: *ParseState, element_start: usize) !ElementHeade
         });
     }
 
-    if (element_end > ps.r.buf.len or element_end < element_start) return BinXmlError.UnexpectedEof;
+    if (element_end > ps.r.buf.len or element_end < element_start) {
+        log.err("parseElementHeaderAndEnd: bounds check failed! start=0x{x} header_len=0x{x} data_size=0x{x} end=0x{x} buf_len=0x{x}", .{
+            element_start, hdr.header_len, hdr.data_size, element_end, ps.r.buf.len,
+        });
+        return BinXmlError.UnexpectedEof;
+    }
 
     return .{
         .name = hdr.name,
@@ -470,12 +464,26 @@ const PartialElementHeader = struct {
 };
 
 fn parseRecElementHeader(ps: *ParseState) !PartialElementHeader {
+    const pos_before = ps.r.pos;
     const h = try ps.r.readStruct(types.ElementStartHeader);
+
+    if (log.enabled(.debug)) {
+        log.debug("parseRecElementHeader: pos=0x{x} dep_id={d} data_size=0x{x} ({d})", .{ pos_before, h.dep_id, h.data_size, h.data_size });
+    }
+
     // Per spec: 1 byte token + 2 bytes dep_id + 4 bytes data_size
     const header_len: usize = 1 + 2 + 4;
     const h2 = try ps.r.readStruct(types.NameOffsetHeader);
     const name_off = h2.offset;
-    const name = try ps.ctx.getOrReadName(ps.chunk, name_off);
+
+    if (log.enabled(.debug)) {
+        log.debug("parseRecElementHeader: name_off=0x{x} chunk_len=0x{x}", .{ name_off, ps.chunk.len });
+    }
+
+    const name = ps.ctx.getOrReadName(ps.chunk, name_off) catch |err| {
+        log.err("parseRecElementHeader: getOrReadName failed at off=0x{x}: {s}", .{ name_off, @errorName(err) });
+        return err;
+    };
     return .{ .name = name, .data_size = h.data_size, .header_len = header_len };
 }
 
