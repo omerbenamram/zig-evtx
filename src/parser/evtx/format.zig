@@ -202,7 +202,7 @@ pub const EventRecordView = struct {
         defer ctx.deinit();
         var builder = binxml.Builder.init(&ctx);
         const root = try builder.build(self.chunk_buf, self.raw_xml);
-        try render_json.renderElementJson(self.chunk_buf, root, ctx.arena.allocator(), bw);
+        try render_json.renderElementJson(root, ctx.arena.allocator(), bw);
         try bw.writeAll("}\n");
         try w.interface.writeAll(buf.items);
     }

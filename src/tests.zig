@@ -4,6 +4,7 @@ const std = @import("std");
 // Zig resolves those modules (and their test declarations) in 0.14.
 test "aggregate module tests" {
     _ = @import("parser/util.zig");
+    _ = @import("parser/util_simd_test.zig");
     _ = @import("parser/render_json.zig");
     _ = @import("parser/render_xml.zig");
     _ = @import("parser/reader.zig");

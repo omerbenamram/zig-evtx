@@ -27,8 +27,7 @@ fn writeValueInlineJson(writer: anytype, raw_type: u8, data: []const u8) !void {
 // ============================================================================
 
 /// Render IR nodes as a JSON string value
-fn renderTextToJsonString(chunk: []const u8, nodes: []const IR.Node, writer: anytype) !void {
-    _ = chunk;
+fn renderTextToJsonString(nodes: []const IR.Node, writer: anytype) !void {
     try writer.writeByte('"');
     for (nodes) |node| {
         switch (node) {
@@ -44,11 +43,6 @@ fn renderTextToJsonString(chunk: []const u8, nodes: []const IR.Node, writer: any
     try writer.writeByte('"');
 }
 
-/// Render attribute value as a JSON string
-fn renderAttrValueToJsonString(chunk: []const u8, nodes: []const IR.Node, writer: anytype) !void {
-    try renderTextToJsonString(chunk, nodes, writer);
-}
-
 // ============================================================================
 // Element Rendering
 // ============================================================================
@@ -59,7 +53,7 @@ fn isLeafString(element: *const IR.Element) bool {
 }
 
 /// Write the body of an element as a JSON object
-fn writeElementBodyJson(chunk: []const u8, element: *const IR.Element, allocator: std.mem.Allocator, writer: anytype) !void {
+fn writeElementBodyJson(element: *const IR.Element, allocator: std.mem.Allocator, writer: anytype) !void {
     // Group child elements by name for proper JSON array handling
     var groups = std.StringHashMap(std.ArrayList(*IR.Element)).init(allocator);
     defer groups.deinit();
@@ -121,7 +115,7 @@ fn writeElementBodyJson(chunk: []const u8, element: *const IR.Element, allocator
             try util.normalizeAndWriteSystemTimeAscii(writer, fbs.getWritten());
             try writer.writeByte('"');
         } else {
-            try renderAttrValueToJsonString(chunk, attr.value.items, writer);
+            try renderTextToJsonString(attr.value.items, writer);
         }
         wrote_any = true;
     }
@@ -130,7 +124,7 @@ fn writeElementBodyJson(chunk: []const u8, element: *const IR.Element, allocator
     if (has_textual_content) {
         if (wrote_any) try writer.writeByte(',');
         try writer.writeAll("\"#text\":");
-        try renderTextToJsonString(chunk, textual_nodes.items, writer);
+        try renderTextToJsonString(textual_nodes.items, writer);
         wrote_any = true;
     }
 
@@ -154,9 +148,9 @@ fn writeElementBodyJson(chunk: []const u8, element: *const IR.Element, allocator
                 for (child.children.items) |node| {
                     if (node != .Element) try text_nodes.append(allocator, node);
                 }
-                try renderTextToJsonString(chunk, text_nodes.items, writer);
+                try renderTextToJsonString(text_nodes.items, writer);
             } else {
-                try writeElementBodyJson(chunk, child, allocator, writer);
+                try writeElementBodyJson(child, allocator, writer);
             }
         } else {
             // Multiple children with same name -> array
@@ -169,9 +163,9 @@ fn writeElementBodyJson(chunk: []const u8, element: *const IR.Element, allocator
                     for (child.children.items) |node| {
                         if (node != .Element) try text_nodes.append(allocator, node);
                     }
-                    try renderTextToJsonString(chunk, text_nodes.items, writer);
+                    try renderTextToJsonString(text_nodes.items, writer);
                 } else {
-                    try writeElementBodyJson(chunk, child, allocator, writer);
+                    try writeElementBodyJson(child, allocator, writer);
                 }
             }
             try writer.writeByte(']');
@@ -187,6 +181,6 @@ fn writeElementBodyJson(chunk: []const u8, element: *const IR.Element, allocator
 // ============================================================================
 
 /// Render an IR element tree as JSON
-pub fn renderElementJson(chunk: []const u8, root: *const IR.Element, allocator: std.mem.Allocator, writer: anytype) !void {
-    try writeElementBodyJson(chunk, root, allocator, writer);
+pub fn renderElementJson(root: *const IR.Element, allocator: std.mem.Allocator, writer: anytype) !void {
+    try writeElementBodyJson(root, allocator, writer);
 }

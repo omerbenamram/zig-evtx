@@ -89,11 +89,6 @@ pub const TemplateValue = struct {
     data: []const u8,
 };
 
-/// Backward-compatible standalone function. Prefer ValueType.fixedSizeFromRaw().
-pub fn valueTypeFixedSize(vtype: u8) ?usize {
-    return ValueType.fixedSizeFromRaw(vtype);
-}
-
 pub const ElementStartHeader = packed struct {
     dep_id: u16,
     data_size: u32,
@@ -119,10 +114,6 @@ pub const TemplateDefinitionHeader = packed struct {
 // Plain struct: GUIDs are read as raw bytes via std.mem.readInt in callers.
 pub const GuidBytes = struct {
     bytes: [16]u8,
-};
-
-pub const NameLengthHeader = packed struct {
-    len: u16,
 };
 
 pub const ValueTokenHeader = packed struct {

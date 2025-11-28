@@ -31,8 +31,7 @@ inline fn writeSpaces(writer: anytype, count: usize) !void {
 }
 
 /// Write an element name from UTF-16LE
-fn writeNameXml(chunk: []const u8, name: IR.Name, writer: anytype) !void {
-    _ = chunk;
+fn writeNameXml(name: IR.Name, writer: anytype) !void {
     try util.writeUtf16LeXmlEscaped(writer, name.bytes, name.num_chars);
 }
 
@@ -41,40 +40,40 @@ fn writeNameXml(chunk: []const u8, name: IR.Name, writer: anytype) !void {
 // ============================================================================
 
 /// Write the closing tag for an element: </Name>\n
-fn writeCloseTag(chunk: []const u8, element: *const IR.Element, writer: anytype) !void {
+fn writeCloseTag(element: *const IR.Element, writer: anytype) !void {
     try writer.writeAll("</");
-    try writeNameXml(chunk, element.name, writer);
+    try writeNameXml(element.name, writer);
     try writer.writeByte('>');
     try writer.writeByte('\n');
 }
 
 /// Render a single attribute: name="value"
-fn renderAttribute(chunk: []const u8, attr: *const IR.Attr, writer: anytype) !void {
+fn renderAttribute(attr: *const IR.Attr, writer: anytype) !void {
     try writer.writeByte(' ');
-    try writeNameXml(chunk, attr.name, writer);
+    try writeNameXml(attr.name, writer);
     try writer.writeAll("=\"");
 
     if (attrNameIsSystemTime(attr.name)) {
         // SystemTime attributes need normalization - buffer first, then normalize
         var buffer: [512]u8 = undefined;
         var fbs = std.io.fixedBufferStream(&buffer);
-        try renderAttrValueNodes(chunk, attr.value.items, fbs.writer());
+        try renderAttrValueNodes(attr.value.items, fbs.writer());
         try normalizeAndWriteSystemTimeAscii(writer, fbs.getWritten());
     } else {
-        try renderAttrValueNodes(chunk, attr.value.items, writer);
+        try renderAttrValueNodes(attr.value.items, writer);
     }
 
     try writer.writeByte('"');
 }
 
 /// Render the opening tag start with all attributes (without closing >)
-fn renderOpenTagStart(chunk: []const u8, element: *const IR.Element, writer: anytype, indent: usize) !void {
+fn renderOpenTagStart(element: *const IR.Element, writer: anytype, indent: usize) !void {
     try writeSpaces(writer, indent);
     try writer.writeByte('<');
-    try writeNameXml(chunk, element.name, writer);
+    try writeNameXml(element.name, writer);
 
     for (element.attrs.items) |*attr| {
-        try renderAttribute(chunk, attr, writer);
+        try renderAttribute(attr, writer);
     }
 }
 
@@ -83,7 +82,7 @@ fn renderOpenTagStart(chunk: []const u8, element: *const IR.Element, writer: any
 // ============================================================================
 
 /// Render attribute value tokens to any writer
-fn renderAttrValueNodes(chunk: []const u8, nodes: []const IR.Node, writer: anytype) !void {
+fn renderAttrValueNodes(nodes: []const IR.Node, writer: anytype) !void {
     for (nodes) |node| switch (node) {
         .Text => |text| try util.writeUtf16LeXmlEscaped(writer, text.utf16, text.num_chars),
         .Pad => {},
@@ -92,13 +91,13 @@ fn renderAttrValueNodes(chunk: []const u8, nodes: []const IR.Node, writer: anyty
         .CharRef => |charref| try writer.print("&#{d};", .{charref}),
         .EntityRef => |name| {
             try writer.writeByte('&');
-            try writeNameXml(chunk, name, writer);
+            try writeNameXml(name, writer);
             try writer.writeByte(';');
         },
         .CData => |cdata| try util.writeUtf16LeXmlEscaped(writer, cdata.utf16, cdata.num_chars),
         .PITarget => |name| {
             try writer.writeAll("<?");
-            try writeNameXml(chunk, name, writer);
+            try writeNameXml(name, writer);
         },
         .PIData => |pidata| {
             try writer.writeByte(' ');
@@ -110,7 +109,7 @@ fn renderAttrValueNodes(chunk: []const u8, nodes: []const IR.Node, writer: anyty
 }
 
 /// Render text content from IR nodes
-fn renderTextContentFromIR(chunk: []const u8, nodes: []const IR.Node, writer: anytype) !void {
+fn renderTextContentFromIR(nodes: []const IR.Node, writer: anytype) !void {
     for (nodes) |node| {
         switch (node) {
             .Text => |text| try util.writeUtf16LeXmlEscaped(writer, text.utf16, text.num_chars),
@@ -120,7 +119,7 @@ fn renderTextContentFromIR(chunk: []const u8, nodes: []const IR.Node, writer: an
             .CharRef => |charref| try writer.print("&#{d};", .{charref}),
             .EntityRef => |name| {
                 try writer.writeByte('&');
-                try writeNameXml(chunk, name, writer);
+                try writeNameXml(name, writer);
                 try writer.writeByte(';');
             },
             .CData => |cdata| {
@@ -130,7 +129,7 @@ fn renderTextContentFromIR(chunk: []const u8, nodes: []const IR.Node, writer: an
             },
             .PITarget => |name| {
                 try writer.writeAll("<?");
-                try writeNameXml(chunk, name, writer);
+                try writeNameXml(name, writer);
             },
             .PIData => |pidata| {
                 try writer.writeByte(' ');
@@ -147,22 +146,22 @@ fn renderTextContentFromIR(chunk: []const u8, nodes: []const IR.Node, writer: an
 // ============================================================================
 
 /// Recursively render an IR element to XML
-fn renderElementIRXml(chunk: []const u8, element: *const IR.Element, writer: anytype, indent: usize) anyerror!void {
+fn renderElementIRXml(element: *const IR.Element, writer: anytype, indent: usize) anyerror!void {
     // Render opening tag with attributes
-    try renderOpenTagStart(chunk, element, writer, indent);
+    try renderOpenTagStart(element, writer, indent);
 
     // Handle empty elements: <Name></Name>
     if (element.children.items.len == 0) {
         try writer.writeByte('>');
-        try writeCloseTag(chunk, element, writer);
+        try writeCloseTag(element, writer);
         return;
     }
 
     // Handle leaf elements (no child elements): <Name>content</Name>
     if (!element.has_element_child) {
         try writer.writeByte('>');
-        try renderTextContentFromIR(chunk, element.children.items, writer);
-        try writeCloseTag(chunk, element, writer);
+        try renderTextContentFromIR(element.children.items, writer);
+        try writeCloseTag(element, writer);
         return;
     }
 
@@ -173,19 +172,19 @@ fn renderElementIRXml(chunk: []const u8, element: *const IR.Element, writer: any
     for (element.children.items) |node| {
         switch (node) {
             .Element => |child_element| {
-                try renderElementIRXml(chunk, child_element, writer, indent + 2);
+                try renderElementIRXml(child_element, writer, indent + 2);
             },
             .Subst => {},
             else => {
                 try writeSpaces(writer, indent + 2);
-                try renderTextContentFromIR(chunk, &[_]IR.Node{node}, writer);
+                try renderTextContentFromIR(&[_]IR.Node{node}, writer);
                 try writer.writeByte('\n');
             },
         }
     }
 
     try writeSpaces(writer, indent);
-    try writeCloseTag(chunk, element, writer);
+    try writeCloseTag(element, writer);
 }
 
 // ============================================================================
@@ -203,7 +202,7 @@ pub fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, w
         try logNameTrace(root.name, "root");
     }
 
-    try renderElementIRXml(chunk, root, writer, 0);
+    try renderElementIRXml(root, writer, 0);
 }
 
 /// Render a single value payload to XML text according to its Binary XML type.

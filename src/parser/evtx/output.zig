@@ -81,13 +81,13 @@ pub fn OutputImpl(comptime W: type) type {
                     if (self.ctx) |ctx| {
                         var builder = binxml.Builder.init(ctx);
                         const root = try builder.build(record.chunk_buf, record.raw_xml);
-                        try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
+                        try render_json.renderElementJson(root, ctx.arena.allocator(), bw);
                     } else {
                         var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
                         var builder = binxml.Builder.init(&local_ctx);
                         const root = try builder.build(record.chunk_buf, record.raw_xml);
-                        try render_json.renderElementJson(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
+                        try render_json.renderElementJson(root, local_ctx.arena.allocator(), bw);
                     }
                     try bw.writeAll("}\n");
                 },
@@ -125,13 +125,13 @@ pub fn OutputImpl(comptime W: type) type {
                     if (self.ctx) |ctx| {
                         var builder = binxml.Builder.init(ctx);
                         const root = try builder.build(record.chunk_buf, record.raw_xml);
-                        try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
+                        try render_json.renderElementJson(root, ctx.arena.allocator(), bw);
                     } else {
                         var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
                         var builder = binxml.Builder.init(&local_ctx);
                         const root = try builder.build(record.chunk_buf, record.raw_xml);
-                        try render_json.renderElementJson(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
+                        try render_json.renderElementJson(root, local_ctx.arena.allocator(), bw);
                     }
                     try bw.writeAll("}\n");
                 },

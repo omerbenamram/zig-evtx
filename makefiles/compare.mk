@@ -1,4 +1,4 @@
-.PHONY: install-evtx xml-rs xml-zig compare-first xml-all-rs xml-all-zig compare-all record compare-time time-zig time-rust
+.PHONY: install-evtx xml-rs xml-zig compare-first xml-all-rs xml-all-zig compare-all record compare-time time-zig time-rust hexdump
 
 EVTX_DUMP ?= evtx_dump
 OUT_DIR ?= out
@@ -122,5 +122,19 @@ time-rust: install-evtx
 	/usr/bin/time -l $(EVTX_DUMP) -t 1 -o xml "$(FILE)" >/dev/null 2> "$(OUT_DIR)/time-rs.txt"; \
 	echo "--- tail(time-rs) ---"; tail -n 8 "$(OUT_DIR)/time-rs.txt" | cat; \
 	echo "Output written to $(OUT_DIR)/time-rs.txt"
+
+# Hexdump BinXML data from a specific record for debugging
+# Usage: make hexdump FILE=path/to/file.evtx N=1
+#        make hexdump FILE=path/to/file.evtx RID=3229
+#        make hexdump FILE=path/to/file.evtx ALL=1
+hexdump:
+	@if [ -z "$(FILE)" ]; then echo "Usage: make hexdump FILE=path/to/file.evtx [N=1 | RID=3229 | ALL=1]"; exit 1; fi; \
+	args="$(FILE)"; \
+	if [ -n "$(N)" ]; then args="$$args --index $(N)"; \
+	elif [ -n "$(RID)" ]; then args="$$args --rid $(RID)"; \
+	elif [ -n "$(ALL)" ]; then args="$$args --all"; \
+	else echo "Provide N=<index>, RID=<EventRecordID>, or ALL=1"; exit 1; fi; \
+	if [ -n "$(LIMIT)" ]; then args="$$args --limit $(LIMIT)"; fi; \
+	$(PYTHON) scripts/record_hexdump.py $$args
 
 

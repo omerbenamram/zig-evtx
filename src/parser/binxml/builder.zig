@@ -91,6 +91,11 @@ pub const Builder = struct {
             return self.buildTemplate(chunk, &r);
         }
 
+        if (log.enabled(.debug)) {
+            const pk = r.peekByte() catch 0;
+            log.debug("build: direct element path, bin_len={d} pos={d} first_token=0x{x}", .{ bin.len, r.pos, pk });
+        }
+
         return self.buildElement(chunk, &r);
     }
 
@@ -114,7 +119,7 @@ pub const Builder = struct {
     /// Parses a direct BinXML element (not wrapped in a template).
     /// After parsing, scans for any nested BinXML values that need recursive parsing.
     fn buildElement(self: *Builder, chunk: []const u8, r: *Reader) !*IR.Element {
-        const root = try binxml_parser.parseElementIR(self.ctx, chunk, r, .rec);
+        const root = try binxml_parser.parseElementIR(self.ctx, chunk, r, .rec, 0);
 
         // Scan for nested BinXML (type 0x21) and parse recursively
         try self.scanAndExpandNestedBinXml(chunk, root);
@@ -256,7 +261,7 @@ pub const Builder = struct {
         try common.skipFragmentHeaderIfPresent(&def_r);
 
         // .def source mode handles specific name parsing rules for templates
-        return binxml_parser.parseElementIRWithBase(self.ctx, chunk, &def_r, .def, data_start);
+        return binxml_parser.parseElementIR(self.ctx, chunk, &def_r, .def, data_start);
     }
 
     // =========================================================================
@@ -517,7 +522,7 @@ const ArrayIterator = struct {
             },
             else => {
                 // Fixed size types
-                if (types.valueTypeFixedSize(self.base_type)) |size| {
+                if (types.ValueType.fixedSizeFromRaw(self.base_type)) |size| {
                     if (start + size > self.data.len) return null;
                     self.cursor = start + size;
                     return self.data[start .. start + size];

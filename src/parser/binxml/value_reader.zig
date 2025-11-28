@@ -107,24 +107,6 @@ pub fn readSystemTime(data: []const u8) ?SystemTime {
     return std.mem.bytesToValue(SystemTime, data[0..16]);
 }
 
-/// Read f32 from little-endian bytes.
-/// Delegates to readValue for the actual implementation.
-pub fn readFloat32(data: []const u8) ?f32 {
-    return readValue(f32, data);
-}
-
-/// Read f64 from little-endian bytes.
-/// Delegates to readValue for the actual implementation.
-pub fn readFloat64(data: []const u8) ?f64 {
-    return readValue(f64, data);
-}
-
-/// Read a boolean (DWORD, 4 bytes).
-/// Delegates to readValue for the actual implementation.
-pub fn readBool(data: []const u8) ?bool {
-    return readValue(bool, data);
-}
-
 // ============================================================================
 // Generic Reader with Comptime Type Dispatch
 // ============================================================================
@@ -247,14 +229,14 @@ test "readValue handles various integer sizes" {
     try std.testing.expectEqual(@as(u64, 0x1234567890ABCDEF), readValue(u64, &data64).?);
 }
 
-test "readBool interprets zero as false" {
+test "readValue bool interprets zero as false" {
     const false_data = [_]u8{ 0x00, 0x00, 0x00, 0x00 };
     const true_data = [_]u8{ 0x01, 0x00, 0x00, 0x00 };
     const nonzero_data = [_]u8{ 0xFF, 0xFF, 0xFF, 0xFF };
 
-    try std.testing.expectEqual(false, readBool(&false_data).?);
-    try std.testing.expectEqual(true, readBool(&true_data).?);
-    try std.testing.expectEqual(true, readBool(&nonzero_data).?);
+    try std.testing.expectEqual(false, readValue(bool, &false_data).?);
+    try std.testing.expectEqual(true, readValue(bool, &true_data).?);
+    try std.testing.expectEqual(true, readValue(bool, &nonzero_data).?);
 }
 
 test "readValue with comptime type dispatch" {

@@ -64,10 +64,7 @@ pub fn formatSidJson(w: anytype, sid: vr.Sid) !void {
 /// Format a FILETIME as ISO8601 UTC string
 pub fn formatFileTimeXml(w: anytype, ft: vr.FileTime) !void {
     var buf: [40]u8 = undefined;
-    const out = util.formatIso8601UtcFromFiletimeMicros(&buf, ft.raw) catch {
-        // Fallback to raw numeric
-        return try w.print("{d}", .{ft.raw});
-    };
+    const out = try util.formatIso8601UtcFromFiletimeMicros(&buf, ft.raw);
     try w.writeAll(out);
 }
 
@@ -264,17 +261,17 @@ pub fn formatValueXml(w: anytype, vtype: ValueType, data: []const u8) !void {
         .uint32 => _ = try readAndFormatInt(w, u32, data),
         .int64 => _ = try readAndFormatInt(w, i64, data),
         .uint64 => _ = try readAndFormatInt(w, u64, data),
-        .real32 => if (vr.readFloat32(data)) |f| try formatFloat32Xml(w, f),
-        .real64 => if (vr.readFloat64(data)) |f| try formatFloat64Xml(w, f),
-        .bool => if (vr.readBool(data)) |b| try formatBool(w, b),
+        .real32 => if (vr.readValue(f32, data)) |f| try formatFloat32Xml(w, f),
+        .real64 => if (vr.readValue(f64, data)) |f| try formatFloat64Xml(w, f),
+        .bool => if (vr.readValue(bool, data)) |b| try formatBool(w, b),
         .binary => try formatHexBytesLower(w, data),
         .guid => if (vr.readGuid(data)) |g| try formatGuidXml(w, g),
         .size_t => {
-            // Variable size: 8 bytes preferred, 4 bytes fallback
-            if (vr.readValue(u64, data)) |v| {
-                try formatHexUpper(w, u64, v);
-            } else if (vr.readValue(u32, data)) |v| {
-                try formatHexUpper(w, u32, v);
+            // Deterministic: use data length to select size
+            if (data.len >= 8) {
+                if (vr.readValue(u64, data)) |v| try formatHexUpper(w, u64, v);
+            } else if (data.len >= 4) {
+                if (vr.readValue(u32, data)) |v| try formatHexUpper(w, u32, v);
             }
         },
         .filetime => if (vr.readFileTime(data)) |ft| try formatFileTimeXml(w, ft),
@@ -283,10 +280,11 @@ pub fn formatValueXml(w: anytype, vtype: ValueType, data: []const u8) !void {
         .hex_int32 => if (vr.readValue(u32, data)) |v| try formatHexUpper(w, u32, v),
         .hex_int64 => if (vr.readValue(u64, data)) |v| try formatHexUpper(w, u64, v),
         .evt_handle => {
-            if (vr.readValue(u64, data)) |v| {
-                try formatDecimal(w, u64, v);
-            } else if (vr.readValue(u32, data)) |v| {
-                try formatDecimal(w, u32, v);
+            // Deterministic: use data length to select size
+            if (data.len >= 8) {
+                if (vr.readValue(u64, data)) |v| try formatDecimal(w, u64, v);
+            } else if (data.len >= 4) {
+                if (vr.readValue(u32, data)) |v| try formatDecimal(w, u32, v);
             }
         },
         .bin_xml => {}, // Nested BinXML - handled specially by caller
@@ -312,16 +310,17 @@ pub fn formatValueJson(w: anytype, vtype: ValueType, data: []const u8) !void {
         .uint32 => if (!try readAndFormatInt(w, u32, data)) try w.writeAll("null"),
         .int64 => if (!try readAndFormatInt(w, i64, data)) try w.writeAll("null"),
         .uint64 => if (!try readAndFormatInt(w, u64, data)) try w.writeAll("null"),
-        .real32 => if (vr.readFloat32(data)) |f| try formatFloat32Json(w, f) else try w.writeAll("null"),
-        .real64 => if (vr.readFloat64(data)) |f| try formatFloat64Json(w, f) else try w.writeAll("null"),
-        .bool => if (vr.readBool(data)) |b| try formatBool(w, b) else try w.writeAll("null"),
+        .real32 => if (vr.readValue(f32, data)) |f| try formatFloat32Json(w, f) else try w.writeAll("null"),
+        .real64 => if (vr.readValue(f64, data)) |f| try formatFloat64Json(w, f) else try w.writeAll("null"),
+        .bool => if (vr.readValue(bool, data)) |b| try formatBool(w, b) else try w.writeAll("null"),
         .binary => try formatHexBytesLowerJson(w, data),
         .guid => if (vr.readGuid(data)) |g| try formatGuidJson(w, g) else try w.writeAll("null"),
         .size_t => {
-            if (vr.readValue(u64, data)) |v| {
-                try formatHexUpperJson(w, u64, v);
-            } else if (vr.readValue(u32, data)) |v| {
-                try formatHexUpperJson(w, u32, v);
+            // Deterministic: use data length to select size
+            if (data.len >= 8) {
+                if (vr.readValue(u64, data)) |v| try formatHexUpperJson(w, u64, v) else try w.writeAll("null");
+            } else if (data.len >= 4) {
+                if (vr.readValue(u32, data)) |v| try formatHexUpperJson(w, u32, v) else try w.writeAll("null");
             } else try w.writeAll("null");
         },
         .filetime => if (vr.readFileTime(data)) |ft| try formatFileTimeJson(w, ft) else try w.writeAll("null"),
@@ -330,10 +329,11 @@ pub fn formatValueJson(w: anytype, vtype: ValueType, data: []const u8) !void {
         .hex_int32 => if (vr.readValue(u32, data)) |v| try formatHexUpperJson(w, u32, v) else try w.writeAll("null"),
         .hex_int64 => if (vr.readValue(u64, data)) |v| try formatHexUpperJson(w, u64, v) else try w.writeAll("null"),
         .evt_handle => {
-            if (vr.readValue(u64, data)) |v| {
-                try formatDecimal(w, u64, v);
-            } else if (vr.readValue(u32, data)) |v| {
-                try formatDecimal(w, u32, v);
+            // Deterministic: use data length to select size
+            if (data.len >= 8) {
+                if (vr.readValue(u64, data)) |v| try formatDecimal(w, u64, v) else try w.writeAll("0");
+            } else if (data.len >= 4) {
+                if (vr.readValue(u32, data)) |v| try formatDecimal(w, u32, v) else try w.writeAll("0");
             } else try w.writeAll("0");
         },
         .bin_xml => try w.writeAll("null"),
