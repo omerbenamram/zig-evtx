@@ -503,6 +503,7 @@ fn parseRecElementHeader(ps: *ParseState) !PartialElementHeader {
 /// The name is stored as NameHeader (next_offset, hash, num_chars) followed by UTF-16 string + null terminator.
 fn readRecNameInline(ps: *ParseState) !IR.Name {
     // Read NameHeader: next_offset (u32) + hash (u16) + num_chars (u16) = 8 bytes
+    const name_block_start = ps.r.pos;
     const hdr = try ps.r.readStruct(types.NameHeader);
     const num_chars = hdr.num_chars;
     const byte_len = @as(usize, num_chars) * 2;
@@ -520,17 +521,23 @@ fn readRecNameInline(ps: *ParseState) !IR.Name {
     const buf = try ps.alloc().alloc(u8, byte_len);
     @memcpy(buf, slice);
 
-    // Skip null terminator (2 bytes UTF-16) and padding after name to align to 4-byte boundary.
-    // Total name block: NameHeader (8) + string (byte_len) + null terminator (2) + padding
-    const name_block_size = 8 + byte_len + 2; // +2 for null terminator
-    const aligned_size = (name_block_size + 3) & ~@as(usize, 3); // round up to 4
-    const skip_after_string = 2 + (aligned_size - name_block_size); // null + padding
-    if (ps.r.rem() >= skip_after_string) {
-        ps.r.pos += skip_after_string;
+    // Skip null terminator (2 bytes for UTF-16).
+    // Name block: NameHeader (8) + string (byte_len) + null (2)
+    // Note: NO alignment padding in BinXML name blocks.
+    const name_block_size = 8 + byte_len + 2;
+    const name_block_end = name_block_start + name_block_size;
+
+    if (log.enabled(.debug)) {
+        log.debug("readRecNameInline: block_size={d} block_start=0x{x} block_end=0x{x}", .{ name_block_size, name_block_start, name_block_end });
+    }
+
+    // Position reader at end of name block (skip null terminator)
+    if (name_block_end <= ps.r.buf.len) {
+        ps.r.pos = name_block_end;
     }
 
     if (log.enabled(.debug)) {
-        log.debug("readRecNameInline: name_block={d} aligned={d} skip={d} new_pos=0x{x}", .{ name_block_size, aligned_size, skip_after_string, ps.r.pos });
+        log.debug("readRecNameInline: new_pos=0x{x}", .{ps.r.pos});
     }
 
     return IR.Name{ .bytes = buf, .num_chars = num_chars };
