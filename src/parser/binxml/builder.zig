@@ -59,10 +59,16 @@ const JoinerPolicy = enum { Attr, Text };
 
 pub const Builder = struct {
     ctx: *Context,
-    allocator: std.mem.Allocator,
 
-    pub fn init(ctx: *Context, allocator: std.mem.Allocator) Builder {
-        return .{ .ctx = ctx, .allocator = allocator };
+    pub fn init(ctx: *Context) Builder {
+        return .{ .ctx = ctx };
+    }
+
+    /// Returns the arena allocator for all chunk-local allocations.
+    /// All IR elements, names, and template data are allocated here and
+    /// freed atomically when resetPerChunk() is called.
+    inline fn alloc(self: *const Builder) std.mem.Allocator {
+        return self.ctx.arena.allocator();
     }
 
     /// Builds a fully expanded IR element tree from a BinXML chunk.
@@ -90,8 +96,8 @@ pub const Builder = struct {
 
     /// Creates a minimal <Event/> element for empty records.
     fn buildEmpty(self: *Builder) !*IR.Element {
-        const bytes: []u8 = try util.utf16FromAscii(self.allocator, "Event");
-        return IRMod.irNewElement(self.allocator, IR.Name{ .bytes = bytes, .num_chars = 5 });
+        const bytes: []u8 = try util.utf16FromAscii(self.alloc(), "Event");
+        return IRMod.irNewElement(self.alloc(), IR.Name{ .bytes = bytes, .num_chars = 5 });
     }
 
     /// Checks if the next token indicates a template instance.
@@ -108,7 +114,7 @@ pub const Builder = struct {
     /// Parses a direct BinXML element (not wrapped in a template).
     /// After parsing, scans for any nested BinXML values that need recursive parsing.
     fn buildElement(self: *Builder, chunk: []const u8, r: *Reader) !*IR.Element {
-        const root = try binxml_parser.parseElementIR(self.ctx, chunk, r, self.allocator, .rec);
+        const root = try binxml_parser.parseElementIR(self.ctx, chunk, r, .rec);
 
         // Scan for nested BinXML (type 0x21) and parse recursively
         try self.scanAndExpandNestedBinXml(chunk, root);
@@ -148,7 +154,7 @@ pub const Builder = struct {
         if (!needs_rebuild) return;
 
         // Rebuild children list, expanding nested BinXML
-        var new_children = try std.ArrayList(IR.Node).initCapacity(self.allocator, el.children.items.len + 4);
+        var new_children = try std.ArrayList(IR.Node).initCapacity(self.alloc(), el.children.items.len + 4);
 
         for (el.children.items) |node| {
             switch (node) {
@@ -156,10 +162,10 @@ pub const Builder = struct {
                     if (isNestedBinXml(val)) {
                         try self.parseNestedBinXmlInto(chunk, val.bytes, &new_children);
                     } else {
-                        try new_children.append(self.allocator, node);
+                        try new_children.append(self.alloc(), node);
                     }
                 },
-                else => try new_children.append(self.allocator, node),
+                else => try new_children.append(self.alloc(), node),
             }
         }
 
@@ -197,7 +203,7 @@ pub const Builder = struct {
         const def = def_ptr.*;
 
         // Parse substitution values
-        const values = try binxml_parser.parseTemplateInstanceValues(r, self.allocator);
+        const values = try binxml_parser.parseTemplateInstanceValues(r, self.alloc());
 
         // Instantiate template: clone definition, resolve substitutions, handle nested BinXML
         return self.instantiate(chunk, def, values);
@@ -250,7 +256,7 @@ pub const Builder = struct {
         try common.skipFragmentHeaderIfPresent(&def_r);
 
         // .def source mode handles specific name parsing rules for templates
-        return binxml_parser.parseElementIRWithBase(self.ctx, chunk, &def_r, self.allocator, .def, data_start);
+        return binxml_parser.parseElementIRWithBase(self.ctx, chunk, &def_r, .def, data_start);
     }
 
     // =========================================================================
@@ -266,26 +272,26 @@ pub const Builder = struct {
     ///
     /// The result is a fully expanded element tree with no remaining substitution placeholders.
     fn instantiate(self: *Builder, chunk: []const u8, def: *const IR.Element, values: []const types.TemplateValue) anyerror!*IR.Element {
-        const el = try IRMod.irNewElement(self.allocator, def.name);
+        const el = try IRMod.irNewElement(self.alloc(), def.name);
 
         // Pre-size containers
         if (def.attrs.items.len > 0) {
-            try el.attrs.ensureTotalCapacityPrecise(self.allocator, def.attrs.items.len);
+            try el.attrs.ensureTotalCapacityPrecise(self.alloc(), def.attrs.items.len);
         }
 
         // Instantiate attributes
         for (def.attrs.items) |attr| {
             const expanded_value = try self.instantiateNodes(chunk, attr.value.items, values, .Attr);
-            try el.attrs.append(self.allocator, .{ .name = attr.name, .value = expanded_value });
+            try el.attrs.append(self.alloc(), .{ .name = attr.name, .value = expanded_value });
         }
 
         // Instantiate children
         const expanded_children = try self.instantiateNodes(chunk, def.children.items, values, .Text);
         if (expanded_children.items.len > 0) {
-            try el.children.ensureTotalCapacityPrecise(self.allocator, expanded_children.items.len);
+            try el.children.ensureTotalCapacityPrecise(self.alloc(), expanded_children.items.len);
         }
         for (expanded_children.items) |child| {
-            try el.children.append(self.allocator, child);
+            try el.children.append(self.alloc(), child);
         }
 
         el.has_element_child = def.has_element_child;
@@ -301,9 +307,9 @@ pub const Builder = struct {
         values: []const types.TemplateValue,
         policy: JoinerPolicy,
     ) anyerror!std.ArrayList(IR.Node) {
-        var out = std.ArrayList(IR.Node).initCapacity(self.allocator, 0) catch unreachable;
+        var out = std.ArrayList(IR.Node).initCapacity(self.alloc(), 0) catch unreachable;
         if (nodes.len > 0) {
-            try out.ensureTotalCapacityPrecise(self.allocator, nodes.len);
+            try out.ensureTotalCapacityPrecise(self.alloc(), nodes.len);
         }
 
         for (nodes) |node| {
@@ -312,9 +318,9 @@ pub const Builder = struct {
                 .Element => |child_def| {
                     // Recursively instantiate child elements
                     const child = try self.instantiate(chunk, child_def, values);
-                    try out.append(self.allocator, .{ .Element = child });
+                    try out.append(self.alloc(), .{ .Element = child });
                 },
-                else => try out.append(self.allocator, node),
+                else => try out.append(self.alloc(), node),
             }
         }
 
@@ -371,14 +377,14 @@ pub const Builder = struct {
                 const last_char = std.mem.readInt(u16, val.data[val.data.len - 2 .. val.data.len][0..2], .little);
                 if (last_char == 0) num_chars -= 1;
             }
-            try out.append(self.allocator, .{
+            try out.append(self.alloc(), .{
                 .Text = .{ .utf16 = val.data[0 .. num_chars * 2], .num_chars = num_chars },
             });
             return;
         }
 
         // All other types become Value nodes
-        try out.append(self.allocator, .{
+        try out.append(self.alloc(), .{
             .Value = .{ .vtype = val.t, .bytes = val.data },
         });
     }
@@ -408,7 +414,7 @@ pub const Builder = struct {
         while (iter.next()) |item_bytes| {
             if (!first) {
                 if (sep_utf16) |sep| {
-                    try out.append(self.allocator, .{ .Text = .{ .utf16 = sep.bytes, .num_chars = sep.num_chars } });
+                    try out.append(self.alloc(), .{ .Text = .{ .utf16 = sep.bytes, .num_chars = sep.num_chars } });
                 }
             }
             first = false;
@@ -434,7 +440,7 @@ pub const Builder = struct {
             if (pk != tokens.TOK_TEMPLATE_INSTANCE) break;
 
             const elem = try self.buildTemplate(chunk, &r);
-            try out.append(self.allocator, .{ .Element = elem });
+            try out.append(self.alloc(), .{ .Element = elem });
         }
     }
 

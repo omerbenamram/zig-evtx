@@ -467,7 +467,7 @@ fn renderElementIRXml(chunk: []const u8, element: *const IR.Element, template_va
 pub fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, writer: anytype) anyerror!void {
     if (ctx.verbose) logger.setModuleLevel("binxml", .trace);
 
-    var builder = binxml.Builder.init(ctx, ctx.allocator);
+    var builder = binxml.Builder.init(ctx);
     const root = try builder.build(chunk, bin);
 
     if (ctx.verbose) {

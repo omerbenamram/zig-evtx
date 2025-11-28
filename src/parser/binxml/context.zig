@@ -103,4 +103,15 @@ pub const Context = struct {
 
         return IR.Name{ .bytes = buf, .num_chars = take_chars };
     }
+
+    /// Pre-populates the name cache using offsets from the chunk header.
+    /// This avoids repeated lookups during parsing by caching common strings upfront.
+    /// Errors are silently ignored since pre-caching is an optimization.
+    pub fn preCacheFromChunkHeader(self: *Context, chunk: []const u8, offsets: []const u32) void {
+        for (offsets) |off| {
+            if (off != 0 and off < chunk.len) {
+                _ = self.getOrReadName(chunk, off) catch continue;
+            }
+        }
+    }
 };

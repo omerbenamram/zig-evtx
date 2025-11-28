@@ -24,30 +24,36 @@ pub const ParseState = struct {
     ctx: *Context,
     chunk: []const u8,
     r: *Reader,
-    allocator: std.mem.Allocator,
     src: Source,
     chunk_base: usize = 0,
 
-    pub fn init(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source) ParseState {
-        return .{ .ctx = ctx, .chunk = chunk, .r = r, .allocator = allocator, .src = src };
+    pub fn init(ctx: *Context, chunk: []const u8, r: *Reader, src: Source) ParseState {
+        return .{ .ctx = ctx, .chunk = chunk, .r = r, .src = src };
     }
 
-    pub fn withBase(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, chunk_base: usize) ParseState {
-        return .{ .ctx = ctx, .chunk = chunk, .r = r, .allocator = allocator, .src = src, .chunk_base = chunk_base };
+    pub fn withBase(ctx: *Context, chunk: []const u8, r: *Reader, src: Source, chunk_base: usize) ParseState {
+        return .{ .ctx = ctx, .chunk = chunk, .r = r, .src = src, .chunk_base = chunk_base };
+    }
+
+    /// Returns the arena allocator for all chunk-local allocations.
+    inline fn alloc(self: *const ParseState) std.mem.Allocator {
+        return self.ctx.arena.allocator();
     }
 };
 
 /// Parses an element and returns its IR representation.
 /// This function is the entry point for parsing a BinXML element.
-pub fn parseElementIR(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source) !*IR.Element {
-    var ps = ParseState.init(ctx, chunk, r, allocator, src);
+/// All allocations use the context's arena allocator.
+pub fn parseElementIR(ctx: *Context, chunk: []const u8, r: *Reader, src: Source) !*IR.Element {
+    var ps = ParseState.init(ctx, chunk, r, src);
     return parseElementIRImpl(&ps);
 }
 
 /// Parses an element with an explicit chunk base offset.
 /// Useful when parsing elements that are relative to a specific chunk start.
-pub fn parseElementIRWithBase(ctx: *Context, chunk: []const u8, r: *Reader, allocator: std.mem.Allocator, src: Source, chunk_base: usize) !*IR.Element {
-    var ps = ParseState.withBase(ctx, chunk, r, allocator, src, chunk_base);
+/// All allocations use the context's arena allocator.
+pub fn parseElementIRWithBase(ctx: *Context, chunk: []const u8, r: *Reader, src: Source, chunk_base: usize) !*IR.Element {
+    var ps = ParseState.withBase(ctx, chunk, r, src, chunk_base);
     return parseElementIRImpl(&ps);
 }
 
@@ -144,7 +150,7 @@ fn parseElementIRImpl(ps: *ParseState) !*IR.Element {
     const element_end_pos = header.element_end;
 
     // 3. Create IR Element
-    const element = try IRModule.irNewElement(ps.allocator, header.name);
+    const element = try IRModule.irNewElement(ps.alloc(), header.name);
 
     // 4. Parse Attributes (if present)
     if (tokens.hasMore(start_token, tokens.TOK_OPEN_START)) {
@@ -196,19 +202,19 @@ fn parseElementIRImpl(ps: *ParseState) !*IR.Element {
             tokens.TOK_OPEN_START => {
                 // Recursive call for child element
                 const child = try parseElementIRImpl(ps);
-                try element.children.append(ps.allocator, .{ .Element = child });
+                try element.children.append(ps.alloc(), .{ .Element = child });
                 element.has_element_child = true;
             },
             tokens.TOK_VALUE, tokens.TOK_NORMAL_SUBST, tokens.TOK_OPTIONAL_SUBST, tokens.TOK_CDATA, tokens.TOK_CHARREF, tokens.TOK_ENTITYREF, tokens.TOK_PITARGET, tokens.TOK_PIDATA => {
                 // Accumulate sequence of value/text tokens
-                var content_sequence = std.ArrayList(IR.Node).initCapacity(ps.allocator, 0) catch unreachable;
+                var content_sequence = std.ArrayList(IR.Node).initCapacity(ps.alloc(), 0) catch unreachable;
                 try collectValueTokens(ps, &content_sequence, element_end_pos);
 
                 // Ensure we don't overshoot
                 if (ps.r.pos > element_end_pos) ps.r.pos = element_end_pos;
 
                 for (content_sequence.items) |node| {
-                    try element.children.append(ps.allocator, node);
+                    try element.children.append(ps.alloc(), node);
                 }
             },
             else => break,
@@ -231,7 +237,7 @@ fn parseAttributeListIR(ps: *ParseState, max_end: usize) !std.ArrayList(IR.Attr)
 
     if (list_end > max_end or list_end < list_start) return BinXmlError.UnexpectedEof;
 
-    var attributes = std.ArrayList(IR.Attr).initCapacity(ps.allocator, 0) catch unreachable;
+    var attributes = std.ArrayList(IR.Attr).initCapacity(ps.alloc(), 0) catch unreachable;
 
     // Pre-scan to estimate capacity (optional optimization)
     var scan_pos = ps.r.pos;
@@ -240,7 +246,7 @@ fn parseAttributeListIR(ps: *ParseState, max_end: usize) !std.ArrayList(IR.Attr)
         attr_count += 1;
         break; // Just counting existence of list for now, or use a more robust loop if needed
     }
-    if (attr_count > 0) try attributes.ensureTotalCapacityPrecise(ps.allocator, attr_count);
+    if (attr_count > 0) try attributes.ensureTotalCapacityPrecise(ps.alloc(), attr_count);
 
     while (ps.r.pos < list_end and ps.r.rem() > 0 and tokens.isToken(ps.r.peekByte() catch 0, tokens.TOK_ATTRIBUTE)) {
         _ = try ps.r.readInt(u8); // Consume Attribute Token
@@ -250,10 +256,10 @@ fn parseAttributeListIR(ps: *ParseState, max_end: usize) !std.ArrayList(IR.Attr)
         if (log.enabled(.trace)) try binxml_name.logNameTrace(name, "attr");
 
         // Parse Attribute Value (sequence of tokens)
-        var value_tokens = std.ArrayList(IR.Node).initCapacity(ps.allocator, 0) catch unreachable;
+        var value_tokens = std.ArrayList(IR.Node).initCapacity(ps.alloc(), 0) catch unreachable;
         try collectValueTokens(ps, &value_tokens, list_end);
 
-        try attributes.append(ps.allocator, .{ .name = name, .value = value_tokens });
+        try attributes.append(ps.alloc(), .{ .name = name, .value = value_tokens });
     }
 
     // Ensure we are exactly at the end of the list
@@ -276,23 +282,23 @@ fn collectValueTokens(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: us
             tokens.TOK_NORMAL_SUBST, tokens.TOK_OPTIONAL_SUBST => {
                 const h = try readHeaderChecked(ps.r, types.SubstitutionHeader, end_pos);
                 const optional = tokens.isToken(h.token, tokens.TOK_OPTIONAL_SUBST);
-                try out.append(ps.allocator, .{ .Subst = .{ .id = h.id, .vtype = h.vtype, .optional = optional } });
+                try out.append(ps.alloc(), .{ .Subst = .{ .id = h.id, .vtype = h.vtype, .optional = optional } });
             },
             tokens.TOK_CHARREF => {
                 const h = try readHeaderChecked(ps.r, types.CharRefHeader, end_pos);
-                try out.append(ps.allocator, .{ .CharRef = h.value });
+                try out.append(ps.alloc(), .{ .CharRef = h.value });
             },
             tokens.TOK_ENTITYREF => {
                 try parseNameToken(.EntityRef, ps, out, end_pos);
             },
             tokens.TOK_CDATA => {
-                try parseStringToken(.CData, ps.r, out, ps.allocator, end_pos);
+                try parseStringToken(.CData, ps.r, out, ps.alloc(), end_pos);
             },
             tokens.TOK_PITARGET => {
                 try parseNameToken(.PITarget, ps, out, end_pos);
             },
             tokens.TOK_PIDATA => {
-                try parseStringToken(.PIData, ps.r, out, ps.allocator, end_pos);
+                try parseStringToken(.PIData, ps.r, out, ps.alloc(), end_pos);
             },
             else => break,
         }
@@ -323,7 +329,7 @@ fn parseNameToken(
         .PITarget => .{ .PITarget = nm },
         else => @compileError("parseNameToken only supports EntityRef and PITarget"),
     };
-    try out.append(ps.allocator, node);
+    try out.append(ps.alloc(), node);
 }
 
 /// Generic helper for tokens containing a string payload (CData, PIData).
@@ -356,7 +362,7 @@ fn parseValueToken(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize
         if (ps.r.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
         const blen = try ps.r.readInt(u16);
         if (ps.r.pos + @as(usize, blen) > end_pos) return BinXmlError.UnexpectedEof;
-        try out.append(ps.allocator, .{ .Value = .{ .vtype = vtype, .bytes = ps.r.buf[ps.r.pos .. ps.r.pos + blen] } });
+        try out.append(ps.alloc(), .{ .Value = .{ .vtype = vtype, .bytes = ps.r.buf[ps.r.pos .. ps.r.pos + blen] } });
         ps.r.pos += blen;
         return;
     }
@@ -364,20 +370,20 @@ fn parseValueToken(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize
     switch (vtype) {
         0x01 => { // String
             const text = try ps.r.readLenPrefixedSlice(u16, 2, end_pos);
-            try out.append(ps.allocator, .{ .Text = .{ .utf16 = text, .num_chars = text.len / 2 } });
+            try out.append(ps.alloc(), .{ .Text = .{ .utf16 = text, .num_chars = text.len / 2 } });
         },
         0x02, 0x0e => { // Ansi String, Binary
             const payload = try ps.r.readLenPrefixedSlice(u16, 1, end_pos);
-            try out.append(ps.allocator, .{ .Value = .{ .vtype = vtype, .bytes = payload } });
+            try out.append(ps.alloc(), .{ .Value = .{ .vtype = vtype, .bytes = payload } });
         },
         0x13 => { // SID
             const payload = try ps.r.readSidBytesBounded(end_pos);
-            try out.append(ps.allocator, .{ .Value = .{ .vtype = vtype, .bytes = payload } });
+            try out.append(ps.alloc(), .{ .Value = .{ .vtype = vtype, .bytes = payload } });
         },
         else => {
             if (types.valueTypeFixedSize(vtype)) |sz| {
                 const payload = try ps.r.readFixedBytesBounded(sz, end_pos);
-                try out.append(ps.allocator, .{ .Value = .{ .vtype = vtype, .bytes = payload } });
+                try out.append(ps.alloc(), .{ .Value = .{ .vtype = vtype, .bytes = payload } });
             } else {
                 log.err("unknown value vtype=0x{x} at pos=0x{x} src={s}", .{ vtype, ps.r.pos, @tagName(ps.src) });
                 return BinXmlError.BadToken;
@@ -413,7 +419,7 @@ fn parseDefNameIR(ps: *ParseState) !IR.Name {
         if (log.enabled(.trace)) log.trace("inline NameLink next+hash read inl_start to end; num={d}", .{view.num_chars});
 
         const bytes = view.utf16.len;
-        const buf = try ps.allocator.alloc(u8, bytes);
+        const buf = try ps.alloc().alloc(u8, bytes);
         @memcpy(buf, view.utf16);
 
         return IR.Name{ .bytes = buf, .num_chars = view.num_chars };

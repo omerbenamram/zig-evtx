@@ -93,13 +93,13 @@ pub fn OutputImpl(comptime W: type) type {
                     try bw.writeAll("{");
                     try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
                     if (self.ctx) |ctx| {
-                        var builder = binxml.Builder.init(ctx, ctx.allocator);
+                        var builder = binxml.Builder.init(ctx);
                         const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
                         var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
-                        var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
+                        var builder = binxml.Builder.init(&local_ctx);
                         const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
                     }
@@ -109,13 +109,13 @@ pub fn OutputImpl(comptime W: type) type {
                     try bw.writeAll("{");
                     try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
                     if (self.ctx) |ctx| {
-                        var builder = binxml.Builder.init(ctx, ctx.allocator);
+                        var builder = binxml.Builder.init(ctx);
                         const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
                         var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
-                        var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
+                        var builder = binxml.Builder.init(&local_ctx);
                         const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
                     }
@@ -153,13 +153,13 @@ pub fn OutputImpl(comptime W: type) type {
                     try bw.writeAll("{");
                     try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
                     if (self.ctx) |ctx| {
-                        var builder = binxml.Builder.init(ctx, ctx.allocator);
+                        var builder = binxml.Builder.init(ctx);
                         const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
                         var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
-                        var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
+                        var builder = binxml.Builder.init(&local_ctx);
                         const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
                     }
@@ -169,13 +169,13 @@ pub fn OutputImpl(comptime W: type) type {
                     try bw.writeAll("{");
                     try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
                     if (self.ctx) |ctx| {
-                        var builder = binxml.Builder.init(ctx, ctx.allocator);
+                        var builder = binxml.Builder.init(ctx);
                         const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, ctx.arena.allocator(), bw);
                     } else {
                         var local_ctx = try binxml.Context.init(alloc_mod.get());
                         defer local_ctx.deinit();
-                        var builder = binxml.Builder.init(&local_ctx, local_ctx.allocator);
+                        var builder = binxml.Builder.init(&local_ctx);
                         const root = try builder.build(record.chunk_buf, record.raw_xml);
                         try render_json.renderElementJson(record.chunk_buf, root, local_ctx.arena.allocator(), bw);
                     }
@@ -244,13 +244,8 @@ pub const EvtxParser = struct {
             if (self.opts.verbosity >= 1) log.info("chunk {d}: free_off=0x{x}, last_rec_off=0x{x}", .{ chunk_index, chunk.header.free_space_offset, chunk.header.last_event_record_offset });
             if (self.opts.validate_checksums) try chunk.validateChecksums();
             ctx.resetPerChunk();
-            // Seed arena with a modest capacity based on chunk header guidance
-            const est_names = chunk.header.common_strings_count;
-            const est_templates = chunk.header.template_ptrs_count;
-            const bytes_hint: usize = @min((est_names * 128) + (est_templates * 2048), 64 * 1024);
-            if (bytes_hint > 0) {
-                _ = ctx.arena.allocator().alloc(u8, bytes_hint) catch {};
-            }
+            // Pre-cache common strings from chunk header for faster lookups
+            ctx.preCacheFromChunkHeader(&chunk.buf, &chunk.header.common_string_offsets);
             // Only enable deepest renderer-specific traces at -vvv
             ctx.verbose = (self.opts.verbosity >= 3);
             // Provide output with reusable context for this chunk
@@ -421,6 +416,8 @@ pub const EvtxParser = struct {
                         }
                     }
                     ctx.resetPerChunk();
+                    // Pre-cache common strings from chunk header for faster lookups
+                    ctx.preCacheFromChunkHeader(&item.chunk.buf, &item.chunk.header.common_string_offsets);
                     ctx.verbose = (self_.parser.opts.verbosity >= 3);
                     output.setContext(&ctx);
                     var rec_iter = item.chunk.records();
@@ -600,6 +597,8 @@ pub const RecordStream = struct {
         if (self.opts.validate_checksums) try self.current_chunk.validateChecksums();
         // Prepare per-chunk context and iterator
         self.ctx.resetPerChunk();
+        // Pre-cache common strings from chunk header for faster lookups
+        self.ctx.preCacheFromChunkHeader(&self.current_chunk.buf, &self.current_chunk.header.common_string_offsets);
         self.ctx.verbose = (self.opts.verbosity >= 3);
         self.out.setContext(&self.ctx);
         self.rec_iter = self.current_chunk.records();
@@ -817,7 +816,7 @@ pub const EventRecordView = struct {
         try bw.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ self.id, self.timestamp_filetime });
         var ctx = try binxml.Context.init(alloc_mod.get());
         defer ctx.deinit();
-        var builder = binxml.Builder.init(&ctx, ctx.allocator);
+        var builder = binxml.Builder.init(&ctx);
         const root = try builder.build(self.chunk_buf, self.raw_xml);
         try render_json.renderElementJson(self.chunk_buf, root, ctx.arena.allocator(), bw);
         try bw.writeAll("}\n");
