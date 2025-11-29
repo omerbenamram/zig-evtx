@@ -106,11 +106,6 @@ pub const TemplateDefinitionHeader = packed struct {
     data_size: u32,
 };
 
-// Plain struct: GUIDs are read as raw bytes via std.mem.readInt in callers.
-pub const GuidBytes = struct {
-    bytes: [16]u8,
-};
-
 pub const ValueTokenHeader = packed struct {
     token: u8,
     vtype: u8,

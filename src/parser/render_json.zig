@@ -8,8 +8,12 @@ const std = @import("std");
 const IRModule = @import("ir.zig");
 const IR = IRModule.IR;
 const util = @import("util.zig");
-const attrNameIsSystemTime = @import("binxml/name.zig").attrNameIsSystemTime;
 const vf = @import("value_format.zig");
+
+/// Check if attribute name is "SystemTime" for special normalization.
+fn attrNameIsSystemTime(name: IR.Name) bool {
+    return util.utf16EqualsAscii(name.bytes, name.num_chars, "SystemTime");
+}
 
 /// Writer error type for all rendering functions.
 pub const WriterError = std.Io.Writer.Error;
@@ -56,7 +60,6 @@ fn renderTextToJsonString(nodes: []const IR.Node, writer: *std.Io.Writer) Writer
     for (nodes) |node| {
         switch (node) {
             .Text => |text| try util.writeUtf16LeJsonEscaped(writer, text.utf16, text.num_chars),
-            .Pad => {},
             .Value => |val| try vf.formatValueXmlFromRaw(writer, val.vtype, val.bytes),
             .CharRef => |charref| try writer.print("&#{d};", .{charref}),
             .EntityRef => try writer.writeByte('&'),
@@ -177,7 +180,6 @@ fn writeElementBodyJson(element: *const IR.Element, allocator: std.mem.Allocator
         for (element.children.items) |node| {
             switch (node) {
                 .Text => |text| try util.writeUtf16LeJsonEscaped(writer, text.utf16, text.num_chars),
-                .Pad => {},
                 .Value => |val| try vf.formatValueXmlFromRaw(writer, val.vtype, val.bytes),
                 .CharRef => |charref| try writer.print("&#{d};", .{charref}),
                 .EntityRef => try writer.writeByte('&'),

@@ -554,32 +554,6 @@ pub fn writeUtf16LeJsonEscaped_scalar(w: *std.Io.Writer, utf16le: []const u8, nu
     if (out_len > 0) try w.writeAll(out_buf[0..out_len]);
 }
 
-/// JSON escape UTF-8 string to concrete std.Io.Writer.
-pub fn jsonEscapeUtf8(w: *std.Io.Writer, s: []const u8) WriterError!void {
-    var i: usize = 0;
-    while (i < s.len) : (i += 1) {
-        const c = s[i];
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            0x08 => try w.writeAll("\\b"),
-            0x0c => try w.writeAll("\\f"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            else => {
-                if (c < 0x20) {
-                    var buf: [6]u8 = undefined;
-                    _ = std.fmt.bufPrint(&buf, "\\u{X:0>4}", .{c}) catch {};
-                    try w.writeAll(&buf);
-                } else {
-                    try w.writeByte(c);
-                }
-            },
-        }
-    }
-}
-
 /// Normalize and write SystemTime ASCII string to concrete std.Io.Writer.
 pub fn normalizeAndWriteSystemTimeAscii(w: *std.Io.Writer, ascii: []const u8) WriterError!void {
     var sanitized_buf: [64]u8 = undefined;
@@ -665,38 +639,6 @@ pub fn writeAnsiCp1252Escaped(w: *std.Io.Writer, bytes: []const u8) WriterError!
                 try w.writeAll(e);
             } else {
                 try w.writeByte(c);
-            }
-        }
-    }
-}
-
-/// Write ANSI CP-1252 bytes as JSON-escaped UTF-8 to concrete std.Io.Writer.
-pub fn writeAnsiCp1252JsonEscaped(w: *std.Io.Writer, bytes: []const u8) WriterError!void {
-    var out_buf: [8]u8 = undefined;
-    var i: usize = 0;
-    while (i < bytes.len) : (i += 1) {
-        const codepoint: u21 = cp1252ToCodepoint(bytes[i]);
-        const n = std.unicode.utf8Encode(codepoint, &out_buf) catch 0;
-        if (n == 0) continue;
-        // JSON escape inline
-        for (out_buf[0..n]) |c| {
-            switch (c) {
-                '"' => try w.writeAll("\\\""),
-                '\\' => try w.writeAll("\\\\"),
-                0x08 => try w.writeAll("\\b"),
-                0x0c => try w.writeAll("\\f"),
-                '\n' => try w.writeAll("\\n"),
-                '\r' => try w.writeAll("\\r"),
-                '\t' => try w.writeAll("\\t"),
-                else => {
-                    if (c < 0x20) {
-                        var buf: [6]u8 = undefined;
-                        _ = std.fmt.bufPrint(&buf, "\\u{X:0>4}", .{c}) catch {};
-                        try w.writeAll(&buf);
-                    } else {
-                        try w.writeByte(c);
-                    }
-                },
             }
         }
     }

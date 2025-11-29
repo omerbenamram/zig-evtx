@@ -7,7 +7,6 @@
 const std = @import("std");
 const binxml = @import("binxml/mod.zig");
 const Context = binxml.Context;
-const attrNameIsSystemTime = @import("binxml/name.zig").attrNameIsSystemTime;
 const IRModule = @import("ir.zig");
 const IR = IRModule.IR;
 const util = @import("util.zig");
@@ -16,6 +15,11 @@ const vf = @import("value_format.zig");
 
 /// Writer error type for all rendering functions.
 pub const WriterError = std.Io.Writer.Error;
+
+/// Check if attribute name is "SystemTime" for special normalization.
+fn attrNameIsSystemTime(name: IR.Name) bool {
+    return util.utf16EqualsAscii(name.bytes, name.num_chars, "SystemTime");
+}
 
 // ============================================================================
 // Low-Level Writing Helpers
@@ -83,8 +87,7 @@ fn renderOpenTagStart(element: *const IR.Element, writer: *std.Io.Writer, indent
 fn renderAttrValueNodes(nodes: []const IR.Node, writer: *std.Io.Writer) WriterError!void {
     for (nodes) |node| switch (node) {
         .Text => |text| try util.writeUtf16LeXmlEscaped(writer, text.utf16, text.num_chars),
-        .Pad => {},
-        .Value => |val| try writeValueXml(writer, val.vtype, val.bytes),
+        .Value => |val| try vf.formatValueXmlFromRaw(writer, val.vtype, val.bytes),
         .CharRef => |charref| try writer.print("&#{d};", .{charref}),
         .EntityRef => |name| {
             try writer.writeByte('&');
@@ -111,8 +114,7 @@ fn renderTextContentFromIR(nodes: []const IR.Node, writer: *std.Io.Writer) Write
     for (nodes) |node| {
         switch (node) {
             .Text => |text| try util.writeUtf16LeXmlEscaped(writer, text.utf16, text.num_chars),
-            .Pad => {},
-            .Value => |val| try writeValueXml(writer, val.vtype, val.bytes),
+            .Value => |val| try vf.formatValueXmlFromRaw(writer, val.vtype, val.bytes),
             .CharRef => |charref| try writer.print("&#{d};", .{charref}),
             .EntityRef => |name| {
                 try writer.writeByte('&');
@@ -193,10 +195,4 @@ fn renderElementIRXml(element: *const IR.Element, writer: *std.Io.Writer, indent
 pub fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, writer: *std.Io.Writer) anyerror!void {
     const tree = try binxml.parseRecord(ctx, chunk, bin);
     try renderElementIRXml(tree.element, writer, 0);
-}
-
-/// Render a single value payload to XML text according to its Binary XML type.
-/// Uses the typed value_format module for clean, well-structured formatting.
-pub fn writeValueXml(writer: *std.Io.Writer, raw_type: u8, data: []const u8) WriterError!void {
-    try vf.formatValueXmlFromRaw(writer, raw_type, data);
 }

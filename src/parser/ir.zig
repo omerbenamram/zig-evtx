@@ -11,7 +11,7 @@ const std = @import("std");
 pub const IR = struct {
     pub const Name = struct { bytes: []const u8, num_chars: usize };
 
-    pub const NodeTag = enum { Element, Text, Value, Placeholder, CharRef, EntityRef, CData, Pad, PITarget, PIData };
+    pub const NodeTag = enum { Element, Text, Value, Placeholder, CharRef, EntityRef, CData, PITarget, PIData };
 
     /// Payload types for each node variant
     pub const TextPayload = struct { utf16: []const u8, num_chars: usize };
@@ -35,7 +35,6 @@ pub const IR = struct {
         CharRef: u16,
         EntityRef: Name,
         CData: TextPayload,
-        Pad: void,
         PITarget: Name,
         PIData: TextPayload,
     };

@@ -6,7 +6,6 @@
 const std = @import("std");
 
 const BinXmlError = @import("err.zig").BinXmlError;
-const types = @import("binxml/types.zig");
 const value_reader = @import("binxml/value_reader.zig");
 
 /// Zero-copy binary reader for parsing EVTX BinXML data.
@@ -93,12 +92,6 @@ pub const Reader = struct {
             },
             else => @compileError("Unsupported type in readAny: " ++ @typeName(T)),
         };
-    }
-
-    /// Reads a 16-byte GUID from the current position.
-    pub fn readGuid(self: *Reader) ![16]u8 {
-        const g = try self.readStruct(types.GuidBytes);
-        return g.bytes;
     }
 
     /// Reads exactly `n` bytes from the current position.

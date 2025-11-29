@@ -118,7 +118,7 @@ fn resolveNodeInto(
             try out.append(allocator, .{ .Element = cloned });
         },
         // All other node types are immutable data, just copy them
-        .Text, .Value, .CharRef, .EntityRef, .CData, .Pad, .PITarget, .PIData => {
+        .Text, .Value, .CharRef, .EntityRef, .CData, .PITarget, .PIData => {
             try out.append(allocator, node);
         },
     }

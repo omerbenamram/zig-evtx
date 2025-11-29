@@ -12,8 +12,6 @@ const logger = @import("../../logger.zig");
 const log = logger.scoped("binxml");
 const tokens = @import("tokens.zig");
 const util = @import("../util.zig");
-const utf16EqualsAscii = util.utf16EqualsAscii;
-const binxml_name = @import("name.zig");
 
 /// Context required for parsing BinXML elements.
 ///
@@ -440,15 +438,6 @@ fn parseAttributeListIR(ps: *ParseState, max_end: usize) !std.ArrayList(IR.Attr)
 
     var attributes: std.ArrayList(IR.Attr) = .empty;
 
-    // Pre-scan to estimate capacity (optional optimization)
-    var scan_pos = ps.r.pos;
-    var attr_count: usize = 0;
-    while (scan_pos < list_end and scan_pos < ps.r.buf.len and tokens.isToken(ps.r.buf[scan_pos], tokens.TOK_ATTRIBUTE)) : (scan_pos += 1) {
-        attr_count += 1;
-        break; // Just counting existence of list for now, or use a more robust loop if needed
-    }
-    if (attr_count > 0) try attributes.ensureTotalCapacityPrecise(ps.alloc(), attr_count);
-
     while (ps.r.pos < list_end and ps.r.rem() > 0) {
         const maybe_attr = ps.r.peekByte() catch break;
         if (!tokens.isToken(maybe_attr, tokens.TOK_ATTRIBUTE)) break;
@@ -456,7 +445,6 @@ fn parseAttributeListIR(ps: *ParseState, max_end: usize) !std.ArrayList(IR.Attr)
 
         // Parse Attribute Name
         const name = try readNameIRBounded(ps, list_end);
-        if (log.enabled(.trace)) try binxml_name.logNameTrace(name, "attr");
 
         // Parse Attribute Value (sequence of tokens)
         var value_tokens: std.ArrayList(IR.Node) = .empty;
