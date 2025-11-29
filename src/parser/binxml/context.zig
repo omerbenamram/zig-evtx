@@ -1,9 +1,13 @@
 //! Context and template cache for BinXML parsing.
 //!
 //! This module provides the shared state used during parsing, including:
-//! - Template definition cache (per-chunk)
+//! - Template definition cache (per-chunk) - stores parsed Template structures
 //! - Name cache for string deduplication
 //! - Arena allocator for chunk-scoped allocations
+//!
+//! Type-safe wrapper types ensure output IR is always resolved:
+//! - `Template`: Cached template definition, may contain Placeholder nodes
+//! - `ElementTree`: Resolved element tree, guaranteed no Placeholder nodes
 //!
 //! Keep this file renderer-free to avoid cycles.
 
@@ -19,6 +23,192 @@ pub const NameCacheEntry = struct {
     bytes: []u8,
     num_chars: usize,
 };
+
+/// Resolved element tree - guaranteed to have no Placeholder nodes.
+/// This is the ONLY type renderers should accept.
+///
+/// Wraps an IR.Element pointer to provide type-level guarantee that
+/// all substitutions have been resolved.
+pub const ElementTree = struct {
+    element: *IR.Element,
+};
+
+/// Cached template definition - may contain Placeholder nodes.
+///
+/// Template definitions are parsed once and cached. When instantiated with
+/// substitution values, they produce an ElementTree with all placeholders resolved.
+pub const Template = struct {
+    root: *IR.Element,
+
+    /// Clone this template and resolve all Placeholder nodes with the given values.
+    /// Returns an ElementTree guaranteed to have no Placeholder nodes.
+    ///
+    /// This is the only way to get an ElementTree from a Template.
+    pub fn instantiate(
+        self: *const Template,
+        values: []const types.TemplateValue,
+        chunk: []const u8,
+        ctx: *Context,
+    ) !ElementTree {
+        const allocator = ctx.arena.allocator();
+        const resolved = try cloneAndResolve(self.root, values, chunk, ctx, allocator);
+        return .{ .element = resolved };
+    }
+};
+
+/// Recursively clones an element tree, resolving all Placeholder nodes.
+fn cloneAndResolve(
+    src: *const IR.Element,
+    values: []const types.TemplateValue,
+    chunk: []const u8,
+    ctx: *Context,
+    allocator: std.mem.Allocator,
+) anyerror!*IR.Element {
+    const el = try allocator.create(IR.Element);
+    el.* = .{
+        .name = src.name,
+        .attrs = .empty,
+        .children = .empty,
+        .has_element_child = src.has_element_child,
+    };
+
+    // Clone attributes with placeholder resolution
+    if (src.attrs.items.len > 0) {
+        try el.attrs.ensureTotalCapacityPrecise(allocator, src.attrs.items.len);
+        for (src.attrs.items) |attr| {
+            var new_attr = IR.Attr{ .name = attr.name, .value = .empty };
+            if (attr.value.items.len > 0) {
+                try new_attr.value.ensureTotalCapacityPrecise(allocator, attr.value.items.len);
+                for (attr.value.items) |node| {
+                    try resolveNodeInto(node, values, chunk, ctx, allocator, &new_attr.value);
+                }
+            }
+            try el.attrs.append(allocator, new_attr);
+        }
+    }
+
+    // Clone children with placeholder resolution
+    if (src.children.items.len > 0) {
+        try el.children.ensureTotalCapacityPrecise(allocator, src.children.items.len);
+        for (src.children.items) |node| {
+            try resolveNodeInto(node, values, chunk, ctx, allocator, &el.children);
+        }
+    }
+
+    return el;
+}
+
+/// Resolves a single node, appending result(s) to the output list.
+/// Placeholder nodes are resolved to their actual values (may expand to multiple nodes).
+/// Other nodes are cloned as-is (with recursive resolution for Element children).
+fn resolveNodeInto(
+    node: IR.Node,
+    values: []const types.TemplateValue,
+    chunk: []const u8,
+    ctx: *Context,
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(IR.Node),
+) !void {
+    switch (node) {
+        .Placeholder => |ph| {
+            try resolvePlaceholder(ph, values, chunk, ctx, allocator, out);
+        },
+        .Element => |el| {
+            const cloned = try cloneAndResolve(el, values, chunk, ctx, allocator);
+            try out.append(allocator, .{ .Element = cloned });
+        },
+        // All other node types are immutable data, just copy them
+        .Text, .Value, .CharRef, .EntityRef, .CData, .Pad, .PITarget, .PIData => {
+            try out.append(allocator, node);
+        },
+    }
+}
+
+/// Resolves a Placeholder to its actual value(s).
+fn resolvePlaceholder(
+    ph: IR.PlaceholderPayload,
+    values: []const types.TemplateValue,
+    chunk: []const u8,
+    ctx: *Context,
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(IR.Node),
+) !void {
+    if (ph.id >= values.len) return; // Out of bounds, skip
+
+    const val = values[ph.id];
+
+    // Skip optional empty substitutions
+    if (ph.optional and (val.t == 0x00 or val.data.len == 0)) {
+        return;
+    }
+
+    const is_array = (ph.vtype & types.ValueType.ARRAY_FLAG) != 0;
+    const base_type = ph.vtype & 0x7f;
+
+    if (is_array) {
+        try resolveArrayValue(base_type, val, allocator, out);
+    } else {
+        try resolveSingleValue(base_type, val, chunk, ctx, allocator, out);
+    }
+}
+
+/// Resolves a single (non-array) substitution value.
+fn resolveSingleValue(
+    base_type: u8,
+    val: types.TemplateValue,
+    chunk: []const u8,
+    ctx: *Context,
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(IR.Node),
+) !void {
+    // Nested BinXML (type 0x21) - recursively parse and splice
+    if ((val.t & 0x7f) == 0x21 and val.data.len > 0) {
+        // Import parser module for nested parsing
+        const parser = @import("parser.zig");
+        try parser.parseNestedBinXmlIntoResolved(chunk, val.data, ctx, allocator, out);
+        return;
+    }
+
+    // String types (0x01) become Text nodes for proper XML escaping
+    if (base_type == @intFromEnum(types.ValueType.string)) {
+        var num_chars = val.data.len / 2;
+        if (num_chars > 0) {
+            const last_char = std.mem.readInt(u16, val.data[val.data.len - 2 .. val.data.len][0..2], .little);
+            if (last_char == 0) num_chars -= 1;
+        }
+        try out.append(allocator, .{
+            .Text = .{ .utf16 = val.data[0 .. num_chars * 2], .num_chars = num_chars },
+        });
+        return;
+    }
+
+    // All other types become Value nodes
+    try out.append(allocator, .{ .Value = .{ .vtype = val.t, .bytes = val.data } });
+}
+
+/// Resolves an array substitution value by expanding it into multiple Value nodes.
+fn resolveArrayValue(
+    base_type: u8,
+    val: types.TemplateValue,
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(IR.Node),
+) !void {
+    const elem_size = types.ValueType.fixedSizeFromRaw(base_type) orelse {
+        // Variable-size array elements - treat as single value
+        try out.append(allocator, .{ .Value = .{ .vtype = val.t, .bytes = val.data } });
+        return;
+    };
+
+    if (elem_size == 0 or val.data.len == 0) return;
+
+    const num_elems = val.data.len / elem_size;
+    for (0..num_elems) |i| {
+        const start = i * elem_size;
+        const end = start + elem_size;
+        if (end > val.data.len) break;
+        try out.append(allocator, .{ .Value = .{ .vtype = base_type, .bytes = val.data[start..end] } });
+    }
+}
 
 /// Shared parsing context for BinXML processing.
 ///
@@ -36,8 +226,9 @@ pub const Context = struct {
     allocator: std.mem.Allocator,
     /// Arena for chunk-scoped allocations (IR elements, names, etc.).
     arena: std.heap.ArenaAllocator,
-    /// Template definition cache: DefKey -> parsed IR element.
-    cache: std.AutoHashMap(DefKey, *IR.Element),
+    /// Template definition cache: DefKey -> parsed Template with Placeholder nodes.
+    /// Instantiation clones the template and resolves placeholders.
+    cache: std.AutoHashMap(DefKey, Template),
     /// Name cache: offset -> (UTF-16 bytes, char count).
     name_cache: std.AutoHashMap(u32, NameCacheEntry),
 
@@ -46,7 +237,7 @@ pub const Context = struct {
         return .{
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
-            .cache = std.AutoHashMap(DefKey, *IR.Element).init(allocator),
+            .cache = std.AutoHashMap(DefKey, Template).init(allocator),
             .name_cache = std.AutoHashMap(u32, NameCacheEntry).init(allocator),
         };
     }

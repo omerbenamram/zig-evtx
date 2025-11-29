@@ -2,7 +2,10 @@ const std = @import("std");
 const Reader = @import("../reader.zig").Reader;
 const IRModule = @import("../ir.zig");
 const IR = IRModule.IR;
-const Context = @import("context.zig").Context;
+const context_mod = @import("context.zig");
+const Context = context_mod.Context;
+const Template = context_mod.Template;
+const ElementTree = context_mod.ElementTree;
 const types = @import("types.zig");
 const BinXmlError = @import("../err.zig").BinXmlError;
 const logger = @import("../../logger.zig");
@@ -33,6 +36,11 @@ pub const ElementContext = struct {
     /// Whether element headers contain a dependency ID field.
     /// True for template definitions, false for direct record elements.
     has_dep_id: bool,
+
+    /// Whether we're parsing a template definition (for caching).
+    /// When true, substitution tokens become Placeholder nodes.
+    /// When false, substitution tokens are an error (shouldn't appear outside templates).
+    parsing_template_def: bool = false,
 };
 
 /// Bundles common parsing state to reduce function signature noise.
@@ -42,6 +50,7 @@ pub const ParseState = struct {
     r: *Reader,
     chunk_base: usize,
     has_dep_id: bool,
+    parsing_template_def: bool,
 
     pub fn init(ctx: *Context, chunk: []const u8, r: *Reader, elem_ctx: ElementContext) ParseState {
         return .{
@@ -50,6 +59,7 @@ pub const ParseState = struct {
             .r = r,
             .chunk_base = elem_ctx.chunk_base,
             .has_dep_id = elem_ctx.has_dep_id,
+            .parsing_template_def = elem_ctx.parsing_template_def,
         };
     }
 
@@ -65,6 +75,153 @@ pub const ParseState = struct {
 pub fn parseElementIR(ctx: *Context, chunk: []const u8, r: *Reader, elem_ctx: ElementContext) !*IR.Element {
     var ps = ParseState.init(ctx, chunk, r, elem_ctx);
     return parseElementIRImpl(&ps);
+}
+
+// Comptime UTF-16LE literal for empty event creation
+const event_name_utf16: []const u8 = &[_]u8{ 'E', 0, 'v', 0, 'e', 0, 'n', 0, 't', 0 };
+
+/// Main entry point: parses a BinXML record into a fully resolved ElementTree.
+///
+/// This is the unified parsing function that handles both template instances
+/// and direct elements. Template definitions are cached and instantiated.
+///
+/// Returns an ElementTree which is guaranteed to have no Placeholder nodes.
+///
+/// Arguments:
+/// - `ctx`: Parser context with template cache and arena allocator
+/// - `chunk`: The full 64KB chunk data (needed for offset-based lookups)
+/// - `bin`: The specific slice containing this record's BinXML data
+pub fn parseRecord(ctx: *Context, chunk: []const u8, bin: []const u8) !ElementTree {
+    const allocator = ctx.arena.allocator();
+
+    // Skip fragment header if present
+    const start_offset = common.skipFragmentHeader(bin, 0);
+
+    // Handle empty event case
+    if (start_offset >= bin.len) {
+        const el = try IRModule.irNewElement(allocator, IR.Name{ .bytes = event_name_utf16, .num_chars = 5 });
+        return .{ .element = el };
+    }
+
+    // Check first token to determine path
+    const first_token = bin[start_offset];
+
+    if (tokens.isToken(first_token, tokens.TOK_TEMPLATE_INSTANCE)) {
+        // Template instance - get cached template and instantiate
+        return parseTemplateInstance(ctx, chunk, bin, start_offset);
+    }
+
+    // Direct element - parse without template context (no placeholders)
+    const chunk_base = @intFromPtr(bin.ptr) - @intFromPtr(chunk.ptr);
+    var r = Reader.init(bin);
+    r.pos = start_offset;
+    const el = try parseElementIR(ctx, chunk, &r, .{
+        .chunk_base = chunk_base,
+        .has_dep_id = false,
+        .parsing_template_def = false,
+    });
+    return .{ .element = el };
+}
+
+// --- Template Instance Parsing ---
+
+/// Parses a template instance by getting/caching the template and instantiating it.
+///
+/// This function handles the complete template instantiation flow:
+/// 1. Read template instance header
+/// 2. Calculate values offset (deterministic, no skipping)
+/// 3. Parse substitution values
+/// 4. Get or parse template definition (cached as Template with Placeholder nodes)
+/// 5. Instantiate template with values to get ElementTree (all placeholders resolved)
+///
+/// Nested template instances (type 0x21 values containing templates) are
+/// handled recursively during instantiation.
+fn parseTemplateInstance(ctx: *Context, chunk: []const u8, bin: []const u8, start_offset: usize) !ElementTree {
+    const allocator = ctx.arena.allocator();
+
+    // Create a reader for the BinXML slice starting at the template instance
+    var r = Reader.init(bin[start_offset..]);
+
+    // Read template instance header using proper struct reading
+    const header = try r.readStruct(types.TemplateInstanceStart);
+
+    if ((header.token & 0x1f) != tokens.TOK_TEMPLATE_INSTANCE) {
+        return error.BadToken;
+    }
+
+    // Calculate where substitution values start (deterministic)
+    // chunk_base: where bin starts within chunk
+    // r.pos: how many bytes we've read (the header size as determined by Reader)
+    const chunk_base = @intFromPtr(bin.ptr) - @intFromPtr(chunk.ptr);
+    const after_header = chunk_base + start_offset + r.pos;
+    const values_offset = common.calcValuesOffset(chunk, after_header, header.def_data_off);
+
+    if (values_offset >= chunk.len) {
+        log.err("parseTemplateInstance: values_offset 0x{x} >= chunk.len 0x{x}", .{ values_offset, chunk.len });
+        return error.OutOfBounds;
+    }
+
+    // Parse substitution values
+    var values_r = Reader.init(chunk[values_offset..]);
+    const values = try parseTemplateInstanceValues(&values_r, allocator);
+
+    // Get or parse template definition (cached with Placeholder nodes)
+    const template = try getOrCacheTemplate(ctx, chunk, header.def_data_off);
+
+    // Instantiate template: clone and resolve all placeholders
+    return template.instantiate(values, chunk, ctx);
+}
+
+/// Gets or parses and caches a template definition.
+/// Returns a Template containing the parsed IR with Placeholder nodes for substitutions.
+fn getOrCacheTemplate(ctx: *Context, chunk: []const u8, def_data_off: u32) !Template {
+    const key = makeDefCacheKey(chunk, def_data_off);
+    const got = try ctx.cache.getOrPut(key);
+
+    if (!got.found_existing) {
+        // Parse template definition with Placeholder nodes
+        const off: usize = @intCast(def_data_off);
+        if (off + @sizeOf(types.TemplateDefinitionHeader) > chunk.len) {
+            return error.OutOfBounds;
+        }
+
+        const data_size = common.readTemplateDefSize(chunk, def_data_off);
+        const data_start = off + 24; // Header is 24 bytes
+
+        if (data_start + data_size > chunk.len) {
+            return error.OutOfBounds;
+        }
+
+        // Parse template definition data
+        const def_data = chunk[data_start .. data_start + data_size];
+        var def_r = Reader.init(def_data);
+
+        // Skip fragment header if present
+        const frag_offset = common.skipFragmentHeader(def_data, 0);
+        def_r.pos = frag_offset;
+
+        // Parse with parsing_template_def=true so substitutions become Placeholder nodes
+        const root = try parseElementIR(ctx, chunk, &def_r, .{
+            .chunk_base = data_start,
+            .has_dep_id = true, // Template definitions include dependency IDs
+            .parsing_template_def = true,
+        });
+
+        got.value_ptr.* = .{ .root = root };
+    }
+
+    return got.value_ptr.*;
+}
+
+/// Creates a cache key for template definitions.
+/// Uses offset + GUID to ensure uniqueness across different template definitions.
+fn makeDefCacheKey(chunk: []const u8, def_data_off: u32) Context.DefKey {
+    var guid: [16]u8 = undefined;
+    const base: usize = @intCast(def_data_off);
+    // GUID is at offset 4 in TemplateDefinitionHeader (after next_offset u32)
+    const guid_slice = chunk[base + 4 .. base + 20];
+    @memcpy(guid[0..], guid_slice);
+    return .{ .def_data_off = def_data_off, .guid = guid };
 }
 
 // --- Template Instance Value Parsing ---
@@ -269,6 +426,8 @@ fn parseAttributeListIR(ps: *ParseState, max_end: usize) !std.ArrayList(IR.Attr)
 }
 
 /// Collects a sequence of value tokens (Value, Subst, CharRef, etc.) into a list of IR Nodes.
+/// When parsing_template_def is true, substitution tokens become Placeholder nodes.
+/// When parsing_template_def is false, substitution tokens are an error.
 fn collectValueTokens(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize) !void {
     while (ps.r.rem() > 0 and ps.r.pos < end_pos) {
         const pk = ps.r.peekByte() catch break;
@@ -282,7 +441,17 @@ fn collectValueTokens(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: us
             tokens.TOK_NORMAL_SUBST, tokens.TOK_OPTIONAL_SUBST => {
                 const h = try readHeaderChecked(ps.r, types.SubstitutionHeader, end_pos);
                 const optional = tokens.isToken(h.token, tokens.TOK_OPTIONAL_SUBST);
-                try out.append(ps.alloc(), .{ .Subst = .{ .id = h.id, .vtype = h.vtype, .optional = optional } });
+
+                if (ps.parsing_template_def) {
+                    // Create Placeholder node for later resolution during instantiation
+                    try out.append(ps.alloc(), .{
+                        .Placeholder = .{ .id = h.id, .vtype = h.vtype, .optional = optional },
+                    });
+                } else {
+                    // Substitution token outside template definition - shouldn't happen
+                    log.err("substitution token outside template definition at 0x{x}", .{ps.r.pos});
+                    return BinXmlError.BadToken;
+                }
             },
             tokens.TOK_CHARREF => {
                 const h = try readHeaderChecked(ps.r, types.CharRefHeader, end_pos);
@@ -302,6 +471,45 @@ fn collectValueTokens(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: us
             },
             else => break,
         }
+    }
+}
+
+/// Parses nested BinXML (type 0x21) during template instantiation.
+/// Called from context.zig during Placeholder resolution.
+///
+/// Returns resolved elements (no Placeholder nodes) by recursively
+/// calling parseRecord for template instances.
+pub fn parseNestedBinXmlIntoResolved(
+    chunk: []const u8,
+    binxml_data: []const u8,
+    ctx: *Context,
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(IR.Node),
+) anyerror!void {
+    if (binxml_data.len == 0) return;
+
+    // Skip fragment header if present
+    const start_offset = common.skipFragmentHeader(binxml_data, 0);
+    if (start_offset >= binxml_data.len) return;
+
+    // Check if this is a template instance or direct element
+    const first_byte = binxml_data[start_offset];
+
+    if (tokens.isToken(first_byte, tokens.TOK_TEMPLATE_INSTANCE)) {
+        // Nested template instance - parse and instantiate recursively
+        const tree = try parseTemplateInstance(ctx, chunk, binxml_data, start_offset);
+        try out.append(allocator, .{ .Element = tree.element });
+    } else if (tokens.isToken(first_byte, tokens.TOK_OPEN_START)) {
+        // Direct element - parse without template context (no placeholders)
+        var nested_r = Reader.init(binxml_data);
+        nested_r.pos = start_offset;
+        const chunk_base = @intFromPtr(binxml_data.ptr) - @intFromPtr(chunk.ptr);
+        const elem = try parseElementIR(ctx, chunk, &nested_r, .{
+            .chunk_base = chunk_base,
+            .has_dep_id = false,
+            .parsing_template_def = false,
+        });
+        try out.append(allocator, .{ .Element = elem });
     }
 }
 

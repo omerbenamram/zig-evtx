@@ -204,9 +204,8 @@ pub const EventRecordView = struct {
         try writer.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ self.id, self.timestamp_filetime });
         var ctx = try binxml.Context.init(alloc_mod.get());
         defer ctx.deinit();
-        var builder = binxml.Builder.init(&ctx);
-        const root = try builder.build(self.chunk_buf, self.raw_xml);
-        try render_json.renderElementJson(root, ctx.arena.allocator(), writer);
+        const tree = try binxml.parseRecord(&ctx, self.chunk_buf, self.raw_xml);
+        try render_json.renderElementJson(tree.element, ctx.arena.allocator(), writer);
         try writer.writeAll("}\n");
         try w.interface.writeAll(buf.items);
     }

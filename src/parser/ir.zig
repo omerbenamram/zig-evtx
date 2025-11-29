@@ -1,21 +1,37 @@
 const std = @import("std");
 
+/// Intermediate Representation for parsed BinXML.
+///
+/// The IR represents XML element trees. Template definitions (cached as `Template`)
+/// may contain `Placeholder` nodes marking substitution sites. When instantiated,
+/// these become `ElementTree` which is guaranteed to have no placeholders.
+///
+/// Memory: All IR nodes reference slices into the chunk buffer where possible
+/// (names, value bytes). Element nodes are allocated in a per-chunk arena.
 pub const IR = struct {
     pub const Name = struct { bytes: []const u8, num_chars: usize };
 
-    pub const NodeTag = enum { Element, Text, Value, Subst, CharRef, EntityRef, CData, Pad, PITarget, PIData };
+    pub const NodeTag = enum { Element, Text, Value, Placeholder, CharRef, EntityRef, CData, Pad, PITarget, PIData };
 
     /// Payload types for each node variant
     pub const TextPayload = struct { utf16: []const u8, num_chars: usize };
     pub const ValuePayload = struct { vtype: u8, bytes: []const u8 };
-    pub const SubstPayload = struct { id: u16, vtype: u8, optional: bool };
 
-    /// Tagged union for IR nodes - replaces struct with tag pattern
+    /// Placeholder for template substitution sites.
+    /// Only exists in cached Template structures, never in final ElementTree output.
+    pub const PlaceholderPayload = struct {
+        id: u16,
+        vtype: u8,
+        optional: bool,
+    };
+
+    /// Tagged union for IR nodes.
+    /// Placeholder variant only appears in cached templates, not in final output.
     pub const Node = union(NodeTag) {
         Element: *Element,
         Text: TextPayload,
         Value: ValuePayload,
-        Subst: SubstPayload,
+        Placeholder: PlaceholderPayload,
         CharRef: u16,
         EntityRef: Name,
         CData: TextPayload,

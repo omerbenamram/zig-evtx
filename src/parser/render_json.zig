@@ -61,7 +61,8 @@ fn renderTextToJsonString(nodes: []const IR.Node, writer: *std.Io.Writer) Writer
             .CharRef => |charref| try writer.print("&#{d};", .{charref}),
             .EntityRef => try writer.writeByte('&'),
             .CData => |cdata| try util.writeUtf16LeJsonEscaped(writer, cdata.utf16, cdata.num_chars),
-            .PITarget, .PIData, .Element, .Subst => {},
+            .PITarget, .PIData, .Element => {},
+            .Placeholder => unreachable, // ElementTree guarantees no placeholders
         }
     }
     try writer.writeByte('"');
@@ -181,7 +182,8 @@ fn writeElementBodyJson(element: *const IR.Element, allocator: std.mem.Allocator
                 .CharRef => |charref| try writer.print("&#{d};", .{charref}),
                 .EntityRef => try writer.writeByte('&'),
                 .CData => |cdata| try util.writeUtf16LeJsonEscaped(writer, cdata.utf16, cdata.num_chars),
-                .PITarget, .PIData, .Element, .Subst => {},
+                .PITarget, .PIData, .Element => {},
+                .Placeholder => unreachable, // ElementTree guarantees no placeholders
             }
         }
         try writer.writeByte('"');

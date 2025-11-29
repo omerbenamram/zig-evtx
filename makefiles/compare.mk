@@ -103,12 +103,12 @@ compare-time: install-evtx time-zig time-rust
 	if command -v column >/dev/null 2>&1; then column -t -s $$'\t' "$$out_tsv" | sed 's/^/  /'; else cat "$$out_tsv"; fi; \
 	echo "Wrote $$out_tsv"
 
-time-zig: py-ensure-pydust
+time-zig:
 	@set -euo pipefail; \
 	if [ -z "$(FILE)" ]; then echo "Usage: make time-zig FILE=path/to/file.evtx [OPT=ReleaseFast]"; exit 1; fi; \
 	mkdir -p $(OUT_DIR); \
 	echo "Building Zig ($(OPT))..."; \
-		$(ZIG) build -Dtarget=$(TARGET) -Doptimize=$(OPT) -Dpython-exe=$(PYTHON_EXE) -Duse-c-alloc=$(USE_C_ALLOC) -Dwith-python=$(WITH_PYTHON) >/dev/null; \
+	$(ZIG) build -Dtarget=$(TARGET) -Doptimize=$(OPT) -Duse-c-alloc=$(USE_C_ALLOC_BOOL) -Dwith-python=false >/dev/null; \
 	echo "Timing Zig..."; \
 	/usr/bin/time -l zig-out/bin/evtx_dump_zig --no-checks -t 1 -o xml "$(FILE)" >/dev/null 2> "$(OUT_DIR)/time-zig.txt"; \
 	echo "--- tail(time-zig) ---"; tail -n 8 "$(OUT_DIR)/time-zig.txt" | cat; \

@@ -50,41 +50,55 @@ make record FILE=samples/system.evtx N=5       # by ordinal position
 
 ## Architecture
 
+> **Detailed documentation**: See [docs/architecture.md](docs/architecture.md) for diagrams and performance analysis.
+
+### Two-Stage Architecture
+
+The parser uses a two-stage approach with type-safe template caching:
+
+1. **Stage 1 — Parse to IR**: Parse BinXML into `Template` (with `Placeholder` nodes), then instantiate to `ElementTree` (fully resolved)
+2. **Stage 2 — Render**: Serialize `ElementTree` to XML/JSON in one pass
+
+### Type-Safe Wrapper Types
+
+| Type | Contains Placeholder? | Purpose |
+|------|----------------------|---------|
+| `Template` | Yes | Cached template definition with substitution markers |
+| `ElementTree` | No (guaranteed) | Resolved output, accepted by renderers |
+
 ### Core Components
 
-**Parser Structure (`src/parser/evtx.zig`):**
-- `EvtxParser`: Main parser managing file/chunk/record iteration
-- `FileHeader`: EVTX file header with magic "ElfFile\x00"
-- `Chunk`: 64KB chunks containing event records
-- `EventRecord`: Individual event with ID, timestamp, and Binary XML data
-- Output implementations for XML/JSON/JSONL rendering
+**Parser Structure (`src/parser/evtx/`):**
+- `format.zig`: EVTX file/chunk/record structures with magic "ElfFile\x00"
+- `parser.zig`: Main parser managing file/chunk/record iteration
+- `output.zig`: OutputWriter for streaming XML/JSON/JSONL results
 
-**Binary XML Parser (`src/parser/binxml.zig`):**
-- `Reader`: Low-level token reader for Binary XML streams
-- `Context`: Manages parsing state including template cache and string tables
-- Token-based parser implementing Microsoft's Binary XML format used in EVTX
-- Handles elements, attributes, values, substitutions, and template instances
-- Key tokens: 0x0f (Fragment), 0x01/0x41 (OpenStart), 0x0c (TemplateInstance), 0x0d/0x0e (Substitutions)
+**Binary XML Parser (`src/parser/binxml/`):**
+- `parser.zig`: Main parser with `parseRecord()` → `ElementTree`
+- `context.zig`: `Template`, `ElementTree`, cache, and instantiation logic
+- `types.zig`: Binary format structs (headers, descriptors)
+- `tokens.zig`: Token constants (0x0c TemplateInstance, 0x0d/0x0e Substitutions)
 
-**Utilities (`src/parser/util.zig`):**
-- XML escaping and UTF-16 LE to UTF-8 conversion
-- FILETIME/SystemTime formatting
-- GUID, SID, and binary data formatting
+**IR (`src/parser/ir.zig`):**
+- `Node`: Element | Text | Value | Placeholder | CharRef | ...
+- `Placeholder`: Only exists in cached `Template`, never in `ElementTree`
 
 ### Parser Flow
 
 1. **File Level**: Read file header, validate magic and checksums
-2. **Chunk Level**: Iterate 64KB chunks, each with string table and template definitions
+2. **Chunk Level**: Iterate 64KB chunks, reset per-chunk arena and cache
 3. **Record Level**: Parse event records containing Binary XML fragments
-4. **Binary XML**: Token-based parsing with template expansion and substitution handling
-5. **Output**: Render parsed events to XML/JSON with proper formatting
+4. **Binary XML**:
+   - Template definitions → `Template` (with `Placeholder` nodes)
+   - Template instances → `template.instantiate()` → `ElementTree`
+5. **Output**: Render `ElementTree` to XML/JSON (Placeholder case is `unreachable`)
 
-### Key Implementation Details
+### Performance
 
-- **Template System**: Templates are cached per-chunk and referenced by GUID. Template instances apply substitutions to template definitions.
-- **String Tables**: Each chunk maintains offset-based string tables for name deduplication
-- **Substitutions**: Values are injected into templates using normal (0x0d) and optional (0x0e) substitution tokens
-- **Has-More Flag**: Tokens with 0x40 flag indicate continuation (e.g., long strings split across multiple value tokens)
+Clone + Resolve approach is **1.65x faster** than re-parsing templates:
+- Templates parsed once, cached as `Template` with `Placeholder` nodes
+- Each instance: clone tree + resolve placeholders (mostly memcpy)
+- Avoids repeated token dispatch and parsing overhead
 
 ## Current State
 

@@ -2,73 +2,95 @@
 description: When thinking about the architecture of the parser.
 alwaysApply: false
 ---
-### EVTX BinXML: IR-first architecture, template caching, deferred rendering
+### EVTX BinXML: Two-stage architecture with type-safe template caching
 
-This codebase should parse EVTX Binary XML in two stages: build a typed IR, then render. Avoid doing I/O or string building during tokenization beyond what is strictly required.
+> **Full documentation**: See [docs/architecture.md](../../docs/architecture.md) for diagrams and details.
 
-- **Stage 1 — Parse to IR (no output)**
-  - Parse Binary XML into an in-memory IR that preserves element/attribute structure and value tokens without formatting them.
-  - Cache template definitions (from chunk data) as IR using a dictionary keyed by `{def_data_off, guid}`.
-  - When a template instance appears, clone the cached IR into a per-record arena.
+This codebase parses EVTX Binary XML in two stages: build a fully-resolved IR, then render. Template definitions are cached with `Placeholder` markers, then cloned and resolved on instantiation.
 
-- **Stage 2 — Resolve substitutions and nested EvtXml**
-  - Walk the cloned IR and resolve `SUBST` tokens using the current record’s `TemplateValue[]`.
-  - For optional substitutions with NULL values, remove the token (or attribute/element if it becomes empty as per EVTX semantics).
-  - For values of type 0x21 (EvtXml), parse that payload into IR and splice it into the current node as proper children (do not emit inline strings).
+- **Stage 1 — Parse to Resolved IR (no output)**
+  - Parse Binary XML into an in-memory IR.
+  - Template definitions are cached as `Template` structures containing `Placeholder` nodes.
+  - When a template instance appears:
+    1. Parse substitution values from the instance
+    2. Get or parse template definition (cached as `Template`)
+    3. Call `template.instantiate(values, chunk, ctx)` → returns `ElementTree`
+    4. Clone the template tree, resolve placeholders to actual values
+  - For values of type 0x21 (EvtXml), recursively parse and splice as child elements.
 
-- **Stage 3 — Render (single pass I/O)**
-  - Serialize the resolved IR to the chosen output (XML/JSON) in one pass.
-  - Apply escaping and formatting at render time only (e.g., XML escaping, zero-padding triggered by '+' sentinel, and `SystemTime` normalization).
+- **Stage 2 — Render (single pass I/O)**
+  - Serialize the resolved `ElementTree` to the chosen output (XML/JSON) in one pass.
+  - Apply escaping and formatting at render time only.
 
-### IR shape (suggested)
+### Type-safe wrapper types
 
-- **Node**: `Element { name, attrs: []Attr, children: []Node } | Text { utf16 } | Value { vtype, bytes } | Subst { id, vtype, optional, padWidth } | CharRef { value } | EntityRef { nameOff } | CData { utf16 }`
-- **Attr**: `{ name, value: []Node }` where `value` is a flat list of the above tokens allowed in attribute contexts
-- **Name**: union of `NameOffset(u32)` (chunk-relative) or `InlineUtf16 { bytes, numChars }`
-- Track `padWidth` flows from '+' sentinel as an explicit token or attribute on the next numeric node; do not keep '+' as content.
+| Type | Contains Placeholder? | Purpose |
+|------|----------------------|---------|
+| `Template` | Yes | Cached template definition with substitution markers |
+| `ElementTree` | No (guaranteed) | Resolved output, accepted by renderers |
 
-### Template cache and cloning
+**Compile-time safety**: Renderers accept `ElementTree`. The `Placeholder` case in switch statements is `unreachable`, enforcing the invariant at compile time.
 
-- Keep a cache keyed by `{def_data_off, guid}` → `IR` for template definitions extracted from chunk data.
-- On encountering a template instance, look up the IR. If absent, parse the definition bytes into IR and insert into the cache.
-- Clone the cached IR into a per-record arena before substitution resolution to keep the cache immutable and reusable.
+### Key architectural decisions
 
-### Substitution resolution rules
+**No `Subst` nodes in final IR**: The `ElementTree` is always fully resolved. `Placeholder` nodes only exist in cached `Template` structures.
 
-- Respect array flag (MSB) in `vtype`: expand into multiple concrete values per EVTX rules (e.g., string arrays comma-separated for XML rendering).
-- For `0x21` values (EvtXml), parse payload into IR and attach as children on the current element instead of text.
-- Optional substitutions (`TOK_OPTIONAL_SUBST`) with NULL (`t==0x00` or empty) are removed.
+**Clone + Resolve strategy**: Template definitions are parsed once into `Template` with `Placeholder` nodes, cached, then cloned and resolved for each instance. This is faster than re-parsing because:
+- Cloning is mostly memcpy (cache-friendly)
+- Parsing involves token dispatch and branching (slower)
+- Placeholder count `p` << node count `n`
+
+### IR shape
+
+- **Node**: `Element | Text | Value | Placeholder | CharRef | EntityRef | CData | Pad | PITarget | PIData`
+- **Element**: `{ name, attrs: []Attr, children: []Node }`
+- **Attr**: `{ name, value: []Node }`
+- **Text**: `{ utf16, num_chars }` — for string substitution values
+- **Value**: `{ vtype, bytes }` — for non-string typed values
+- **Placeholder**: `{ id, vtype, optional }` — only in cached templates
+
+### Template flow
+
+```
+TemplateInstance token
+    ├── Read header (def_data_off, template_id)
+    ├── Calculate values_offset deterministically
+    ├── Parse substitution values
+    ├── Get or cache Template (with Placeholder nodes)
+    └── template.instantiate(values, chunk, ctx)
+            └── Clone tree, resolve Placeholder nodes
+                    ├── String (0x01) → Text node
+                    ├── Typed → Value node
+                    ├── Array (0x80+) → multiple Value nodes
+                    └── EvtXml (0x21) → recursive parse → Element
+```
+
+### Performance characteristics
+
+| Metric | Re-parse | Clone+Resolve | Improvement |
+|--------|----------|---------------|-------------|
+| Time | 24.3 ms | 14.8 ms | **1.65x faster** |
+| User CPU | 11.9 ms | 10.0 ms | 16% less |
 
 ### Rendering rules
 
-- Only the render pass writes to the output.
-- Apply XML escaping just-in-time.
-- Numeric zero-padding: a leading `+` sentinel in preceding text requests width=2 for the immediately following integer token; model as `padWidth` and never emit `+`.
-- Special-case normalization: `TimeCreated@SystemTime` should be normalized to `YYYY-MM-DDTHH:MM:SS.microssssZ`. Handle this in rendering by collecting the attribute’s tokens into a temporary buffer, dropping '+', then normalizing.
-
-### Migration guidance for current code
-
-- Centralize attribute/content token handling. Do not duplicate token loops.
-- Prefer a shared collector or IR walker for attributes and content. `SystemTime` should call the same collector and then normalize.
-- Keep the existing `Reader` for low-level reads but avoid writing during tokenization.
-- Incremental path:
-  1) Extract a shared attribute/content collector (no I/O side effects besides building buffers/IR).
-  2) Replace ad hoc handlers (e.g., for `SystemTime`) with calls to the shared collector.
-  3) Introduce IR nodes and wire the template cache; initially render from collectors, then switch to rendering from IR once parity is reached.
-
-### Performance and allocation
-
-- Use an arena allocator per record for IR cloning and substitution outputs. Template cache remains in a long-lived allocator.
-- IR nodes should reference slices into the chunk/definition buffers where possible to minimize copying; resolve to concrete byte slices only when needed.
+- Only the render pass writes to output.
+- Apply XML/JSON escaping just-in-time.
+- Numeric zero-padding: `+` sentinel in preceding text requests width=2 for the following integer; modeled as `Pad` node.
+- `TimeCreated@SystemTime` normalized to ISO 8601 format.
 
 ### File references
 
-- Parser entry and record writer: [src/parser/evtx.zig](mdc:src/parser/evtx.zig)
-- BinXML tokenization and rendering: [src/parser/binxml.zig](mdc:src/parser/binxml.zig)
-- CLI entry: [src/main.zig](mdc:src/main.zig)
+- Parser with template caching: `src/parser/binxml/parser.zig`
+- Context, Template, ElementTree: `src/parser/binxml/context.zig`
+- IR types including Placeholder: `src/parser/ir.zig`
+- XML/JSON rendering: `src/parser/render_xml.zig`, `src/parser/render_json.zig`
 
 ### Invariants
 
-- No direct writing to output while reading tokens from template definitions or template instances (except temporary buffers/IR construction).
-- No per-attribute bespoke token parsers; use a single collector/IR traversal.
-- Template definitions are parsed once and cached; instances must clone and then resolve substitutions before rendering.
+1. `ElementTree` never contains `Placeholder` nodes — type-enforced
+2. `Template` is only accessed via `.instantiate()` → returns `ElementTree`
+3. Renderers accept `ElementTree` — `Placeholder` case is `unreachable`
+4. Arena is reset per-chunk — all IR freed atomically
+5. Template cache is cleared per-chunk — templates don't cross chunk boundaries
+6. Nested BinXML (type 0x21) is recursively parsed and spliced as proper `Element` children

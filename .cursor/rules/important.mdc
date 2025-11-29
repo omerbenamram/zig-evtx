@@ -25,6 +25,12 @@ alwaysApply: true
 - They could be nested
 - in case of nesting, some binary fields may not be present.
 
+# Style
+
+## Reading binary data
+    - Always use methods from @reader.zig/value_reader.zig to read binary data.
+        - avoid using std.mem.readInt manually into the byte buffer.
+
 # Python integration
 
 - use `uv` to manage virtualenvs and python integration

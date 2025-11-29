@@ -85,7 +85,6 @@ fn renderAttrValueNodes(nodes: []const IR.Node, writer: *std.Io.Writer) WriterEr
         .Text => |text| try util.writeUtf16LeXmlEscaped(writer, text.utf16, text.num_chars),
         .Pad => {},
         .Value => |val| try writeValueXml(writer, val.vtype, val.bytes),
-        .Subst => {},
         .CharRef => |charref| try writer.print("&#{d};", .{charref}),
         .EntityRef => |name| {
             try writer.writeByte('&');
@@ -103,6 +102,7 @@ fn renderAttrValueNodes(nodes: []const IR.Node, writer: *std.Io.Writer) WriterEr
             try writer.writeAll("?>");
         },
         .Element => {},
+        .Placeholder => unreachable, // ElementTree guarantees no placeholders
     };
 }
 
@@ -113,7 +113,6 @@ fn renderTextContentFromIR(nodes: []const IR.Node, writer: *std.Io.Writer) Write
             .Text => |text| try util.writeUtf16LeXmlEscaped(writer, text.utf16, text.num_chars),
             .Pad => {},
             .Value => |val| try writeValueXml(writer, val.vtype, val.bytes),
-            .Subst => {},
             .CharRef => |charref| try writer.print("&#{d};", .{charref}),
             .EntityRef => |name| {
                 try writer.writeByte('&');
@@ -135,6 +134,7 @@ fn renderTextContentFromIR(nodes: []const IR.Node, writer: *std.Io.Writer) Write
                 try writer.writeAll("?>");
             },
             .Element => {},
+            .Placeholder => unreachable, // ElementTree guarantees no placeholders
         }
     }
 }
@@ -172,7 +172,6 @@ fn renderElementIRXml(element: *const IR.Element, writer: *std.Io.Writer, indent
             .Element => |child_element| {
                 try renderElementIRXml(child_element, writer, indent + 2);
             },
-            .Subst => {},
             else => {
                 try writeSpaces(writer, indent + 2);
                 try renderTextContentFromIR(&[_]IR.Node{node}, writer);
@@ -192,9 +191,8 @@ fn renderElementIRXml(element: *const IR.Element, writer: *std.Io.Writer, indent
 /// Render XML from BinXML with context using concrete std.Io.Writer.
 /// Note: Callers should set logger level before calling if verbose output is needed.
 pub fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, writer: *std.Io.Writer) anyerror!void {
-    var builder = binxml.Builder.init(ctx);
-    const root = try builder.build(chunk, bin);
-    try renderElementIRXml(root, writer, 0);
+    const tree = try binxml.parseRecord(ctx, chunk, bin);
+    try renderElementIRXml(tree.element, writer, 0);
 }
 
 /// Render a single value payload to XML text according to its Binary XML type.

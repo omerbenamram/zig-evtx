@@ -5,10 +5,11 @@
 
 ## Features
 
-- **Cross-platform**: Builds on Linux, macOS, and Windows via Zig 0.14.1
+- **Cross-platform**: Builds on Linux, macOS, and Windows via Zig 0.15
 - **Multiple outputs**: XML, JSON, and JSON Lines (jsonl)
 - **Concurrent parsing**: Multi-threaded mode for throughput; single-threaded for stable order
 - **Python bindings**: Lightweight module via `ziggy-pydust` for streaming results
+- **Type-safe template caching**: Templates are parsed once, cached with placeholder markers, and instantiated efficiently
 
 ## Quick start
 

@@ -105,15 +105,13 @@ pub const OutputWriter = struct {
                 try w.writeAll("{");
                 try w.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
                 if (self.ctx) |ctx| {
-                    var builder = binxml.Builder.init(ctx);
-                    const root = try builder.build(record.chunk_buf, record.raw_xml);
-                    try render_json.renderElementJson(root, ctx.arena.allocator(), w);
+                    const tree = try binxml.parseRecord(ctx, record.chunk_buf, record.raw_xml);
+                    try render_json.renderElementJson(tree.element, ctx.arena.allocator(), w);
                 } else {
                     var local_ctx = try binxml.Context.init(alloc_mod.get());
                     defer local_ctx.deinit();
-                    var builder = binxml.Builder.init(&local_ctx);
-                    const root = try builder.build(record.chunk_buf, record.raw_xml);
-                    try render_json.renderElementJson(root, local_ctx.arena.allocator(), w);
+                    const tree = try binxml.parseRecord(&local_ctx, record.chunk_buf, record.raw_xml);
+                    try render_json.renderElementJson(tree.element, local_ctx.arena.allocator(), w);
                 }
                 try w.writeAll("}\n");
             },
@@ -149,15 +147,13 @@ pub const OutputWriter = struct {
                 try w.writeAll("{");
                 try w.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
                 if (self.ctx) |ctx| {
-                    var builder = binxml.Builder.init(ctx);
-                    const root = try builder.build(record.chunk_buf, record.raw_xml);
-                    try render_json.renderElementJson(root, ctx.arena.allocator(), w);
+                    const tree = try binxml.parseRecord(ctx, record.chunk_buf, record.raw_xml);
+                    try render_json.renderElementJson(tree.element, ctx.arena.allocator(), w);
                 } else {
                     var local_ctx = try binxml.Context.init(alloc_mod.get());
                     defer local_ctx.deinit();
-                    var builder = binxml.Builder.init(&local_ctx);
-                    const root = try builder.build(record.chunk_buf, record.raw_xml);
-                    try render_json.renderElementJson(root, local_ctx.arena.allocator(), w);
+                    const tree = try binxml.parseRecord(&local_ctx, record.chunk_buf, record.raw_xml);
+                    try render_json.renderElementJson(tree.element, local_ctx.arena.allocator(), w);
                 }
                 try w.writeAll("}\n");
             },
