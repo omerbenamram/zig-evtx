@@ -52,9 +52,11 @@ fn ensureMapLocked() *std.StringHashMap(Level) {
 
 var module_levels_inited: bool = false;
 var module_levels: std.StringHashMap(Level) = undefined;
-// After setup, cache pointers for fast lock-free access to known modules
-var evtx_level_ptr: ?*Level = null;
-var binxml_level_ptr: ?*Level = null;
+
+// Atomic cache for known hot modules. Value 0 means "not cached" (Level starts at 1).
+const LEVEL_NOT_CACHED: u8 = 0;
+var evtx_level_cache: std.atomic.Value(u8) = std.atomic.Value(u8).init(LEVEL_NOT_CACHED);
+var binxml_level_cache: std.atomic.Value(u8) = std.atomic.Value(u8).init(LEVEL_NOT_CACHED);
 
 fn cacheModuleLevelLocked(module: []const u8, lvl: Level) void {
     var map = ensureMapLocked();
@@ -62,11 +64,11 @@ fn cacheModuleLevelLocked(module: []const u8, lvl: Level) void {
     const result = map.getOrPut(mod_copy) catch return;
     result.value_ptr.* = lvl;
 
-    // Cache pointers for known hot modules
+    // Update atomic cache for known hot modules
     if (std.mem.eql(u8, module, "evtx")) {
-        evtx_level_ptr = result.value_ptr;
+        evtx_level_cache.store(@intFromEnum(lvl), .release);
     } else if (std.mem.eql(u8, module, "binxml")) {
-        binxml_level_ptr = result.value_ptr;
+        binxml_level_cache.store(@intFromEnum(lvl), .release);
     }
 }
 
@@ -75,8 +77,8 @@ pub fn clearModuleLevelCache() void {
     defer logger_mutex.unlock();
     if (!module_levels_inited) return;
     module_levels.clearRetainingCapacity();
-    evtx_level_ptr = null;
-    binxml_level_ptr = null;
+    evtx_level_cache.store(LEVEL_NOT_CACHED, .release);
+    binxml_level_cache.store(LEVEL_NOT_CACHED, .release);
 }
 
 fn upperModuleName(buf: []u8, module: []const u8) []const u8 {
@@ -106,11 +108,13 @@ fn envKeyForModule(buf: []u8, module: []const u8) []const u8 {
 
 /// Lock-free fast path for known modules
 fn getModuleLevelFast(module: []const u8) ?Level {
-    // Check cached pointers first (lock-free)
+    // Check atomic cache for known hot modules
     if (std.mem.eql(u8, module, "evtx")) {
-        if (evtx_level_ptr) |ptr| return ptr.*;
+        const cached = evtx_level_cache.load(.acquire);
+        if (cached != LEVEL_NOT_CACHED) return @enumFromInt(cached);
     } else if (std.mem.eql(u8, module, "binxml")) {
-        if (binxml_level_ptr) |ptr| return ptr.*;
+        const cached = binxml_level_cache.load(.acquire);
+        if (cached != LEVEL_NOT_CACHED) return @enumFromInt(cached);
     }
     return null;
 }
@@ -219,8 +223,8 @@ pub fn setGlobalLevel(lvl: Level) void {
     global_level_loaded = true;
     if (module_levels_inited) {
         module_levels.clearRetainingCapacity();
-        evtx_level_ptr = null;
-        binxml_level_ptr = null;
+        evtx_level_cache.store(LEVEL_NOT_CACHED, .release);
+        binxml_level_cache.store(LEVEL_NOT_CACHED, .release);
     }
 }
 
