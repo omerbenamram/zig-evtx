@@ -8,16 +8,20 @@ const normalize_xml = @import("normalize_xml.zig");
 const evtx = @import("../parser/evtx/mod.zig");
 const alloc_mod = @import("alloc");
 
+pub const OutputFormat = enum { xml, json };
+
 pub const SnapshotTest = struct {
     name: []const u8,
     description: []const u8,
     evtx_file: []const u8,
     record_id: u64,
     expected_file: []const u8,
+    format: OutputFormat = .xml,
 };
 
 /// All snapshot test definitions
 pub const tests = [_]SnapshotTest{
+    // XML tests
     .{
         .name = "trailing_spaces",
         .description = "String values should have trailing spaces trimmed (e.g., 'Advapi  ' -> 'Advapi')",
@@ -46,6 +50,31 @@ pub const tests = [_]SnapshotTest{
         .record_id = 5,
         .expected_file = "record_5_ansi_string_null.expected.xml",
     },
+    // JSON tests - verify Rust-compatible output format
+    .{
+        .name = "json_basic_structure",
+        .description = "Null elements (Correlation/Security), GUID format (uppercase, no braces), numeric values",
+        .evtx_file = "security.evtx",
+        .record_id = 1,
+        .expected_file = "record_1_json.expected.json",
+        .format = .json,
+    },
+    .{
+        .name = "json_eventdata_flattening",
+        .description = "EventData Data elements should flatten to key-value pairs (Name attr becomes key)",
+        .evtx_file = "security.evtx",
+        .record_id = 2,
+        .expected_file = "record_2_eventdata.expected.json",
+        .format = .json,
+    },
+    .{
+        .name = "json_logon_event",
+        .description = "Full logon event with EventData fields and numeric ProcessID/ThreadID",
+        .evtx_file = "security.evtx",
+        .record_id = 16,
+        .expected_file = "record_16_logon.expected.json",
+        .format = .json,
+    },
 };
 
 pub const TestResult = enum {
@@ -63,8 +92,8 @@ pub const TestOutput = struct {
     expected: ?[]const u8 = null,
 };
 
-/// Get record XML by EventRecordID from an EVTX file.
-fn getRecordById(allocator: std.mem.Allocator, evtx_path: []const u8, record_id: u64) ![]u8 {
+/// Get record output by EventRecordID from an EVTX file.
+fn getRecordById(allocator: std.mem.Allocator, evtx_path: []const u8, record_id: u64, format: OutputFormat) ![]u8 {
     var file = std.fs.cwd().openFile(evtx_path, .{ .mode = .read_only }) catch |err| {
         return err;
     };
@@ -78,7 +107,10 @@ fn getRecordById(allocator: std.mem.Allocator, evtx_path: []const u8, record_id:
     _ = hdr; // We'll iterate all chunks in carve mode
 
     // Create an output writer to serialize records
-    var out = evtx.OutputWriter.initSerializeOnly(.xml);
+    var out = switch (format) {
+        .xml => evtx.OutputWriter.initSerializeOnly(.xml),
+        .json => evtx.OutputWriter.initSerializeOnly(.json_lines),
+    };
     defer out.deinit();
 
     // Create context for parsing
@@ -99,15 +131,31 @@ fn getRecordById(allocator: std.mem.Allocator, evtx_path: []const u8, record_id:
         var rec_iter = chunk.records();
         while (try rec_iter.next()) |rec| {
             if (rec.identifier == record_id) {
-                // Found it! Serialize to XML
+                // Found it! Serialize
                 const bytes = try out.serializeRecord(rec, &ctx);
                 // Copy because the output buffer is reused
-                return try allocator.dupe(u8, bytes);
+                // Trim trailing newline for JSON comparison
+                const trimmed = std.mem.trimRight(u8, bytes, "\n");
+                return try allocator.dupe(u8, trimmed);
             }
         }
     }
 
     return error.RecordNotFound;
+}
+
+/// Normalize JSON by parsing and re-serializing to a canonical form.
+/// This allows comparing pretty-printed vs compact JSON.
+fn normalizeJson(allocator: std.mem.Allocator, json_str: []const u8) ![]u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, json_str, .{}) catch {
+        return error.JsonParseError;
+    };
+    defer parsed.deinit();
+
+    // Use fmt to serialize to canonical form
+    return std.fmt.allocPrint(allocator, "{f}", .{std.json.fmt(parsed.value, .{})}) catch {
+        return error.JsonStringifyError;
+    };
 }
 
 /// Run a single snapshot test.
@@ -135,17 +183,24 @@ pub fn runTest(
     };
 
     // Get actual output
-    const actual_raw = getRecordById(allocator, evtx_path, test_def.record_id) catch |err| {
+    const actual_raw = getRecordById(allocator, evtx_path, test_def.record_id, test_def.format) catch |err| {
         const msg = std.fmt.allocPrint(allocator, "Failed to get record: {s}", .{@errorName(err)}) catch "Parse error";
         return .{ .result = .@"error", .message = msg };
     };
     defer allocator.free(actual_raw);
 
-    // Normalize actual
-    const actual_normalized = normalize_xml.normalize(allocator, actual_raw) catch {
-        return .{ .result = .@"error", .message = "Failed to normalize actual" };
+    // Normalize actual output for comparison
+    const actual_normalized = switch (test_def.format) {
+        .xml => normalize_xml.normalize(allocator, actual_raw) catch {
+            return .{ .result = .@"error", .message = "Failed to normalize actual" };
+        },
+        .json => normalizeJson(allocator, actual_raw) catch {
+            return .{ .result = .@"error", .message = "Failed to normalize actual JSON" };
+        },
     };
     defer allocator.free(actual_normalized);
+
+    const actual_compare = actual_normalized;
 
     if (update_mode) {
         // Write actual to expected file
@@ -170,19 +225,26 @@ pub fn runTest(
     };
     defer allocator.free(expected_raw);
 
-    // Normalize expected
-    const expected_normalized = normalize_xml.normalize(allocator, expected_raw) catch {
-        return .{ .result = .@"error", .message = "Failed to normalize expected" };
+    // Normalize expected output for comparison
+    const expected_normalized = switch (test_def.format) {
+        .xml => normalize_xml.normalize(allocator, expected_raw) catch {
+            return .{ .result = .@"error", .message = "Failed to normalize expected" };
+        },
+        .json => normalizeJson(allocator, std.mem.trimRight(u8, expected_raw, "\n\r \t")) catch {
+            return .{ .result = .@"error", .message = "Failed to normalize expected JSON" };
+        },
     };
     defer allocator.free(expected_normalized);
 
+    const expected_compare = expected_normalized;
+
     // Compare
-    if (std.mem.eql(u8, actual_normalized, expected_normalized)) {
+    if (std.mem.eql(u8, actual_compare, expected_compare)) {
         return .{ .result = .pass };
     } else {
         // Find first difference for helpful output
-        const actual_dupe = allocator.dupe(u8, actual_normalized) catch null;
-        const expected_dupe = allocator.dupe(u8, expected_normalized) catch null;
+        const actual_dupe = allocator.dupe(u8, actual_compare) catch null;
+        const expected_dupe = allocator.dupe(u8, expected_compare) catch null;
         return .{
             .result = .fail,
             .message = "Output differs from expected",

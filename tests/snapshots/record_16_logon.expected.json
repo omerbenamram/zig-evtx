@@ -1,0 +1,59 @@
+{
+    "Event": {
+        "#attributes": {
+            "xmlns": "http://schemas.microsoft.com/win/2004/08/events/event"
+        },
+        "System": {
+            "Provider": {
+                "#attributes": {
+                    "Name": "Microsoft-Windows-Security-Auditing",
+                    "Guid": "54849625-5478-4994-A5BA-3E3B0328C30D"
+                }
+            },
+            "EventID": 4624,
+            "Version": 0,
+            "Level": 0,
+            "Task": 12544,
+            "Opcode": 0,
+            "Keywords": "0x8020000000000000",
+            "TimeCreated": {
+                "#attributes": {
+                    "SystemTime": "2016-07-08T18:12:51.790840Z"
+                }
+            },
+            "EventRecordID": 16,
+            "Correlation": null,
+            "Execution": {
+                "#attributes": {
+                    "ProcessID": 456,
+                    "ThreadID": 508
+                }
+            },
+            "Channel": "Security",
+            "Computer": "37L4247F27-25",
+            "Security": null
+        },
+        "EventData": {
+            "SubjectUserSid": "S-1-5-18",
+            "SubjectUserName": "37L4247F27-25$",
+            "SubjectDomainName": "WORKGROUP",
+            "SubjectLogonId": "0x3e7",
+            "TargetUserSid": "S-1-5-18",
+            "TargetUserName": "SYSTEM",
+            "TargetDomainName": "NT AUTHORITY",
+            "TargetLogonId": "0x3e7",
+            "LogonType": 5,
+            "LogonProcessName": "Advapi",
+            "AuthenticationPackageName": "Negotiate",
+            "WorkstationName": "",
+            "LogonGuid": "00000000-0000-0000-0000-000000000000",
+            "TransmittedServices": "-",
+            "LmPackageName": "-",
+            "KeyLength": 0,
+            "ProcessId": "0x1a0",
+            "ProcessName": "C:\\Windows\\System32\\services.exe",
+            "IpAddress": "-",
+            "IpPort": "-"
+        }
+    }
+}
