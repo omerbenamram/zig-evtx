@@ -9,7 +9,6 @@ const parser_mod = @import("parser.zig");
 
 pub const FileHeader = format.FileHeader;
 pub const Chunk = format.Chunk;
-pub const EventRecordView = format.EventRecordView;
 pub const RecordIterator = format.RecordIterator;
 pub const OutputWriter = output.OutputWriter;
 pub const ParserOptions = parser_mod.ParserOptions;
@@ -106,8 +105,7 @@ pub const RecordStream = struct {
                     continue;
                 }
                 self.selected_including_skips += 1;
-                const view = EventRecordView{ .id = rec.identifier, .timestamp_filetime = rec.written_time, .raw_xml = rec.binxml, .chunk_buf = rec.chunk_buf };
-                const bytes = try self.out.serializeRecord(view, &self.ctx);
+                const bytes = try self.out.serializeRecord(rec, &self.ctx);
                 self.emitted += 1;
                 if (self.opts.max_records != 0 and self.emitted >= self.opts.max_records) {
                     // Mark exhausted so subsequent calls return null

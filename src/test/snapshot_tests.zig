@@ -100,14 +100,7 @@ fn getRecordById(allocator: std.mem.Allocator, evtx_path: []const u8, record_id:
         while (try rec_iter.next()) |rec| {
             if (rec.identifier == record_id) {
                 // Found it! Serialize to XML
-                const view = evtx.EventRecordView{
-                    .id = rec.identifier,
-                    .timestamp_filetime = rec.written_time,
-                    .raw_xml = rec.binxml,
-                    .chunk_buf = rec.chunk_buf,
-                };
-
-                const bytes = try out.serializeRecord(view, &ctx);
+                const bytes = try out.serializeRecord(rec, &ctx);
                 // Copy because the output buffer is reused
                 return try allocator.dupe(u8, bytes);
             }

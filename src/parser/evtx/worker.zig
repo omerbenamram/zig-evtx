@@ -25,7 +25,6 @@ const parser_mod = @import("parser.zig");
 
 pub const FileHeader = format.FileHeader;
 pub const Chunk = format.Chunk;
-pub const EventRecordView = format.EventRecordView;
 pub const OutputWriter = output.OutputWriter;
 pub const ParserOptions = parser_mod.ParserOptions;
 
@@ -45,6 +44,7 @@ const SharedState = struct {
     allocator: std.mem.Allocator,
     opts: ParserOptions,
     out_kind: OutKind,
+    json_opts: output.JsonOptions,
     stdout_file: *std.fs.File,
     write_mutex: *std.Thread.Mutex,
     emitted: *usize,
@@ -59,11 +59,11 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
     const opts = shared.opts;
 
     // Serialize-only mode: we get bytes from serializeRecord and write them manually
-    var out = OutputWriter.initSerializeOnly(switch (shared.out_kind) {
+    var out = OutputWriter.initSerializeOnlyWithOptions(switch (shared.out_kind) {
         .xml => .xml,
         .json_single => .json_single,
         .json_lines => .json_lines,
-    });
+    }, shared.json_opts);
     defer out.deinit();
     var ctx = binxml.Context.init(allocator) catch return;
     defer ctx.deinit();
@@ -99,8 +99,7 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
 
         while (rec_iter.next() catch null) |rec| {
             if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
-            const view = EventRecordView{ .id = rec.identifier, .timestamp_filetime = rec.written_time, .raw_xml = rec.binxml, .chunk_buf = rec.chunk_buf };
-            const bytes = out.serializeRecord(view, &ctx) catch |e| {
+            const bytes = out.serializeRecord(rec, &ctx) catch |e| {
                 log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
                 continue;
             };
@@ -132,8 +131,7 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
             }
 
             selected_including_skips += 1;
-            const view = EventRecordView{ .id = rec.identifier, .timestamp_filetime = rec.written_time, .raw_xml = rec.binxml, .chunk_buf = rec.chunk_buf };
-            const bytes = out.serializeRecord(view, &ctx) catch |e| {
+            const bytes = out.serializeRecord(rec, &ctx) catch |e| {
                 log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
                 continue;
             };
@@ -158,6 +156,7 @@ pub fn parseConcurrent(
     reader: anytype,
     opts: ParserOptions,
     out_kind: OutKind,
+    json_opts: output.JsonOptions,
     num_threads: usize,
 ) !void {
     // Ignore SIGPIPE so we don't crash when stdout closes (e.g., piping to head)
@@ -223,6 +222,7 @@ pub fn parseConcurrent(
         .allocator = allocator,
         .opts = opts,
         .out_kind = out_kind,
+        .json_opts = json_opts,
         .stdout_file = &stdout_file,
         .write_mutex = &write_mutex,
         .emitted = &emitted_count,

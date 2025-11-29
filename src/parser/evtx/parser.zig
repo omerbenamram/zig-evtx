@@ -7,10 +7,10 @@ const log = logger.scoped("evtx");
 
 const format = @import("format.zig");
 const worker = @import("worker.zig");
+const output = @import("output.zig");
 
 pub const FileHeader = format.FileHeader;
 pub const Chunk = format.Chunk;
-pub const EventRecordView = format.EventRecordView;
 
 pub const ParserOptions = struct {
     validate_checksums: bool = true,
@@ -101,8 +101,7 @@ pub const EvtxParser = struct {
                     continue;
                 }
                 selected_including_skips += 1;
-                const view = EventRecordView{ .id = rec.identifier, .timestamp_filetime = rec.written_time, .raw_xml = rec.binxml, .chunk_buf = rec.chunk_buf };
-                const bytes = out_mut.serializeRecord(view, &ctx) catch |e| {
+                const bytes = out_mut.serializeRecord(rec, &ctx) catch |e| {
                     failed += 1;
                     log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
                     // If isolating with skip_first, respect -n even when the selected record fails
@@ -126,12 +125,13 @@ pub const EvtxParser = struct {
     }
 
     /// Concurrent parsing entry point: read chunks sequentially, parse in a thread pool, and stream outputs to stdout.
-    pub fn parseConcurrent(self: *EvtxParser, reader: anytype, out_kind: OutKind, num_threads: usize) !void {
+    pub fn parseConcurrent(self: *EvtxParser, reader: anytype, out_kind: OutKind, json_opts: output.JsonOptions, num_threads: usize) !void {
         try worker.parseConcurrent(
             self.allocator,
             reader,
             self.opts,
             out_kind,
+            json_opts,
             num_threads,
         );
     }
