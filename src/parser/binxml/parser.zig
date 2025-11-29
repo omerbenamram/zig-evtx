@@ -175,7 +175,7 @@ fn parseTemplateInstance(ctx: *Context, chunk: []const u8, bin: []const u8, star
     // Read template instance header using proper struct reading
     const header = try r.readStruct(types.TemplateInstanceStart);
 
-    if ((header.token & 0x1f) != tokens.TOK_TEMPLATE_INSTANCE) {
+    if (tokens.baseToken(header.token) != tokens.TOK_TEMPLATE_INSTANCE) {
         return error.BadToken;
     }
 
@@ -369,7 +369,7 @@ fn parseElementIRImpl(ps: *ParseState) !*IR.Element {
         const token = ps.r.peekByte() catch break;
         if (log.enabled(.trace)) log.trace("content token 0x{x} at 0x{x}/0x{x}", .{ token, ps.r.pos, element_end_pos });
 
-        switch (token & 0x1f) {
+        switch (tokens.baseToken(token)) {
             tokens.TOK_END_ELEMENT => {
                 _ = try ps.r.readInt(u8); // Consume EndElement
                 break;
@@ -443,7 +443,7 @@ fn collectValueTokens(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: us
         const pk = ps.r.peekByte() catch break;
         if (log.enabled(.trace)) log.trace("valtok pk=0x{x} at 0x{x}", .{ pk, ps.r.pos });
 
-        switch (pk & 0x1f) {
+        switch (tokens.baseToken(pk)) {
             tokens.TOK_ATTRIBUTE, tokens.TOK_CLOSE_START, tokens.TOK_CLOSE_EMPTY => break,
             tokens.TOK_VALUE => {
                 try parseValueToken(ps, out, end_pos);

@@ -15,10 +15,19 @@ pub const TOK_ENTITYREF: u8 = 0x09; // or 0x49 with has-more flag
 pub const TOK_PITARGET: u8 = 0x0a;
 pub const TOK_PIDATA: u8 = 0x0b;
 
-pub inline fn hasMore(flagged: u8, base: u8) bool {
-    return (flagged & 0x1f) == base and (flagged & 0x40) != 0;
-}
-pub inline fn isToken(flagged: u8, base: u8) bool {
-    return (flagged & 0x1f) == base;
+/// Mask to extract base token type (bits 0-4), stripping flags.
+pub const TOKEN_MASK: u8 = 0x1f;
+/// Flag indicating more data follows (bit 6).
+pub const HAS_MORE_FLAG: u8 = 0x40;
+
+/// Extract the base token type from a potentially flagged byte.
+pub inline fn baseToken(flagged: u8) u8 {
+    return flagged & TOKEN_MASK;
 }
 
+pub inline fn hasMore(flagged: u8, base: u8) bool {
+    return baseToken(flagged) == base and (flagged & HAS_MORE_FLAG) != 0;
+}
+pub inline fn isToken(flagged: u8, base: u8) bool {
+    return baseToken(flagged) == base;
+}
