@@ -53,23 +53,11 @@ fn ensureMapLocked() *std.StringHashMap(Level) {
 var module_levels_inited: bool = false;
 var module_levels: std.StringHashMap(Level) = undefined;
 
-// Atomic cache for known hot modules. Value 0 means "not cached" (Level starts at 1).
-const LEVEL_NOT_CACHED: u8 = 0;
-var evtx_level_cache: std.atomic.Value(u8) = std.atomic.Value(u8).init(LEVEL_NOT_CACHED);
-var binxml_level_cache: std.atomic.Value(u8) = std.atomic.Value(u8).init(LEVEL_NOT_CACHED);
-
 fn cacheModuleLevelLocked(module: []const u8, lvl: Level) void {
     var map = ensureMapLocked();
     const mod_copy = alloc_mod.get().dupe(u8, module) catch return;
     const result = map.getOrPut(mod_copy) catch return;
     result.value_ptr.* = lvl;
-
-    // Update atomic cache for known hot modules
-    if (std.mem.eql(u8, module, "evtx")) {
-        evtx_level_cache.store(@intFromEnum(lvl), .release);
-    } else if (std.mem.eql(u8, module, "binxml")) {
-        binxml_level_cache.store(@intFromEnum(lvl), .release);
-    }
 }
 
 pub fn clearModuleLevelCache() void {
@@ -77,8 +65,6 @@ pub fn clearModuleLevelCache() void {
     defer logger_mutex.unlock();
     if (!module_levels_inited) return;
     module_levels.clearRetainingCapacity();
-    evtx_level_cache.store(LEVEL_NOT_CACHED, .release);
-    binxml_level_cache.store(LEVEL_NOT_CACHED, .release);
 }
 
 fn upperModuleName(buf: []u8, module: []const u8) []const u8 {
@@ -106,21 +92,7 @@ fn envKeyForModule(buf: []u8, module: []const u8) []const u8 {
     return buf[0 .. i + u.len];
 }
 
-/// Lock-free fast path for known modules
-fn getModuleLevelFast(module: []const u8) ?Level {
-    // Check atomic cache for known hot modules
-    if (std.mem.eql(u8, module, "evtx")) {
-        const cached = evtx_level_cache.load(.acquire);
-        if (cached != LEVEL_NOT_CACHED) return @enumFromInt(cached);
-    } else if (std.mem.eql(u8, module, "binxml")) {
-        const cached = binxml_level_cache.load(.acquire);
-        if (cached != LEVEL_NOT_CACHED) return @enumFromInt(cached);
-    }
-    return null;
-}
-
-/// Slow path with locking
-fn getModuleLevelSlow(module: []const u8) Level {
+fn getModuleLevel(module: []const u8) Level {
     logger_mutex.lock();
     defer logger_mutex.unlock();
 
@@ -145,13 +117,6 @@ fn getModuleLevelSlow(module: []const u8) Level {
     const global = @as(Level, @enumFromInt(global_level_atomic.load(.acquire)));
     cacheModuleLevelLocked(module, global);
     return global;
-}
-
-fn getModuleLevel(module: []const u8) Level {
-    // Fast path: check cached pointers (lock-free)
-    if (getModuleLevelFast(module)) |lvl| return lvl;
-    // Slow path: use locking
-    return getModuleLevelSlow(module);
 }
 
 fn levelTag(lvl: Level) []const u8 {
@@ -223,8 +188,6 @@ pub fn setGlobalLevel(lvl: Level) void {
     global_level_loaded = true;
     if (module_levels_inited) {
         module_levels.clearRetainingCapacity();
-        evtx_level_cache.store(LEVEL_NOT_CACHED, .release);
-        binxml_level_cache.store(LEVEL_NOT_CACHED, .release);
     }
 }
 
