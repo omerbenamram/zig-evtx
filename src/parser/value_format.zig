@@ -2,7 +2,7 @@
 //! Uses concrete std.Io.Writer interface for better performance.
 
 const std = @import("std");
-const vr = @import("binxml/value_reader.zig");
+const reader = @import("reader.zig");
 const ValueType = @import("binxml/types.zig").ValueType;
 const util = @import("util.zig");
 
@@ -16,7 +16,7 @@ const util = @import("util.zig");
 pub const WriterError = std.Io.Writer.Error;
 
 /// Format a GUID as XML to concrete std.Io.Writer.
-pub fn formatGuidXml(w: *std.Io.Writer, guid: vr.Guid) WriterError!void {
+pub fn formatGuidXml(w: *std.Io.Writer, guid: reader.Guid) WriterError!void {
     try w.print("{{{x:0>8}-{x:0>4}-{x:0>4}-{x:0>2}{x:0>2}-{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}{x:0>2}}}", .{
         guid.data1,
         guid.data2,
@@ -33,7 +33,7 @@ pub fn formatGuidXml(w: *std.Io.Writer, guid: vr.Guid) WriterError!void {
 }
 
 /// Format a SID as XML to concrete std.Io.Writer.
-pub fn formatSidXml(w: *std.Io.Writer, sid: vr.Sid) WriterError!void {
+pub fn formatSidXml(w: *std.Io.Writer, sid: reader.Sid) WriterError!void {
     try w.print("S-{d}-{d}", .{ sid.revision, sid.id_authority });
     var i: usize = 0;
     while (i < sid.sub_authority_count) : (i += 1) {
@@ -44,14 +44,14 @@ pub fn formatSidXml(w: *std.Io.Writer, sid: vr.Sid) WriterError!void {
 }
 
 /// Format a FILETIME as ISO8601 UTC string to concrete std.Io.Writer.
-pub fn formatFileTimeXml(w: *std.Io.Writer, ft: vr.FileTime) WriterError!void {
+pub fn formatFileTimeXml(w: *std.Io.Writer, ft: reader.FileTime) WriterError!void {
     var buf: [40]u8 = undefined;
     const out = util.formatIso8601UtcFromFiletimeMicros(&buf, ft.raw) catch return;
     try w.writeAll(out);
 }
 
 /// Format a SYSTEMTIME as ISO8601 string to concrete std.Io.Writer.
-pub fn formatSystemTimeXml(w: *std.Io.Writer, st: vr.SystemTime) WriterError!void {
+pub fn formatSystemTimeXml(w: *std.Io.Writer, st: reader.SystemTime) WriterError!void {
     var buf: [32]u8 = undefined;
     const slice = std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
         st.year,
@@ -75,7 +75,7 @@ pub fn formatDecimal(w: *std.Io.Writer, comptime T: type, value: T) WriterError!
 /// Read and format an integer to concrete std.Io.Writer.
 /// Does nothing if data is too short for the requested type.
 fn readAndFormatInt(w: *std.Io.Writer, comptime T: type, data: []const u8) WriterError!void {
-    if (vr.readValue(T, data)) |v| {
+    if (reader.readValue(T, data)) |v| {
         try formatDecimal(w, T, v);
     }
 }
@@ -159,28 +159,28 @@ pub fn formatValueXml(w: *std.Io.Writer, vtype: ValueType, data: []const u8) Wri
         .uint32 => try readAndFormatInt(w, u32, data),
         .int64 => try readAndFormatInt(w, i64, data),
         .uint64 => try readAndFormatInt(w, u64, data),
-        .real32 => if (vr.readValue(f32, data)) |f| try formatFloat32Xml(w, f),
-        .real64 => if (vr.readValue(f64, data)) |f| try formatFloat64Xml(w, f),
-        .bool => if (vr.readValue(bool, data)) |b| try formatBool(w, b),
+        .real32 => if (reader.readValue(f32, data)) |f| try formatFloat32Xml(w, f),
+        .real64 => if (reader.readValue(f64, data)) |f| try formatFloat64Xml(w, f),
+        .bool => if (reader.readValue(bool, data)) |b| try formatBool(w, b),
         .binary => try formatHexBytesUpper(w, data),
-        .guid => if (vr.readGuid(data)) |g| try formatGuidXml(w, g),
+        .guid => if (reader.readGuid(data)) |g| try formatGuidXml(w, g),
         .size_t => {
             if (data.len >= 8) {
-                if (vr.readValue(u64, data)) |v| try formatHexUpper(w, u64, v);
+                if (reader.readValue(u64, data)) |v| try formatHexUpper(w, u64, v);
             } else if (data.len >= 4) {
-                if (vr.readValue(u32, data)) |v| try formatHexUpper(w, u32, v);
+                if (reader.readValue(u32, data)) |v| try formatHexUpper(w, u32, v);
             }
         },
-        .filetime => if (vr.readFileTime(data)) |ft| try formatFileTimeXml(w, ft),
-        .systime => if (vr.readSystemTime(data)) |st| try formatSystemTimeXml(w, st),
-        .sid => if (vr.readSid(data)) |s| try formatSidXml(w, s),
-        .hex_int32 => if (vr.readValue(u32, data)) |v| try formatHexUpper(w, u32, v),
-        .hex_int64 => if (vr.readValue(u64, data)) |v| try formatHexUpper(w, u64, v),
+        .filetime => if (reader.readFileTime(data)) |ft| try formatFileTimeXml(w, ft),
+        .systime => if (reader.readSystemTime(data)) |st| try formatSystemTimeXml(w, st),
+        .sid => if (reader.readSid(data)) |s| try formatSidXml(w, s),
+        .hex_int32 => if (reader.readValue(u32, data)) |v| try formatHexUpper(w, u32, v),
+        .hex_int64 => if (reader.readValue(u64, data)) |v| try formatHexUpper(w, u64, v),
         .evt_handle => {
             if (data.len >= 8) {
-                if (vr.readValue(u64, data)) |v| try formatDecimal(w, u64, v);
+                if (reader.readValue(u64, data)) |v| try formatDecimal(w, u64, v);
             } else if (data.len >= 4) {
-                if (vr.readValue(u32, data)) |v| try formatDecimal(w, u32, v);
+                if (reader.readValue(u32, data)) |v| try formatDecimal(w, u32, v);
             }
         },
         .bin_xml => {},
@@ -190,8 +190,8 @@ pub fn formatValueXml(w: *std.Io.Writer, vtype: ValueType, data: []const u8) Wri
 
 /// Convenience: format from raw u8 type code for XML to concrete std.Io.Writer.
 pub fn formatValueXmlFromRaw(w: *std.Io.Writer, raw_type: u8, data: []const u8) WriterError!void {
-    const is_array = (raw_type & ValueType.ARRAY_FLAG) != 0;
-    const base = raw_type & 0x7F;
+    const is_array = ValueType.isArray(raw_type);
+    const base = ValueType.baseType(raw_type);
 
     // Handle string arrays specially: split by null, join with comma
     if (is_array) {
@@ -284,7 +284,7 @@ test "formatGuidXml produces correct output" {
     };
     var buf: [64]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try formatGuidXml(&w, vr.readGuid(&data).?);
+    try formatGuidXml(&w, reader.readGuid(&data).?);
     try std.testing.expectEqualStrings("{12345678-1234-5678-1234-567812345678}", buf[0..w.end]);
 }
 
@@ -298,7 +298,7 @@ test "formatGuidJson includes quotes" {
     var buf: [72]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     try w.writeByte('"');
-    try formatGuidXml(&w, vr.readGuid(&data).?);
+    try formatGuidXml(&w, reader.readGuid(&data).?);
     try w.writeByte('"');
     try std.testing.expectEqualStrings("\"{12345678-1234-5678-1234-567812345678}\"", buf[0..w.end]);
 }
@@ -313,7 +313,7 @@ test "formatSidXml formats SYSTEM SID" {
     };
     var buf: [32]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try formatSidXml(&w, vr.readSid(&data).?);
+    try formatSidXml(&w, reader.readSid(&data).?);
     try std.testing.expectEqualStrings("S-1-5-18", buf[0..w.end]);
 }
 
@@ -331,7 +331,7 @@ test "formatSidXml formats multi-subauth SID" {
     };
     var buf: [64]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try formatSidXml(&w, vr.readSid(&data).?);
+    try formatSidXml(&w, reader.readSid(&data).?);
     try std.testing.expectEqualStrings("S-1-5-21-100-200-300-1001", buf[0..w.end]);
 }
 
@@ -340,7 +340,7 @@ test "formatFileTimeXml formats timestamp" {
     const data = [_]u8{ 0x00, 0x80, 0x3E, 0xD5, 0xDE, 0xB1, 0x9D, 0x01 };
     var buf: [40]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    const ft = vr.readFileTime(&data).?;
+    const ft = reader.readFileTime(&data).?;
     try formatFileTimeXml(&w, ft);
     // Should produce some output (either ISO8601 or raw number)
     try std.testing.expect(w.end > 0);
@@ -360,7 +360,7 @@ test "formatSystemTimeXml formats correctly" {
     };
     var buf: [32]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try formatSystemTimeXml(&w, vr.readSystemTime(&data).?);
+    try formatSystemTimeXml(&w, reader.readSystemTime(&data).?);
     try std.testing.expectEqualStrings("2024-01-15T10:30:45.123Z", buf[0..w.end]);
 }
 

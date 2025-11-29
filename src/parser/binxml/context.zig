@@ -149,12 +149,12 @@ fn resolvePlaceholder(
     const val = values[ph.id];
 
     // Skip optional empty substitutions
-    if (ph.optional and (val.t == 0x00 or val.data.len == 0)) {
+    if (ph.optional and (types.ValueType.isNull(val.t) or val.data.len == 0)) {
         return;
     }
 
-    const is_array = (ph.vtype & types.ValueType.ARRAY_FLAG) != 0;
-    const base_type = ph.vtype & 0x7f;
+    const is_array = types.ValueType.isArray(ph.vtype);
+    const base_type = types.ValueType.baseType(ph.vtype);
 
     if (is_array) {
         try resolveArrayValue(base_type, val, allocator, out);
@@ -172,8 +172,8 @@ fn resolveSingleValue(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(IR.Node),
 ) !void {
-    // Nested BinXML (type 0x21) - recursively parse and splice
-    if ((val.t & 0x7f) == 0x21 and val.data.len > 0) {
+    // Nested BinXML - recursively parse and splice
+    if (types.ValueType.isBinXml(val.t) and val.data.len > 0) {
         // Import parser module for nested parsing
         const parser = @import("parser.zig");
         try parser.parseNestedBinXmlIntoResolved(chunk, val.data, ctx, allocator, out);

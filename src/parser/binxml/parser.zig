@@ -289,8 +289,8 @@ pub fn parseTemplateInstanceValues(r: *Reader, allocator: std.mem.Allocator) ![]
         const slice = r.buf[r.pos .. r.pos + need];
         r.pos += need;
 
-        values[i] = if (vtype == 0x00)
-            .{ .t = 0x00, .data = &[_]u8{} }
+        values[i] = if (types.ValueType.isNull(vtype))
+            .{ .t = @intFromEnum(types.ValueType.null), .data = &[_]u8{} }
         else
             .{ .t = vtype, .data = slice };
 
@@ -449,7 +449,7 @@ fn collectValueTokens(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: us
                 try parseValueToken(ps, out, end_pos);
             },
             tokens.TOK_NORMAL_SUBST, tokens.TOK_OPTIONAL_SUBST => {
-                const h = try readHeaderChecked(ps.r, types.SubstitutionHeader, end_pos);
+                const h = try ps.r.readStructBounded(types.SubstitutionHeader, end_pos);
                 const optional = tokens.isToken(h.token, tokens.TOK_OPTIONAL_SUBST);
 
                 if (ps.has_dep_id) {
@@ -464,7 +464,7 @@ fn collectValueTokens(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: us
                 }
             },
             tokens.TOK_CHARREF => {
-                const h = try readHeaderChecked(ps.r, types.CharRefHeader, end_pos);
+                const h = try ps.r.readStructBounded(types.CharRefHeader, end_pos);
                 try out.append(ps.alloc(), .{ .CharRef = h.value });
             },
             tokens.TOK_ENTITYREF => {
@@ -524,12 +524,6 @@ pub fn parseNestedBinXmlIntoResolved(
 
 // --- Individual Token Parsers ---
 
-/// Helper to read a header struct after bounds checking.
-fn readHeaderChecked(r: *Reader, comptime H: type, end_pos: usize) !H {
-    if (r.pos + @sizeOf(H) > end_pos) return BinXmlError.UnexpectedEof;
-    return r.readStruct(H);
-}
-
 /// Generic helper for tokens containing a simple Name payload (PITarget, EntityRef).
 fn parseNameToken(
     comptime Tag: IR.NodeTag,
@@ -538,7 +532,7 @@ fn parseNameToken(
     end_pos: usize,
 ) !void {
     // All these tokens start with a basic TokenHeader
-    _ = try readHeaderChecked(ps.r, types.TokenHeader, end_pos);
+    _ = try ps.r.readStructBounded(types.TokenHeader, end_pos);
     const nm = try readNameIRBounded(ps, end_pos);
 
     const node: IR.Node = switch (Tag) {
@@ -557,7 +551,7 @@ fn parseStringToken(
     allocator: std.mem.Allocator,
     end_pos: usize,
 ) !void {
-    _ = try readHeaderChecked(r, types.TokenHeader, end_pos);
+    _ = try r.readStructBounded(types.TokenHeader, end_pos);
     const data = try r.readLenPrefixedSlice(u16, 2, end_pos);
     const payload = IR.TextPayload{ .utf16 = data, .num_chars = data.len / 2 };
     const node: IR.Node = switch (Tag) {
@@ -569,40 +563,43 @@ fn parseStringToken(
 }
 
 fn parseValueToken(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize) !void {
-    const h = try readHeaderChecked(ps.r, types.ValueTokenHeader, end_pos);
-    const vtype = h.vtype;
+    const h = try ps.r.readStructBounded(types.ValueTokenHeader, end_pos);
 
-    if (log.enabled(.trace)) log.trace("  vtype=0x{x}", .{vtype});
+    if (log.enabled(.trace)) log.trace("  vtype=0x{x}", .{h.vtype});
 
-    // BinXML type (0x21) or Array (0xA1)
-    if ((vtype & 0x7f) == 0x21) {
-        if (ps.r.pos + 2 > end_pos) return BinXmlError.UnexpectedEof;
-        const blen = try ps.r.readInt(u16);
-        if (ps.r.pos + @as(usize, blen) > end_pos) return BinXmlError.UnexpectedEof;
-        try out.append(ps.alloc(), .{ .Value = .{ .vtype = vtype, .bytes = ps.r.buf[ps.r.pos .. ps.r.pos + blen] } });
-        ps.r.pos += blen;
+    // BinXML type (or array of BinXML)
+    if (h.vt.isBinXml()) {
+        const blen = try ps.r.readIntBounded(u16, end_pos);
+        const payload = try ps.r.readSliceBounded(blen, end_pos);
+        try out.append(ps.alloc(), .{ .Value = .{ .vtype = h.vtype, .bytes = payload } });
         return;
     }
 
-    switch (vtype) {
-        0x01 => { // String
+    // Convert raw vtype to enum for semantic switching
+    const base_type = h.vt.valueType() orelse {
+        log.err("unknown value vtype=0x{x} at pos=0x{x} has_dep_id={}", .{ h.vtype, ps.r.pos, ps.has_dep_id });
+        return BinXmlError.BadToken;
+    };
+
+    switch (base_type) {
+        .string => {
             const text = try ps.r.readLenPrefixedSlice(u16, 2, end_pos);
             try out.append(ps.alloc(), .{ .Text = .{ .utf16 = text, .num_chars = text.len / 2 } });
         },
-        0x02, 0x0e => { // Ansi String, Binary
+        .ansi_string, .binary => {
             const payload = try ps.r.readLenPrefixedSlice(u16, 1, end_pos);
-            try out.append(ps.alloc(), .{ .Value = .{ .vtype = vtype, .bytes = payload } });
+            try out.append(ps.alloc(), .{ .Value = .{ .vtype = h.vtype, .bytes = payload } });
         },
-        0x13 => { // SID
+        .sid => {
             const payload = try ps.r.readSidBytesBounded(end_pos);
-            try out.append(ps.alloc(), .{ .Value = .{ .vtype = vtype, .bytes = payload } });
+            try out.append(ps.alloc(), .{ .Value = .{ .vtype = h.vtype, .bytes = payload } });
         },
         else => {
-            if (types.ValueType.fixedSizeFromRaw(vtype)) |sz| {
+            if (base_type.fixedSize()) |sz| {
                 const payload = try ps.r.readFixedBytesBounded(sz, end_pos);
-                try out.append(ps.alloc(), .{ .Value = .{ .vtype = vtype, .bytes = payload } });
+                try out.append(ps.alloc(), .{ .Value = .{ .vtype = h.vtype, .bytes = payload } });
             } else {
-                log.err("unknown value vtype=0x{x} at pos=0x{x} has_dep_id={}", .{ vtype, ps.r.pos, ps.has_dep_id });
+                log.err("unhandled variable-length vtype=0x{x} at pos=0x{x}", .{ h.vtype, ps.r.pos });
                 return BinXmlError.BadToken;
             }
         },
