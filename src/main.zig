@@ -20,6 +20,7 @@ pub fn main() !void {
     var max_records: usize = 0;
     var skip_first: usize = 0;
     var validate_checksums: bool = true;
+    var carve: bool = false;
     var threads_opt: ?usize = null;
 
     while (args_iter.next()) |arg| {
@@ -42,6 +43,8 @@ pub fn main() !void {
             skip_first = try std.fmt.parseUnsigned(usize, s_str, 10);
         } else if (std.mem.eql(u8, arg, "--no-checks")) {
             validate_checksums = false;
+        } else if (std.mem.eql(u8, arg, "--carve")) {
+            carve = true;
         } else if (std.mem.eql(u8, arg, "-t")) {
             const t_str = args_iter.next() orelse return error.InvalidArgs;
             threads_opt = try std.fmt.parseUnsigned(usize, t_str, 10);
@@ -60,7 +63,7 @@ pub fn main() !void {
     var read_buf: [8192]u8 = undefined;
     var reader = file.reader(&read_buf);
 
-    var parser = try evtx.EvtxParser.init(allocator, .{ .validate_checksums = validate_checksums, .verbosity = verbosity, .max_records = max_records, .skip_first = skip_first });
+    var parser = try evtx.EvtxParser.init(allocator, .{ .validate_checksums = validate_checksums, .verbosity = verbosity, .max_records = max_records, .skip_first = skip_first, .carve = carve });
     defer parser.deinit();
 
     const cpu_count = try std.Thread.getCpuCount();
@@ -113,6 +116,7 @@ fn printHelpAndExit(to_stderr: bool, exit_code: u8) noreturn {
         \\  -n N                Stop after N records (0 = all)
         \\  -s N                Skip first N records
         \\  --no-checks         Disable EVTX checksum validation
+        \\  --carve             Scan all chunks until EOF (ignore header's chunk count)
         \\  -t NUM_THREADS      Override number of worker threads (default: CPU count)
         \\
         \\Examples:

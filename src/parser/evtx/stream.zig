@@ -36,6 +36,7 @@ pub const RecordStream = struct {
     chunk_index: usize = 0,
     ctx: binxml.Context,
     have_iter: bool = false,
+    exhausted: bool = false,
     current_chunk: Chunk = undefined,
     rec_iter: RecordIterator = undefined,
     selected_including_skips: usize = 0,
@@ -72,11 +73,16 @@ pub const RecordStream = struct {
     }
 
     fn ensureIterator(self: *RecordStream) !bool {
+        if (self.exhausted) return false;
         if (self.have_iter) return true;
-        if (self.chunk_index >= self.hdr.core.num_chunks) return false;
+        // In carve mode, scan until EOF/invalid signature. Otherwise, trust header's num_chunks.
+        if (!self.opts.carve and self.chunk_index >= self.hdr.core.num_chunks) return false;
 
         // Strictly sequential: read next chunk from the same reader
-        self.current_chunk = try Chunk.read(self);
+        self.current_chunk = Chunk.read(self) catch |e| switch (e) {
+            error.EndOfStream, error.BadChunkSignature => return false,
+            else => return e,
+        };
         if (self.opts.validate_checksums) try self.current_chunk.validateChecksums();
         // Prepare per-chunk context and iterator
         self.ctx.resetPerChunk();
@@ -103,7 +109,7 @@ pub const RecordStream = struct {
                 self.emitted += 1;
                 if (self.opts.max_records != 0 and self.emitted >= self.opts.max_records) {
                     // Mark exhausted so subsequent calls return null
-                    self.chunk_index = self.hdr.core.num_chunks;
+                    self.exhausted = true;
                 }
                 return bytes;
             } else {
@@ -122,4 +128,5 @@ pub const ParserOptions = struct {
     verbosity: u8 = 0,
     max_records: usize = 0,
     skip_first: usize = 0,
+    carve: bool = false,
 };

@@ -24,6 +24,9 @@ pub const ParserOptions = struct {
     max_records: usize = 0,
     // number of records to skip before emitting any output
     skip_first: usize = 0,
+    // When true, scan all valid chunks until EOF instead of trusting header's num_chunks.
+    // Useful for files with corrupted headers or for carving chunks from disk images.
+    carve: bool = false,
 };
 
 pub const EvtxParser = struct {
@@ -60,7 +63,7 @@ pub const EvtxParser = struct {
                 log.info("reading file header...", .{});
             },
         }
-        var hdr: FileHeader = try FileHeader.read(reader);
+        const hdr: FileHeader = try FileHeader.read(reader);
         if (self.opts.validate_checksums) try hdr.validateChecksum();
 
         var chunk_index: usize = 0;
@@ -71,8 +74,13 @@ pub const EvtxParser = struct {
         defer ctx.deinit();
         // We need a mutable output to retain and reuse scratch capacity across records
         var out_mut = out;
-        while (chunk_index < hdr.core.num_chunks) : (chunk_index += 1) {
-            var chunk = try Chunk.read(reader);
+        // In carve mode, scan all valid chunks until EOF or invalid signature.
+        // Otherwise, trust the header's num_chunks field.
+        while (self.opts.carve or chunk_index < hdr.core.num_chunks) : (chunk_index += 1) {
+            const chunk = Chunk.read(reader) catch |e| switch (e) {
+                error.EndOfStream, error.BadChunkSignature => break,
+                else => return e,
+            };
             if (self.opts.verbosity >= 1) log.info("chunk {d}: free_off=0x{x}, last_rec_off=0x{x}", .{ chunk_index, chunk.header.free_space_offset, chunk.header.last_event_record_offset });
             if (self.opts.validate_checksums) try chunk.validateChecksums();
             ctx.resetPerChunk();
@@ -124,6 +132,7 @@ pub const EvtxParser = struct {
                 .verbosity = self.opts.verbosity,
                 .max_records = self.opts.max_records,
                 .skip_first = self.opts.skip_first,
+                .carve = self.opts.carve,
             },
             out_kind,
             num_threads,

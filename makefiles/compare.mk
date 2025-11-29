@@ -35,7 +35,7 @@ xml-all-zig: build-zig
 	@if [ -z "$(FILE)" ]; then echo "Usage: make xml-all-zig FILE=path/to/file.evtx"; exit 1; fi; \
 	mkdir -p $(OUT_DIR); \
 	name=$$(basename "$(FILE)"); \
-	args="-o xml -t 1"; \
+	args="-o xml -t 1 --carve"; \
 	if [ "$(VERBOSE)" = "1" ]; then args="$$args -v"; fi; \
 	zig-out/bin/evtx_dump_zig $$args "$(FILE)" 2> "$(OUT_DIR)/$$name.zig.log" | tee "$(OUT_DIR)/$$name.zig.xml" > /dev/null
 

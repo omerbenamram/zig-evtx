@@ -34,6 +34,7 @@ pub const ParserOptions = struct {
     verbosity: u8 = 0,
     max_records: usize = 0,
     skip_first: usize = 0,
+    carve: bool = false,
 };
 
 /// Shared state for concurrent chunk processing.
@@ -197,11 +198,16 @@ pub fn parseConcurrent(
     };
 
     // Producer: read chunks sequentially and dispatch to pool
+    // In carve mode, scan all valid chunks until EOF or invalid signature.
+    // Otherwise, trust the header's num_chunks field.
     var chunk_index: usize = 0;
-    while (chunk_index < hdr.core.num_chunks) : (chunk_index += 1) {
-        const chunk = Chunk.read(reader) catch |e| {
-            log.err("failed to read chunk {d}: {s}", .{ chunk_index, @errorName(e) });
-            break;
+    while (opts.carve or chunk_index < hdr.core.num_chunks) : (chunk_index += 1) {
+        const chunk = Chunk.read(reader) catch |e| switch (e) {
+            error.EndOfStream, error.BadChunkSignature => break,
+            else => {
+                log.err("failed to read chunk {d}: {s}", .{ chunk_index, @errorName(e) });
+                break;
+            },
         };
 
         // Dispatch to thread pool with WaitGroup tracking
