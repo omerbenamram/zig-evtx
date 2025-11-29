@@ -146,3 +146,10 @@ fn printHelpAndExit(to_stderr: bool, exit_code: u8) noreturn {
 }
 
 const OutputMode = enum { xml, json, jsonl };
+
+// Test imports - Zig discovers test blocks transitively from imports.
+// These bring in test-only modules not used by the main code path.
+test {
+    _ = @import("parser/util_simd_test.zig");
+    _ = @import("test/snapshot_tests.zig");
+}

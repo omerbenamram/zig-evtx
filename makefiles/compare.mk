@@ -1,4 +1,4 @@
-.PHONY: install-evtx xml-rs xml-zig compare-first xml-all-rs xml-all-zig compare-all compare-normalized record compare-time time-zig time-rust hexdump snapshot-test snapshot-update
+.PHONY: install-evtx xml-rs xml-zig compare-first xml-all-rs xml-all-zig compare-all record compare-time time-zig time-rust hexdump snapshot-update
 
 EVTX_DUMP ?= evtx_dump
 OUT_DIR ?= out
@@ -137,36 +137,7 @@ hexdump:
 	if [ -n "$(LIMIT)" ]; then args="$$args --limit $(LIMIT)"; fi; \
 	$(PYTHON) scripts/record_hexdump.py $$args
 
-# Deep-normalize and compare outputs (handles all cosmetic differences)
-# Uses Python normalizer for GUID braces/case, empty attrs, hex case, whitespace
-compare-normalized: xml-all-rs xml-all-zig
-	@set -e; \
-	name=$$(basename "$(FILE)"); \
-	rs_raw="$(OUT_DIR)/$$name.rs.xml"; \
-	zig_raw="$(OUT_DIR)/$$name.zig.xml"; \
-	rs_norm="$(OUT_DIR)/$$name.rs.deep.xml"; \
-	zig_norm="$(OUT_DIR)/$$name.zig.deep.xml"; \
-	$(call NORMALIZE_XML,$$rs_raw) | $(PYTHON) scripts/normalize_xml.py --stdin > "$$rs_norm"; \
-	$(call NORMALIZE_XML,$$zig_raw) | $(PYTHON) scripts/normalize_xml.py --stdin > "$$zig_norm"; \
-	rs_cnt=$$(grep -Ec "<Event( |>)" "$$rs_norm" || true); \
-	zig_cnt=$$(grep -Ec "<Event( |>)" "$$zig_norm" || true); \
-	echo "Record counts -> rust: $$rs_cnt | zig: $$zig_cnt"; \
-	if diff -q "$$rs_norm" "$$zig_norm" >/dev/null 2>&1; then \
-	  echo "MATCH! Outputs are semantically identical."; \
-	else \
-	  echo "MISMATCH: Semantic differences found"; \
-	  diff_out="$(OUT_DIR)/$$name.deep.diff"; \
-	  $(DIFF) "$$rs_norm" "$$zig_norm" > "$$diff_out" || true; \
-	  echo "Diff written to $$diff_out"; \
-	  head -50 "$$diff_out"; \
-	fi
-
-# Snapshot-based regression tests
-# Tests specific records known to have exhibited bugs
-snapshot-test: build-zig
-	@$(PYTHON) scripts/snapshot_test.py
-
-# Update snapshots from current Zig output
+# Update snapshots from current Zig output (uses Zig snapshot tool)
 snapshot-update: build-zig
-	@$(PYTHON) scripts/snapshot_test.py --update
+	$(ZIG) build snapshot -Dtarget=$(TARGET) -Doptimize=$(OPT) -Duse-c-alloc=$(USE_C_ALLOC_BOOL) -- --update
 

@@ -1,4 +1,4 @@
-.PHONY: all build run test fmt clean bench bench-zbench sample xml json jsonl todo build-all package-all
+.PHONY: all build run test fmt clean bench bench-zbench sample xml json jsonl todo build-all package-all snapshot
 
 all: build
 
@@ -47,8 +47,10 @@ NO_CACHE ?= 0
 test:
 	@# Optionally drop caches to rerun everything fresh
 	@if [ "$(NO_CACHE)" = "1" ]; then rm -rf zig-out .zig-cache; fi
-	@# Run tests directly against aggregator to ensure summary on 0.14.1
-	$(ZIG) test -O $(TEST_OPT) $(TEST_FILE)
+	$(ZIG) build test -Dtarget=$(TARGET) -Doptimize=$(TEST_OPT) -Duse-c-alloc=$(USE_C_ALLOC_BOOL) --summary all
+
+snapshot: build-zig
+	$(ZIG) build snapshot -Dtarget=$(TARGET) -Doptimize=$(OPT) -Duse-c-alloc=$(USE_C_ALLOC_BOOL)
 
 fmt:
 	$(ZIG) fmt src/**/*.zig

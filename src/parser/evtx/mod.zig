@@ -15,4 +15,10 @@ pub const RecordStream = @import("stream.zig").RecordStream;
 pub const OutputMode = @import("stream.zig").OutputMode;
 
 pub const EventRecordView = @import("format.zig").EventRecordView;
+pub const RecordIterator = @import("format.zig").RecordIterator;
+pub const Chunk = @import("format.zig").Chunk;
+pub const FileHeader = @import("format.zig").FileHeader;
+
+// Re-export Context for use in snapshot tests and external consumers
+pub const Context = @import("../binxml/mod.zig").Context;
 
