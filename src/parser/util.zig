@@ -105,8 +105,12 @@ pub fn formatIso8601UtcFromFiletimeMicros(buf: []u8, filetime: u64) ![]const u8 
     const micros: u32 = @intCast(ticks_remainder / TICKS_PER_MICRO);
 
     const parts = computeUtcFromUnixSeconds(@as(i64, @intCast(unix_seconds)));
+    // Cast signed date components to unsigned to ensure proper zero-padding without sign prefixes
+    const year: u32 = @intCast(parts.year);
+    const month: u32 = @intCast(parts.month);
+    const day: u32 = @intCast(parts.day);
     return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>6}Z", .{
-        parts.year, parts.month, parts.day, parts.hour, parts.minute, parts.second, micros,
+        year, month, day, parts.hour, parts.minute, parts.second, micros,
     });
 }
 

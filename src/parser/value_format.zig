@@ -115,13 +115,22 @@ pub fn formatHexBytesLower(w: *std.Io.Writer, bytes: []const u8) WriterError!voi
 }
 
 /// Format UTF-16LE string for XML to concrete std.Io.Writer.
+/// Trims null terminator and trailing spaces to match Rust evtx_dump behavior.
 pub fn formatUtf16StringXml(w: *std.Io.Writer, data: []const u8) WriterError!void {
     if (data.len == 0) return;
     if ((data.len & 1) != 0) return;
     var num = data.len / 2;
+    // Remove null terminator
     if (num > 0) {
         const last = std.mem.readInt(u16, data[data.len - 2 .. data.len][0..2], .little);
         if (last == 0) num -= 1;
+    }
+    // Trim trailing spaces (0x0020 in UTF-16LE)
+    while (num > 0) {
+        const pos = (num - 1) * 2;
+        const ch = std.mem.readInt(u16, data[pos..][0..2], .little);
+        if (ch != 0x0020) break;
+        num -= 1;
     }
     if (num == 0) return;
     try util.writeUtf16LeXmlEscaped(w, data[0 .. num * 2], num);

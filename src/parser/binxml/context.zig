@@ -17,6 +17,8 @@ const IR = IRModule.IR;
 const types = @import("types.zig");
 const BinXmlError = @import("../err.zig").BinXmlError;
 const Reader = @import("../reader.zig").Reader;
+const logger = @import("../../logger.zig");
+const log = logger.scoped("binxml");
 
 /// Cached name entry with UTF-16 bytes and character count.
 pub const NameCacheEntry = struct {
@@ -91,7 +93,16 @@ fn cloneAndResolve(
     if (src.children.items.len > 0) {
         try el.children.ensureTotalCapacityPrecise(allocator, src.children.items.len);
         for (src.children.items) |node| {
+            const before = el.children.items.len;
             try resolveNodeInto(node, values, chunk, ctx, allocator, &el.children);
+            // Check if any newly added children are elements - update has_element_child
+            // This is necessary because Placeholder nodes resolve to Elements at instantiation time
+            for (el.children.items[before..]) |child| {
+                if (child == .Element) {
+                    el.has_element_child = true;
+                    break;
+                }
+            }
         }
     }
 
@@ -172,13 +183,23 @@ fn resolveSingleValue(
     // String types (0x01) become Text nodes for proper XML escaping
     if (base_type == @intFromEnum(types.ValueType.string)) {
         var num_chars = val.data.len / 2;
+        // Remove null terminator
         if (num_chars > 0) {
             const last_char = std.mem.readInt(u16, val.data[val.data.len - 2 .. val.data.len][0..2], .little);
             if (last_char == 0) num_chars -= 1;
         }
-        try out.append(allocator, .{
-            .Text = .{ .utf16 = val.data[0 .. num_chars * 2], .num_chars = num_chars },
-        });
+        // Trim trailing spaces (0x0020 in UTF-16LE) to match Rust evtx_dump behavior
+        while (num_chars > 0) {
+            const pos = (num_chars - 1) * 2;
+            const ch = std.mem.readInt(u16, val.data[pos..][0..2], .little);
+            if (ch != 0x0020) break;
+            num_chars -= 1;
+        }
+        if (num_chars > 0) {
+            try out.append(allocator, .{
+                .Text = .{ .utf16 = val.data[0 .. num_chars * 2], .num_chars = num_chars },
+            });
+        }
         return;
     }
 
