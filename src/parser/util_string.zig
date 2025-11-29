@@ -109,7 +109,7 @@ pub fn writeUtf16LeJsonEscaped_scalar(w: *std.Io.Writer, utf16le: []const u8, nu
 }
 
 // ============================================================================
-// Unified Scalar Implementation
+// Shared ASCII Fast Path
 // ============================================================================
 
 /// Check if an ASCII byte needs escaping for the given mode.
@@ -129,71 +129,73 @@ inline fn asciiNeedsEscape(c: u8, comptime mode: EscapeMode) bool {
     };
 }
 
-/// Unified UTF-16LE to UTF-8 conversion with configurable escaping.
+/// Shared ASCII fast path for UTF-16LE to UTF-8 conversion.
 ///
-/// This function is optimized for the common case of short ASCII strings
-/// (element names, attribute names, numbers, etc.) which dominate in Windows
-/// event logs. It uses a two-phase approach:
+/// Processes pure ASCII characters (hi byte = 0, lo byte <= 0x7F) that don't
+/// need escaping, copying the low bytes directly to the output buffer.
 ///
-/// ## Phase 1: ASCII Fast Path
+/// Returns: (bytes_consumed_from_input, bytes_written_to_output)
 ///
-/// Most strings in EVTX are pure ASCII with no escaping needed. For these,
-/// we can skip the heavy iterator machinery entirely:
-/// - No Wtf16LeIterator state machine overhead
-/// - No utf8Encode() calls (ASCII is already valid UTF-8)
-/// - Direct byte copy from UTF-16 low bytes
+/// This is shared between `writeUtf16LeScalar` and `convertUtf16ToUtf8` to
+/// avoid code duplication. The ASCII fast path is the critical optimization
+/// for EVTX parsing where ~95% of strings are pure ASCII.
 ///
-/// The fast path processes characters until it hits either:
-/// - A non-ASCII character (high byte != 0)
-/// - A character that needs escaping
+/// ## Why not use stdlib?
 ///
-/// ## Phase 2: Iterator Fallback
-///
-/// For the remaining bytes (non-ASCII, surrogates, or escape sequences),
-/// we fall back to the stdlib Wtf16LeIterator which handles all edge cases.
-///
-/// ## Performance Impact
-///
-/// For typical event log data where ~95% of strings are pure ASCII:
-/// - Fast path handles entire string in one pass
-/// - Avoids ~3x overhead of iterator + utf8Encode per character
-fn writeUtf16LeScalar(w: *std.Io.Writer, utf16le: []const u8, num_chars: usize, comptime mode: EscapeMode) WriterError!void {
-    var out_buf: [2048]u8 = undefined;
+/// `std.unicode.wtf16LeToWtf8` requires `[]const u16` (aligned memory).
+/// EVTX data comes from raw file reads as `[]const u8` with no alignment
+/// guarantee. The stdlib `Wtf16LeIterator` handles this via `mem.readInt`,
+/// which is what we use for the fallback path.
+fn asciiConvertFastPath(
+    utf16le: []const u8,
+    out_buf: []u8,
+    comptime escape_mode: EscapeMode,
+) struct { in_consumed: usize, out_written: usize } {
+    var byte_pos: usize = 0;
     var out_len: usize = 0;
 
-    const max_bytes = @min(num_chars * 2, utf16le.len);
-    if (max_bytes < 2) return;
-
-    // =========================================================================
-    // Phase 1: ASCII Fast Path
-    // =========================================================================
-    // Process as many pure-ASCII, no-escape characters as possible.
-    // For each UTF-16LE code unit, the high byte must be 0 (ASCII range)
-    // and the low byte must not require escaping.
-
-    var byte_pos: usize = 0;
-
-    ascii_fast_path: while (byte_pos + 1 < max_bytes) {
+    while (byte_pos + 1 < utf16le.len and out_len < out_buf.len) {
         const lo = utf16le[byte_pos];
         const hi = utf16le[byte_pos + 1];
 
         // Non-ASCII: high byte non-zero OR low byte > 0x7F
         // (Latin-1 chars like é = 0xE9 need 2-byte UTF-8 encoding)
-        if (hi != 0 or lo > 0x7F) break :ascii_fast_path;
+        if (hi != 0 or lo > 0x7F) break;
 
-        // Check if this ASCII byte needs escaping
-        if (asciiNeedsEscape(lo, mode)) break :ascii_fast_path;
+        // Check if this ASCII byte needs escaping (for XML/JSON modes)
+        if (asciiNeedsEscape(lo, escape_mode)) break;
 
         // Pure ASCII, no escape needed - copy low byte directly
         // (ASCII bytes are valid UTF-8 as-is)
-        if (out_len == out_buf.len) {
-            try w.writeAll(out_buf[0..out_len]);
-            out_len = 0;
-        }
         out_buf[out_len] = lo;
         out_len += 1;
         byte_pos += 2;
     }
+
+    return .{ .in_consumed = byte_pos, .out_written = out_len };
+}
+
+// ============================================================================
+// Unified Scalar Implementation
+// ============================================================================
+
+/// Unified UTF-16LE to UTF-8 conversion with configurable escaping.
+///
+/// Uses a two-phase approach optimized for EVTX data:
+/// 1. **ASCII Fast Path** (via `asciiConvertFastPath`) - handles ~95% of strings
+/// 2. **Iterator Fallback** - handles non-ASCII, surrogates, and escaping
+///
+/// See `asciiConvertFastPath` for details on why we don't use stdlib directly.
+fn writeUtf16LeScalar(w: *std.Io.Writer, utf16le: []const u8, num_chars: usize, comptime mode: EscapeMode) WriterError!void {
+    var out_buf: [2048]u8 = undefined;
+
+    const max_bytes = @min(num_chars * 2, utf16le.len);
+    if (max_bytes < 2) return;
+
+    // Phase 1: ASCII Fast Path (shared implementation)
+    const fast = asciiConvertFastPath(utf16le[0..max_bytes], &out_buf, mode);
+    var out_len = fast.out_written;
+    const byte_pos = fast.in_consumed;
 
     // If we processed everything in fast path, flush and return
     if (byte_pos >= max_bytes) {
@@ -201,14 +203,7 @@ fn writeUtf16LeScalar(w: *std.Io.Writer, utf16le: []const u8, num_chars: usize, 
         return;
     }
 
-    // =========================================================================
-    // Phase 2: Iterator Fallback
-    // =========================================================================
-    // Handle remaining bytes with full iterator support for:
-    // - Non-ASCII characters (2-4 byte UTF-8 encoding)
-    // - Surrogate pairs
-    // - Characters that need escaping
-
+    // Phase 2: Iterator Fallback for non-ASCII / escape chars
     var it: std.unicode.Wtf16LeIterator = .{
         .bytes = utf16le[byte_pos..max_bytes],
         .i = 0,
@@ -290,6 +285,52 @@ inline fn jsonEscape(c: u8) ?[]const u8 {
         '\t' => "\\t",
         else => null,
     };
+}
+
+// ============================================================================
+// UTF-16LE to UTF-8 Allocation (for name caching)
+// ============================================================================
+
+/// Convert UTF-16LE bytes to UTF-8, allocating the result.
+///
+/// This is used for pre-converting element/attribute names at parse time.
+/// Names are cached as UTF-8 and written directly during rendering.
+///
+/// Uses the shared `asciiConvertFastPath` - see its documentation for why
+/// we don't use stdlib directly (alignment issues with unaligned EVTX data).
+pub fn convertUtf16ToUtf8(allocator: std.mem.Allocator, utf16le: []const u8, num_chars: usize) ![]u8 {
+    const max_bytes = @min(num_chars * 2, utf16le.len);
+    if (max_bytes < 2) {
+        return allocator.alloc(u8, 0);
+    }
+
+    // Use stack buffer for conversion (names are typically short)
+    // Worst case: each UTF-16 code unit becomes 3 UTF-8 bytes
+    var stack_buf: [512]u8 = undefined;
+
+    // Phase 1: ASCII Fast Path (shared implementation, no escaping)
+    const fast = asciiConvertFastPath(utf16le[0..max_bytes], &stack_buf, .none);
+    var out_len = fast.out_written;
+    const byte_pos = fast.in_consumed;
+
+    // Phase 2: Iterator Fallback for non-ASCII bytes
+    if (byte_pos < max_bytes) {
+        var it: std.unicode.Wtf16LeIterator = .{
+            .bytes = utf16le[byte_pos..max_bytes],
+            .i = 0,
+        };
+
+        while (it.nextCodepoint()) |codepoint| {
+            if (std.unicode.isSurrogateCodepoint(codepoint)) continue;
+            const len = std.unicode.utf8Encode(codepoint, stack_buf[out_len..][0..4]) catch continue;
+            out_len += len;
+        }
+    }
+
+    // Allocate exact size and copy
+    const result = try allocator.alloc(u8, out_len);
+    @memcpy(result, stack_buf[0..out_len]);
+    return result;
 }
 
 // ============================================================================
@@ -660,6 +701,56 @@ test "utf16EqualsAscii: non-BMP UTF-16 with high byte set" {
     const utf16 = [_]u8{ 0xAC, 0x20 };
     // Cannot match any single ASCII byte since high byte != 0
     try std.testing.expect(!utf16EqualsAscii(&utf16, 1, "\xAC"));
+}
+
+// ----------------------------------------------------------------------------
+// convertUtf16ToUtf8 Tests
+// ----------------------------------------------------------------------------
+
+test "convertUtf16ToUtf8: pure ASCII" {
+    var buf: [64]u8 = undefined;
+    const utf16 = asciiToUtf16(&buf, "Hello");
+    const utf8 = try convertUtf16ToUtf8(std.testing.allocator, utf16, 5);
+    defer std.testing.allocator.free(utf8);
+    try std.testing.expectEqualStrings("Hello", utf8);
+}
+
+test "convertUtf16ToUtf8: empty string" {
+    const utf8 = try convertUtf16ToUtf8(std.testing.allocator, &[_]u8{}, 0);
+    defer std.testing.allocator.free(utf8);
+    try std.testing.expectEqualStrings("", utf8);
+}
+
+test "convertUtf16ToUtf8: 2-byte UTF-8 (e-acute)" {
+    // U+00E9 (é) = UTF-16LE: 0xE9, 0x00 → UTF-8: 0xC3 0xA9
+    const input = [_]u8{ 0xE9, 0x00 };
+    const utf8 = try convertUtf16ToUtf8(std.testing.allocator, &input, 1);
+    defer std.testing.allocator.free(utf8);
+    try std.testing.expectEqualStrings("\xC3\xA9", utf8);
+}
+
+test "convertUtf16ToUtf8: 3-byte UTF-8 (euro)" {
+    // U+20AC (€) = UTF-16LE: 0xAC, 0x20 → UTF-8: 0xE2 0x82 0xAC
+    const input = [_]u8{ 0xAC, 0x20 };
+    const utf8 = try convertUtf16ToUtf8(std.testing.allocator, &input, 1);
+    defer std.testing.allocator.free(utf8);
+    try std.testing.expectEqualStrings("\xE2\x82\xAC", utf8);
+}
+
+test "convertUtf16ToUtf8: surrogate pair (grinning face)" {
+    // U+1F600 (😀) = UTF-16LE surrogate pair: 0xD83D 0xDE00 → UTF-8: 0xF0 0x9F 0x98 0x80
+    const input = [_]u8{ 0x3D, 0xD8, 0x00, 0xDE };
+    const utf8 = try convertUtf16ToUtf8(std.testing.allocator, &input, 2);
+    defer std.testing.allocator.free(utf8);
+    try std.testing.expectEqualStrings("\xF0\x9F\x98\x80", utf8);
+}
+
+test "convertUtf16ToUtf8: mixed ASCII and non-ASCII" {
+    // "Hé" = H (0x48, 0x00) + é (0xE9, 0x00)
+    const input = [_]u8{ 0x48, 0x00, 0xE9, 0x00 };
+    const utf8 = try convertUtf16ToUtf8(std.testing.allocator, &input, 2);
+    defer std.testing.allocator.free(utf8);
+    try std.testing.expectEqualStrings("H\xC3\xA9", utf8);
 }
 
 // ----------------------------------------------------------------------------

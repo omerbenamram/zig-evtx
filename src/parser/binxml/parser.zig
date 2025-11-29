@@ -12,6 +12,7 @@ const logger = @import("../../logger.zig");
 const log = logger.scoped("binxml");
 const tokens = @import("tokens.zig");
 const util = @import("../util.zig");
+const util_string = @import("../util_string.zig");
 
 /// Context required for parsing BinXML elements.
 ///
@@ -68,8 +69,8 @@ pub fn parseElementIR(ctx: *Context, chunk: []const u8, r: *Reader, elem_ctx: El
     return parseElementIRImpl(&ps);
 }
 
-// Comptime UTF-16LE literal for empty event creation
-const event_name_utf16: []const u8 = &[_]u8{ 'E', 0, 'v', 0, 'e', 0, 'n', 0, 't', 0 };
+// Comptime UTF-8 literal for empty event creation
+const event_name_utf8: []const u8 = "Event";
 
 /// Main entry point: parses a BinXML record into a fully resolved ElementTree.
 ///
@@ -90,7 +91,7 @@ pub fn parseRecord(ctx: *Context, chunk: []const u8, bin: []const u8) !ElementTr
 
     // Handle empty event case
     if (start_offset >= bin.len) {
-        const el = try IRModule.irNewElement(allocator, IR.Name{ .bytes = event_name_utf16, .num_chars = 5 });
+        const el = try IRModule.irNewElement(allocator, IR.Name{ .utf8 = event_name_utf8 });
         return .{ .element = el };
     }
 
@@ -641,12 +642,11 @@ fn readNameInline(ps: *ParseState) !IR.Name {
 
     if (ps.r.rem() < byte_len) return BinXmlError.UnexpectedEof;
     const str_start = ps.r.pos;
-    const slice = ps.r.buf[str_start .. str_start + byte_len];
+    const utf16_slice = ps.r.buf[str_start .. str_start + byte_len];
     ps.r.pos += byte_len;
 
-    // Allocate and copy name (names persist beyond chunk processing)
-    const buf = try ps.alloc().alloc(u8, byte_len);
-    @memcpy(buf, slice);
+    // Convert UTF-16LE to UTF-8 once at parse time
+    const utf8 = try util_string.convertUtf16ToUtf8(ps.alloc(), utf16_slice, num_chars);
 
     // Skip null terminator (2 bytes for UTF-16).
     // Name block: NameHeader (8) + string (byte_len) + null (2)
@@ -662,7 +662,7 @@ fn readNameInline(ps: *ParseState) !IR.Name {
         ps.r.pos = name_block_end;
     }
 
-    return IR.Name{ .bytes = buf, .num_chars = num_chars };
+    return IR.Name{ .utf8 = utf8 };
 }
 
 /// Reads a name offset and resolves it, with bounds checking.

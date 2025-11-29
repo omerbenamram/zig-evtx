@@ -25,9 +25,12 @@ inline fn writeSpaces(writer: *std.Io.Writer, count: usize) WriterError!void {
     try writer.splatByteAll(' ', count);
 }
 
-/// Write an element name from UTF-16LE
+/// Write an element/attribute name (pre-converted UTF-8).
+///
+/// No escaping needed: XML NCName rules guarantee names contain only safe
+/// characters ([a-zA-Z_][a-zA-Z0-9_.-]*). See IR.Name documentation.
 fn writeNameXml(name: IR.Name, writer: *std.Io.Writer) WriterError!void {
-    try util.writeUtf16LeXmlEscaped(writer, name.bytes, name.num_chars);
+    try writer.writeAll(name.utf8);
 }
 
 // ============================================================================

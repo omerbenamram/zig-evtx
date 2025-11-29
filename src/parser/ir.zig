@@ -9,7 +9,29 @@ const std = @import("std");
 /// Memory: All IR nodes reference slices into the chunk buffer where possible
 /// (names, value bytes). Element nodes are allocated in a per-chunk arena.
 pub const IR = struct {
-    pub const Name = struct { bytes: []const u8, num_chars: usize };
+    /// Pre-converted UTF-8 name, ready for direct output without escaping.
+    ///
+    /// ## Why No Escaping?
+    ///
+    /// Element and attribute names in XML follow the NCName (non-colonized name)
+    /// production, which restricts them to: `[a-zA-Z_][a-zA-Z0-9_.-]*`
+    ///
+    /// This means names **cannot contain** characters that require escaping:
+    /// - No `&`, `<`, `>`, `"`, `'` (XML special chars)
+    /// - No `\` (JSON escape char)
+    /// - No control characters
+    /// - No spaces
+    ///
+    /// Therefore, pre-converted UTF-8 names can be written directly to output
+    /// without any escaping pass - they are safe by definition.
+    ///
+    /// ## Performance
+    ///
+    /// Names are converted once at parse time in `Context.getOrReadName()`,
+    /// then shared across all IR nodes that reference the same name via
+    /// template cloning. This eliminates repeated UTF-16→UTF-8 conversion
+    /// during rendering.
+    pub const Name = struct { utf8: []const u8 };
 
     pub const NodeTag = enum { Element, Text, Value, Placeholder, CharRef, EntityRef, CData, PITarget, PIData };
 

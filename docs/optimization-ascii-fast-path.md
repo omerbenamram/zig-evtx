@@ -142,7 +142,42 @@ JSON escaping has more characters to check (0x00-0x1F control chars, `"`, `\`), 
 Potential further optimizations:
 1. **Batch escape checking** - Check multiple ASCII chars for escapes before copying
 2. **SIMD for short strings** - Process 8/16 bytes at once with vector checks
-3. **String interning** - Cache converted element/attribute names (they repeat heavily)
+
+**Note:** String interning for element/attribute names was implemented in a follow-up optimization - see below.
+
+---
+
+# UTF-8 Name Caching (Follow-up Optimization)
+
+## Problem
+
+Even with the ASCII fast path, element/attribute names were still being converted from UTF-16 to UTF-8 on every render call. Names like "Event", "System", "Provider" appear thousands of times across records but were converted repeatedly.
+
+## Solution
+
+Pre-convert names to UTF-8 at parse time. Store UTF-8 directly in `IR.Name`:
+
+```zig
+// Before: UTF-16 stored, converted on every render
+pub const Name = struct { bytes: []const u8, num_chars: usize };
+
+// After: Pre-converted UTF-8, ready to write directly
+pub const Name = struct { utf8: []const u8 };
+```
+
+### Changes
+
+1. **`IR.Name`** - Changed to store UTF-8 directly
+2. **`Context.getOrReadName()`** - Converts UTF-16→UTF-8 once, caches the result
+3. **Renderers** - Now just `writer.writeAll(name.utf8)` instead of conversion
+
+### Results
+
+| Function | Before | After | Change |
+|----------|--------|-------|--------|
+| `writeUtf16LeScalar` | 25 samples | 8 samples | **-68%** |
+
+Names are now a single `writeAll()` call - no conversion overhead.
 
 ## How to Reproduce
 

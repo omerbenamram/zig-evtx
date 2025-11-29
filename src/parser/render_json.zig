@@ -19,19 +19,17 @@ const reader = @import("reader.zig");
 /// Writer error type for all rendering functions.
 pub const WriterError = std.Io.Writer.Error;
 
-/// Key for grouping elements by name.
+/// Key for grouping elements by name (uses pre-converted UTF-8).
 const NameKey = struct {
-    bytes: []const u8,
-    num_chars: usize,
+    utf8: []const u8,
 
     fn fromName(name: IR.Name) NameKey {
-        return .{ .bytes = name.bytes, .num_chars = name.num_chars };
+        return .{ .utf8 = name.utf8 };
     }
 
     fn eql(self: NameKey, other: NameKey) bool {
-        if (self.num_chars != other.num_chars) return false;
-        if (self.bytes.ptr == other.bytes.ptr) return true;
-        return std.mem.eql(u8, self.bytes, other.bytes);
+        if (self.utf8.ptr == other.utf8.ptr) return true;
+        return std.mem.eql(u8, self.utf8, other.utf8);
     }
 };
 
@@ -48,8 +46,9 @@ const MAX_UNIQUE_NAMES: usize = 64;
 // Name Comparison Helpers
 // ============================================================================
 
+/// Compare a pre-converted UTF-8 name to an ASCII literal.
 fn nameEqualsAscii(name: IR.Name, ascii: []const u8) bool {
-    return util.utf16EqualsAscii(name.bytes, name.num_chars, ascii);
+    return std.mem.eql(u8, name.utf8, ascii);
 }
 
 fn isDataContainer(name: IR.Name) bool {
@@ -231,8 +230,9 @@ fn renderAttributesObject(attrs: []const IR.Attr, writer: *std.Io.Writer) Writer
         if (!first) try writer.writeByte(',');
         first = false;
 
+        // Name needs no JSON escaping - XML NCName rules guarantee safe chars
         try writer.writeByte('"');
-        try util.writeUtf16LeJsonEscaped(writer, attr.name.bytes, attr.name.num_chars);
+        try writer.writeAll(attr.name.utf8);
         try writer.writeAll("\":");
 
         if (try tryWriteAsNumber(attr.value.items, writer)) continue;
@@ -378,8 +378,9 @@ fn writeElementBodyJson(element: *const IR.Element, allocator: std.mem.Allocator
 
         if (wrote_any) try writer.writeByte(',');
 
+        // Name needs no JSON escaping - XML NCName rules guarantee safe chars
         try writer.writeByte('"');
-        try util.writeUtf16LeJsonEscaped(writer, child.name.bytes, child.name.num_chars);
+        try writer.writeAll(child.name.utf8);
         try writer.writeAll("\":");
 
         const child_is_container = isDataContainer(child.name);

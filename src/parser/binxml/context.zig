@@ -17,14 +17,12 @@ const IR = IRModule.IR;
 const types = @import("types.zig");
 const BinXmlError = @import("../err.zig").BinXmlError;
 const Reader = @import("../reader.zig").Reader;
+const util_string = @import("../util_string.zig");
 const logger = @import("../../logger.zig");
 const log = logger.scoped("binxml");
 
-/// Cached name entry with UTF-16 bytes and character count.
-pub const NameCacheEntry = struct {
-    bytes: []u8,
-    num_chars: usize,
-};
+/// Cached name entry - pre-converted UTF-8, ready for direct output.
+pub const NameCacheEntry = []u8;
 
 /// Resolved element tree - guaranteed to have no Placeholder nodes.
 /// This is the ONLY type renderers should accept.
@@ -244,7 +242,7 @@ pub const Context = struct {
     /// Template definition cache: GUID -> parsed Template with Placeholder nodes.
     /// The GUID uniquely identifies each template definition.
     cache: std.AutoHashMap([16]u8, Template),
-    /// Name cache: offset -> (UTF-16 bytes, char count).
+    /// Name cache: offset -> pre-converted UTF-8 string.
     name_cache: std.AutoHashMap(u32, NameCacheEntry),
 
     /// Creates a new context with the given backing allocator.
@@ -275,9 +273,9 @@ pub const Context = struct {
     }
 
     pub fn getOrReadName(self: *Context, chunk: []const u8, off_u32: u32) !IR.Name {
-        // Check cache first
-        if (self.name_cache.get(off_u32)) |entry| {
-            return IR.Name{ .bytes = entry.bytes, .num_chars = entry.num_chars };
+        // Check cache first - returns pre-converted UTF-8
+        if (self.name_cache.get(off_u32)) |utf8| {
+            return IR.Name{ .utf8 = utf8 };
         }
 
         if (off_u32 >= chunk.len) return BinXmlError.UnexpectedEof;
@@ -299,12 +297,14 @@ pub const Context = struct {
             if (last == 0 and take_chars > 0) take_chars -= 1;
         }
 
-        // Allocate and cache new name
-        const buf = try self.arena.allocator().alloc(u8, take_chars * 2);
-        @memcpy(buf, chunk[str_start .. str_start + take_chars * 2]);
-        try self.name_cache.put(off_u32, NameCacheEntry{ .bytes = buf, .num_chars = take_chars });
+        const utf16_slice = chunk[str_start .. str_start + take_chars * 2];
 
-        return IR.Name{ .bytes = buf, .num_chars = take_chars };
+        // Convert UTF-16LE to UTF-8 once at cache time.
+        // No escaping needed: names follow XML NCName rules (safe chars only).
+        const utf8 = try util_string.convertUtf16ToUtf8(self.arena.allocator(), utf16_slice, take_chars);
+        try self.name_cache.put(off_u32, utf8);
+
+        return IR.Name{ .utf8 = utf8 };
     }
 
     /// Pre-populates the name cache using offsets from the chunk header.
