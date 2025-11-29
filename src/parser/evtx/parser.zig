@@ -27,6 +27,9 @@ pub const ParserOptions = struct {
     // When true, scan all valid chunks until EOF instead of trusting header's num_chunks.
     // Useful for files with corrupted headers or for carving chunks from disk images.
     carve: bool = false,
+    // When true (default), output chunks in original order. Slightly slower but deterministic.
+    // When false, chunks output in whatever order they complete (faster but non-deterministic).
+    ordered: bool = true,
 };
 
 pub const EvtxParser = struct {
@@ -127,13 +130,7 @@ pub const EvtxParser = struct {
         try worker.parseConcurrent(
             self.allocator,
             reader,
-            .{
-                .validate_checksums = self.opts.validate_checksums,
-                .verbosity = self.opts.verbosity,
-                .max_records = self.opts.max_records,
-                .skip_first = self.opts.skip_first,
-                .carve = self.opts.carve,
-            },
+            self.opts,
             out_kind,
             num_threads,
         );

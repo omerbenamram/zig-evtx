@@ -5,12 +5,14 @@ const binxml = @import("../binxml/mod.zig");
 const format = @import("format.zig");
 const logger = @import("../../logger.zig");
 const output = @import("output.zig");
+const parser_mod = @import("parser.zig");
 
 pub const FileHeader = format.FileHeader;
 pub const Chunk = format.Chunk;
 pub const EventRecordView = format.EventRecordView;
 pub const RecordIterator = format.RecordIterator;
 pub const OutputWriter = output.OutputWriter;
+pub const ParserOptions = parser_mod.ParserOptions;
 
 /// Output format mode for streaming.
 pub const OutputMode = enum { xml, json_lines };
@@ -120,13 +122,4 @@ pub const RecordStream = struct {
             }
         }
     }
-};
-
-/// Parser options (re-exported from parser.zig for convenience).
-pub const ParserOptions = struct {
-    validate_checksums: bool = true,
-    verbosity: u8 = 0,
-    max_records: usize = 0,
-    skip_first: usize = 0,
-    carve: bool = false,
 };
