@@ -52,6 +52,24 @@ fn bench_auto(_: std.mem.Allocator) void {
     util.writeUtf16LeXmlEscaped(&writer, g_utf, g_num_chars) catch unreachable;
 }
 
+fn bench_json_scalar(_: std.mem.Allocator) void {
+    var buf: [1024 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    util.writeUtf16LeJsonEscaped_scalar(&writer, g_utf, g_num_chars) catch unreachable;
+}
+
+fn bench_json_simd(_: std.mem.Allocator) void {
+    var buf: [1024 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    util.writeUtf16LeJsonEscaped_simd(&writer, g_utf, g_num_chars) catch unreachable;
+}
+
+fn bench_json_auto(_: std.mem.Allocator) void {
+    var buf: [1024 * 1024]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buf);
+    util.writeUtf16LeJsonEscaped(&writer, g_utf, g_num_chars) catch unreachable;
+}
+
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -60,11 +78,22 @@ pub fn main() !void {
         .hooks = .{ .before_all = beforeAll, .after_all = afterAll },
     });
     defer bench.deinit();
+    // XML benchmarks
     try bench.add("utf16 xml escaped scalar", bench_scalar, .{});
     try bench.add("utf16 xml escaped simd", bench_simd, .{});
     try bench.add("utf16 xml escaped auto", bench_auto, .{});
+    // JSON benchmarks
+    try bench.add("utf16 json escaped scalar", bench_json_scalar, .{});
+    try bench.add("utf16 json escaped simd", bench_json_simd, .{});
+    try bench.add("utf16 json escaped auto", bench_json_auto, .{});
+
+    // Create buffered writer for stdout
     var write_buf: [8192]u8 = undefined;
     var stdout_file = std.fs.File.stdout();
     var stdout_writer = stdout_file.writer(&write_buf);
+
     try bench.run(&stdout_writer.interface);
+
+    // Flush the buffer to ensure output is visible
+    try stdout_writer.interface.flush();
 }

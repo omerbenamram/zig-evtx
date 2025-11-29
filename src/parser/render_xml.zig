@@ -10,16 +10,10 @@ const Context = binxml.Context;
 const IRModule = @import("ir.zig");
 const IR = IRModule.IR;
 const util = @import("util.zig");
-const normalizeAndWriteSystemTimeAscii = util.normalizeAndWriteSystemTimeAscii;
 const vf = @import("value_format.zig");
 
 /// Writer error type for all rendering functions.
 pub const WriterError = std.Io.Writer.Error;
-
-/// Check if attribute name is "SystemTime" for special normalization.
-fn attrNameIsSystemTime(name: IR.Name) bool {
-    return util.utf16EqualsAscii(name.bytes, name.num_chars, "SystemTime");
-}
 
 // ============================================================================
 // Low-Level Writing Helpers
@@ -53,18 +47,7 @@ fn renderAttribute(attr: *const IR.Attr, writer: *std.Io.Writer) WriterError!voi
     try writer.writeByte(' ');
     try writeNameXml(attr.name, writer);
     try writer.writeAll("=\"");
-
-    if (attrNameIsSystemTime(attr.name)) {
-        // SystemTime attributes need normalization - buffer first, then normalize
-        var buffer: [512]u8 = undefined;
-        var fixed_writer = std.Io.Writer.fixed(&buffer);
-        renderNodes(attr.value.items, &fixed_writer, true) catch {};
-        const written = fixed_writer.buffer[0..fixed_writer.end];
-        try normalizeAndWriteSystemTimeAscii(writer, written);
-    } else {
-        try renderNodes(attr.value.items, writer, true);
-    }
-
+    try renderNodes(attr.value.items, writer, true);
     try writer.writeByte('"');
 }
 

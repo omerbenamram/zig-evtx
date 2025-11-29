@@ -50,10 +50,11 @@ pub fn formatFileTimeXml(w: *std.Io.Writer, ft: reader.FileTime) WriterError!voi
     try w.writeAll(out);
 }
 
-/// Format a SYSTEMTIME as ISO8601 string to concrete std.Io.Writer.
+/// Format a SYSTEMTIME as ISO8601 string with microsecond precision to concrete std.Io.Writer.
+/// SystemTime only has millisecond precision, so we pad with "000" to produce 6 fractional digits.
 pub fn formatSystemTimeXml(w: *std.Io.Writer, st: reader.SystemTime) WriterError!void {
     var buf: [32]u8 = undefined;
-    const slice = std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}Z", .{
+    const slice = std.fmt.bufPrint(&buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}.{d:0>3}000Z", .{
         st.year,
         st.month,
         st.day,
@@ -346,8 +347,8 @@ test "formatFileTimeXml formats timestamp" {
     try std.testing.expect(w.end > 0);
 }
 
-test "formatSystemTimeXml formats correctly" {
-    // 2024-01-15 10:30:45.123
+test "formatSystemTimeXml formats correctly with microsecond precision" {
+    // 2024-01-15 10:30:45.123 (milliseconds padded to microseconds)
     const data = [_]u8{
         0xE8, 0x07, // year 2024
         0x01, 0x00, // month 1
@@ -361,7 +362,7 @@ test "formatSystemTimeXml formats correctly" {
     var buf: [32]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     try formatSystemTimeXml(&w, reader.readSystemTime(&data).?);
-    try std.testing.expectEqualStrings("2024-01-15T10:30:45.123Z", buf[0..w.end]);
+    try std.testing.expectEqualStrings("2024-01-15T10:30:45.123000Z", buf[0..w.end]);
 }
 
 test "formatValueXml with int32" {

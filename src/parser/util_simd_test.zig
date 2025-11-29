@@ -76,12 +76,21 @@ fn runJsonCase(id: CaseId) !void {
     defer alloc.free(bytes);
     const num_chars = bytes.len / 2;
 
-    // JSON only has scalar implementation, just verify it runs without error
-    var buf: [4096]u8 = undefined;
-    var writer = std.Io.Writer.fixed(&buf);
+    // Use fixed buffers with std.Io.Writer
+    var buf_simd: [4096]u8 = undefined;
+    var buf_scalar: [4096]u8 = undefined;
 
-    try util.writeUtf16LeJsonEscaped_scalar(&writer, bytes, num_chars);
+    var writer_simd = std.Io.Writer.fixed(&buf_simd);
+    var writer_scalar = std.Io.Writer.fixed(&buf_scalar);
+
+    try util.writeUtf16LeJsonEscaped_simd(&writer_simd, bytes, num_chars);
+    try util.writeUtf16LeJsonEscaped_scalar(&writer_scalar, bytes, num_chars);
+
+    const out_simd = writer_simd.buffer[0..writer_simd.end];
+    const out_scalar = writer_scalar.buffer[0..writer_scalar.end];
+
     // Note: lone surrogates (hi_only, lo_only) produce no output - that's expected
+    try std.testing.expectEqualStrings(out_scalar, out_simd);
 }
 
 // XML SIMD vs Scalar parity tests
@@ -116,7 +125,7 @@ test "XML - long_ascii" {
     try runXmlCase(.long_ascii);
 }
 
-// JSON scalar tests (no SIMD to compare, just ensure it works)
+// JSON SIMD vs Scalar parity tests
 test "JSON - ascii" {
     try runJsonCase(.ascii);
 }

@@ -10,11 +10,6 @@ const IR = IRModule.IR;
 const util = @import("util.zig");
 const vf = @import("value_format.zig");
 
-/// Check if attribute name is "SystemTime" for special normalization.
-fn attrNameIsSystemTime(name: IR.Name) bool {
-    return util.utf16EqualsAscii(name.bytes, name.num_chars, "SystemTime");
-}
-
 /// Writer error type for all rendering functions.
 pub const WriterError = std.Io.Writer.Error;
 
@@ -157,23 +152,7 @@ fn writeElementBodyJson(element: *const IR.Element, allocator: std.mem.Allocator
         try writer.writeByte('@');
         try util.writeUtf16LeJsonEscaped(writer, attr.name.bytes, attr.name.num_chars);
         try writer.writeAll("\":");
-
-        // Special-case SystemTime normalization
-        if (attrNameIsSystemTime(attr.name)) {
-            var buffer: [256]u8 = undefined;
-            var fixed_writer = std.Io.Writer.fixed(&buffer);
-            for (attr.value.items) |node| {
-                if (node == .Text) {
-                    util.writeUtf16LeRawToUtf8(&fixed_writer, node.Text.utf16, node.Text.num_chars) catch {};
-                }
-            }
-            try writer.writeByte('"');
-            const written = fixed_writer.buffer[0..fixed_writer.end];
-            try util.normalizeAndWriteSystemTimeAscii(writer, written);
-            try writer.writeByte('"');
-        } else {
-            try renderTextToJsonString(attr.value.items, writer);
-        }
+        try renderTextToJsonString(attr.value.items, writer);
         wrote_any = true;
     }
 
