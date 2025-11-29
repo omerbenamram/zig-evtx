@@ -2,6 +2,45 @@
 //!
 //! Provides unified UTF-16LE to UTF-8 conversion with configurable escaping
 //! for XML, JSON, or raw output. Also handles Windows CP-1252 (ANSI) encoding.
+//!
+//! ## Why not use stdlib directly?
+//!
+//! The standard library provides useful building blocks:
+//!
+//! - `std.unicode.Wtf16LeIterator` - iterates UTF-16LE bytes → codepoints
+//!   (handles unpaired surrogates gracefully). We use this internally.
+//!
+//! - `std.unicode.utf8Encode` - encodes a codepoint → UTF-8 bytes.
+//!   We use this internally.
+//!
+//! - `std.json.Stringify.encodeJsonStringChars` - escapes UTF-8 for JSON.
+//!   However, this takes UTF-8 input, not UTF-16.
+//!
+//! - No XML escaping exists in stdlib (no `std.xml` module).
+//!
+//! ## Why our fused approach is optimal
+//!
+//! Using stdlib's JSON escaper would require:
+//!
+//! 1. **Two-pass approach**: Convert UTF-16 → UTF-8 buffer, then escape UTF-8.
+//!    This requires intermediate memory allocation or fixed buffer management.
+//!
+//! 2. **Per-codepoint calls**: Call stdlib escaper for each character.
+//!    Function call overhead dominates for small strings.
+//!
+//! Our implementation fuses conversion and escaping in a single pass:
+//! - Iterate UTF-16 codepoints (via stdlib iterator)
+//! - Encode to UTF-8 and escape in one step
+//! - Write directly to output buffer
+//!
+//! This eliminates intermediate allocations and reduces memory bandwidth.
+//!
+//! ## Why []const u8 instead of []const u16?
+//!
+//! EVTX binary data comes from raw file reads with no alignment guarantee.
+//! Using `[]const u16` would require `@alignCast` which can crash on
+//! unaligned data. The stdlib iterator handles this by using `mem.readInt`
+//! internally, which works on unaligned bytes.
 
 const std = @import("std");
 const simd = @import("util_simd.zig");
@@ -75,49 +114,26 @@ pub fn writeUtf16LeJsonEscaped_scalar(w: *std.Io.Writer, utf16le: []const u8, nu
 
 /// Unified UTF-16LE to UTF-8 conversion with configurable escaping.
 ///
-/// This is the single implementation that handles all escape modes.
-/// The escape mode is comptime-known, so the compiler eliminates dead branches.
+/// Uses std.unicode.Wtf16LeIterator for codepoint iteration (handles unpaired
+/// surrogates gracefully), then applies mode-specific escaping.
 fn writeUtf16LeScalar(w: *std.Io.Writer, utf16le: []const u8, num_chars: usize, comptime mode: EscapeMode) WriterError!void {
     var out_buf: [2048]u8 = undefined;
     var out_len: usize = 0;
 
-    const max_chars: usize = @min(num_chars, utf16le.len / 2);
-    if (max_chars == 0) return;
+    const max_bytes = @min(num_chars * 2, utf16le.len);
+    if (max_bytes < 2) return;
 
-    var i: usize = 0;
-    var p: usize = 0;
+    // Use stdlib iterator - construct directly to accept unaligned []const u8
+    var it: std.unicode.Wtf16LeIterator = .{
+        .bytes = utf16le[0..max_bytes],
+        .i = 0,
+    };
 
-    while (i < max_chars) : (i += 1) {
-        const b0: u8 = utf16le[p];
-        const b1: u8 = utf16le[p + 1];
-        p += 2;
+    while (it.nextCodepoint()) |codepoint| {
+        // Skip surrogate codepoints (WTF-16 may return them for unpaired surrogates)
+        if (std.unicode.isSurrogateCodepoint(codepoint)) continue;
 
-        const code_unit: u16 = @as(u16, b0) | (@as(u16, b1) << 8);
-
-        // Decode UTF-16 to codepoint, handling surrogate pairs
-        var codepoint: u21 = undefined;
-        if (code_unit < 0xD800 or code_unit > 0xDFFF) {
-            // BMP character (not a surrogate)
-            codepoint = code_unit;
-        } else if (code_unit >= 0xD800 and code_unit <= 0xDBFF) {
-            // High surrogate - need low surrogate
-            if (i + 1 >= max_chars) break;
-            const lo_b0: u8 = utf16le[p];
-            const lo_b1: u8 = utf16le[p + 1];
-            const lo_sur: u16 = @as(u16, lo_b0) | (@as(u16, lo_b1) << 8);
-            if (lo_sur < 0xDC00 or lo_sur > 0xDFFF) continue; // Invalid - skip
-            p += 2;
-            i += 1;
-            // Decode surrogate pair
-            const high_ten: u21 = code_unit - 0xD800;
-            const low_ten: u21 = lo_sur - 0xDC00;
-            codepoint = 0x10000 + (high_ten << 10) + low_ten;
-        } else {
-            // Lone low surrogate - invalid, skip
-            continue;
-        }
-
-        // Encode codepoint to UTF-8 and apply escaping
+        // Encode codepoint to UTF-8
         var utf8_buf: [4]u8 = undefined;
         const utf8_len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch continue;
 
@@ -267,4 +283,331 @@ pub fn utf16EqualsAscii(utf16le: []const u8, num_chars: usize, ascii: []const u8
         if (hi != 0 or lo != c) return false;
     }
     return true;
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+/// Convert ASCII string to UTF-16LE bytes (test helper)
+fn asciiToUtf16(buf: []u8, ascii: []const u8) []u8 {
+    for (ascii, 0..) |c, i| {
+        buf[i * 2] = c;
+        buf[i * 2 + 1] = 0;
+    }
+    return buf[0 .. ascii.len * 2];
+}
+
+// ----------------------------------------------------------------------------
+// XML Escaping Tests
+// ----------------------------------------------------------------------------
+
+test "XML escape: ampersand" {
+    var buf: [64]u8 = undefined;
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = asciiToUtf16(&buf, "a&b");
+    try writeUtf16LeXmlEscaped(&w, input, 3);
+    try std.testing.expectEqualStrings("a&amp;b", w.buffer[0..w.end]);
+}
+
+test "XML escape: less than" {
+    var buf: [64]u8 = undefined;
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = asciiToUtf16(&buf, "a<b");
+    try writeUtf16LeXmlEscaped(&w, input, 3);
+    try std.testing.expectEqualStrings("a&lt;b", w.buffer[0..w.end]);
+}
+
+test "XML escape: greater than" {
+    var buf: [64]u8 = undefined;
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = asciiToUtf16(&buf, "a>b");
+    try writeUtf16LeXmlEscaped(&w, input, 3);
+    try std.testing.expectEqualStrings("a&gt;b", w.buffer[0..w.end]);
+}
+
+test "XML escape: double quote" {
+    var buf: [64]u8 = undefined;
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = asciiToUtf16(&buf, "a\"b");
+    try writeUtf16LeXmlEscaped(&w, input, 3);
+    try std.testing.expectEqualStrings("a&quot;b", w.buffer[0..w.end]);
+}
+
+test "XML escape: single quote" {
+    var buf: [64]u8 = undefined;
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = asciiToUtf16(&buf, "a'b");
+    try writeUtf16LeXmlEscaped(&w, input, 3);
+    try std.testing.expectEqualStrings("a&apos;b", w.buffer[0..w.end]);
+}
+
+test "XML escape: all entities" {
+    var buf: [64]u8 = undefined;
+    var out: [128]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = asciiToUtf16(&buf, "&<>\"'");
+    try writeUtf16LeXmlEscaped(&w, input, 5);
+    try std.testing.expectEqualStrings("&amp;&lt;&gt;&quot;&apos;", w.buffer[0..w.end]);
+}
+
+test "XML escape: plain ASCII passthrough" {
+    var buf: [64]u8 = undefined;
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = asciiToUtf16(&buf, "Hello World 123");
+    try writeUtf16LeXmlEscaped(&w, input, 15);
+    try std.testing.expectEqualStrings("Hello World 123", w.buffer[0..w.end]);
+}
+
+test "XML escape: 2-byte UTF-8 passthrough (e-acute)" {
+    // U+00E9 (é) = UTF-16LE: 0xE9, 0x00 → UTF-8: 0xC3 0xA9
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = [_]u8{ 0xE9, 0x00 };
+    try writeUtf16LeXmlEscaped(&w, &input, 1);
+    try std.testing.expectEqualStrings("\xC3\xA9", w.buffer[0..w.end]);
+}
+
+test "XML escape: 3-byte UTF-8 passthrough (euro)" {
+    // U+20AC (€) = UTF-16LE: 0xAC, 0x20 → UTF-8: 0xE2 0x82 0xAC
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = [_]u8{ 0xAC, 0x20 };
+    try writeUtf16LeXmlEscaped(&w, &input, 1);
+    try std.testing.expectEqualStrings("\xE2\x82\xAC", w.buffer[0..w.end]);
+}
+
+test "XML escape: 4-byte UTF-8 passthrough (grinning face)" {
+    // U+1F600 (😀) = UTF-16LE surrogate pair: 0xD83D 0xDE00
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = [_]u8{ 0x3D, 0xD8, 0x00, 0xDE };
+    try writeUtf16LeXmlEscaped(&w, &input, 2);
+    try std.testing.expectEqualStrings("\xF0\x9F\x98\x80", w.buffer[0..w.end]);
+}
+
+// ----------------------------------------------------------------------------
+// JSON Escaping Tests
+// ----------------------------------------------------------------------------
+
+test "JSON escape: double quote" {
+    var buf: [64]u8 = undefined;
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = asciiToUtf16(&buf, "a\"b");
+    try writeUtf16LeJsonEscaped(&w, input, 3);
+    try std.testing.expectEqualStrings("a\\\"b", w.buffer[0..w.end]);
+}
+
+test "JSON escape: backslash" {
+    var buf: [64]u8 = undefined;
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = asciiToUtf16(&buf, "a\\b");
+    try writeUtf16LeJsonEscaped(&w, input, 3);
+    try std.testing.expectEqualStrings("a\\\\b", w.buffer[0..w.end]);
+}
+
+test "JSON escape: backspace" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = [_]u8{ 'a', 0, 0x08, 0, 'b', 0 };
+    try writeUtf16LeJsonEscaped(&w, &input, 3);
+    try std.testing.expectEqualStrings("a\\bb", w.buffer[0..w.end]);
+}
+
+test "JSON escape: form feed" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = [_]u8{ 'a', 0, 0x0C, 0, 'b', 0 };
+    try writeUtf16LeJsonEscaped(&w, &input, 3);
+    try std.testing.expectEqualStrings("a\\fb", w.buffer[0..w.end]);
+}
+
+test "JSON escape: newline" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = [_]u8{ 'a', 0, '\n', 0, 'b', 0 };
+    try writeUtf16LeJsonEscaped(&w, &input, 3);
+    try std.testing.expectEqualStrings("a\\nb", w.buffer[0..w.end]);
+}
+
+test "JSON escape: carriage return" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = [_]u8{ 'a', 0, '\r', 0, 'b', 0 };
+    try writeUtf16LeJsonEscaped(&w, &input, 3);
+    try std.testing.expectEqualStrings("a\\rb", w.buffer[0..w.end]);
+}
+
+test "JSON escape: tab" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = [_]u8{ 'a', 0, '\t', 0, 'b', 0 };
+    try writeUtf16LeJsonEscaped(&w, &input, 3);
+    try std.testing.expectEqualStrings("a\\tb", w.buffer[0..w.end]);
+}
+
+test "JSON escape: control char as unicode escape" {
+    // 0x1F (unit separator) has no named escape, becomes \u001F
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = [_]u8{ 'a', 0, 0x1F, 0, 'b', 0 };
+    try writeUtf16LeJsonEscaped(&w, &input, 3);
+    try std.testing.expectEqualStrings("a\\u001Fb", w.buffer[0..w.end]);
+}
+
+test "JSON escape: null char as unicode escape" {
+    // 0x00 (null) becomes \u0000
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = [_]u8{ 'a', 0, 0x00, 0, 'b', 0 };
+    try writeUtf16LeJsonEscaped(&w, &input, 3);
+    try std.testing.expectEqualStrings("a\\u0000b", w.buffer[0..w.end]);
+}
+
+test "JSON escape: plain ASCII passthrough" {
+    var buf: [64]u8 = undefined;
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = asciiToUtf16(&buf, "Hello World 123");
+    try writeUtf16LeJsonEscaped(&w, input, 15);
+    try std.testing.expectEqualStrings("Hello World 123", w.buffer[0..w.end]);
+}
+
+// ----------------------------------------------------------------------------
+// CP-1252 (ANSI) Tests
+// ----------------------------------------------------------------------------
+
+test "CP-1252: euro sign (0x80)" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    try writeAnsiCp1252Escaped(&w, &[_]u8{0x80});
+    try std.testing.expectEqualStrings("\xE2\x82\xAC", w.buffer[0..w.end]); // U+20AC in UTF-8
+}
+
+test "CP-1252: left double quotation mark (0x93)" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    try writeAnsiCp1252Escaped(&w, &[_]u8{0x93});
+    try std.testing.expectEqualStrings("\xE2\x80\x9C", w.buffer[0..w.end]); // U+201C in UTF-8
+}
+
+test "CP-1252: em dash (0x97)" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    try writeAnsiCp1252Escaped(&w, &[_]u8{0x97});
+    try std.testing.expectEqualStrings("\xE2\x80\x94", w.buffer[0..w.end]); // U+2014 in UTF-8
+}
+
+test "CP-1252: trademark (0x99)" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    try writeAnsiCp1252Escaped(&w, &[_]u8{0x99});
+    try std.testing.expectEqualStrings("\xE2\x84\xA2", w.buffer[0..w.end]); // U+2122 in UTF-8
+}
+
+test "CP-1252: undefined byte (0x81) becomes replacement char" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    try writeAnsiCp1252Escaped(&w, &[_]u8{0x81});
+    try std.testing.expectEqualStrings("\xEF\xBF\xBD", w.buffer[0..w.end]); // U+FFFD in UTF-8
+}
+
+test "CP-1252: ASCII passthrough" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    try writeAnsiCp1252Escaped(&w, "Hello");
+    try std.testing.expectEqualStrings("Hello", w.buffer[0..w.end]);
+}
+
+test "CP-1252: high Latin-1 passthrough (0xA0+)" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    // 0xE9 is é in both CP-1252 and Latin-1
+    try writeAnsiCp1252Escaped(&w, &[_]u8{0xE9});
+    try std.testing.expectEqualStrings("\xC3\xA9", w.buffer[0..w.end]); // U+00E9 in UTF-8
+}
+
+test "CP-1252: XML escaping applied" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    try writeAnsiCp1252Escaped(&w, "a&b");
+    try std.testing.expectEqualStrings("a&amp;b", w.buffer[0..w.end]);
+}
+
+// ----------------------------------------------------------------------------
+// utf16EqualsAscii Tests
+// ----------------------------------------------------------------------------
+
+test "utf16EqualsAscii: exact match" {
+    var buf: [64]u8 = undefined;
+    const utf16 = asciiToUtf16(&buf, "Hello");
+    try std.testing.expect(utf16EqualsAscii(utf16, 5, "Hello"));
+}
+
+test "utf16EqualsAscii: different content" {
+    var buf: [64]u8 = undefined;
+    const utf16 = asciiToUtf16(&buf, "Hello");
+    try std.testing.expect(!utf16EqualsAscii(utf16, 5, "World"));
+}
+
+test "utf16EqualsAscii: different length" {
+    var buf: [64]u8 = undefined;
+    const utf16 = asciiToUtf16(&buf, "Hello");
+    try std.testing.expect(!utf16EqualsAscii(utf16, 5, "Hell"));
+    try std.testing.expect(!utf16EqualsAscii(utf16, 5, "Hello!"));
+}
+
+test "utf16EqualsAscii: empty strings" {
+    const utf16 = [_]u8{};
+    try std.testing.expect(utf16EqualsAscii(&utf16, 0, ""));
+}
+
+test "utf16EqualsAscii: non-BMP UTF-16 with high byte set" {
+    // U+20AC (€) = UTF-16LE: 0xAC, 0x20 - high byte is 0x20, not 0
+    const utf16 = [_]u8{ 0xAC, 0x20 };
+    // Cannot match any single ASCII byte since high byte != 0
+    try std.testing.expect(!utf16EqualsAscii(&utf16, 1, "\xAC"));
+}
+
+// ----------------------------------------------------------------------------
+// Edge Case Tests
+// ----------------------------------------------------------------------------
+
+test "empty input produces no output" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    try writeUtf16LeXmlEscaped(&w, &[_]u8{}, 0);
+    try std.testing.expectEqual(@as(usize, 0), w.end);
+}
+
+test "single character" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = [_]u8{ 'X', 0 };
+    try writeUtf16LeXmlEscaped(&w, &input, 1);
+    try std.testing.expectEqualStrings("X", w.buffer[0..w.end]);
+}
+
+test "lone high surrogate produces no output" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = [_]u8{ 0x00, 0xD8 }; // 0xD800 high surrogate
+    try writeUtf16LeXmlEscaped(&w, &input, 1);
+    try std.testing.expectEqual(@as(usize, 0), w.end);
+}
+
+test "lone low surrogate produces no output" {
+    var out: [64]u8 = undefined;
+    var w = std.Io.Writer.fixed(&out);
+    const input = [_]u8{ 0x00, 0xDC }; // 0xDC00 low surrogate
+    try writeUtf16LeXmlEscaped(&w, &input, 1);
+    try std.testing.expectEqual(@as(usize, 0), w.end);
 }

@@ -150,6 +150,6 @@ const OutputMode = enum { xml, json, jsonl };
 // Test imports - Zig discovers test blocks transitively from imports.
 // These bring in test-only modules not used by the main code path.
 test {
-    _ = @import("parser/util_simd_test.zig");
     _ = @import("test/snapshot_tests.zig");
+    // util_string.zig and util_simd.zig tests are discovered via parser imports
 }
