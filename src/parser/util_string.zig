@@ -112,10 +112,51 @@ pub fn writeUtf16LeJsonEscaped_scalar(w: *std.Io.Writer, utf16le: []const u8, nu
 // Unified Scalar Implementation
 // ============================================================================
 
+/// Check if an ASCII byte needs escaping for the given mode.
+/// Used by the ASCII fast path to detect when to bail to the slow path.
+inline fn asciiNeedsEscape(c: u8, comptime mode: EscapeMode) bool {
+    return switch (mode) {
+        .none => false,
+        .xml => switch (c) {
+            '&', '<', '>', '"', '\'' => true,
+            else => false,
+        },
+        .json => switch (c) {
+            '"', '\\' => true,
+            0x00...0x1F => true, // Control characters
+            else => false,
+        },
+    };
+}
+
 /// Unified UTF-16LE to UTF-8 conversion with configurable escaping.
 ///
-/// Uses std.unicode.Wtf16LeIterator for codepoint iteration (handles unpaired
-/// surrogates gracefully), then applies mode-specific escaping.
+/// This function is optimized for the common case of short ASCII strings
+/// (element names, attribute names, numbers, etc.) which dominate in Windows
+/// event logs. It uses a two-phase approach:
+///
+/// ## Phase 1: ASCII Fast Path
+///
+/// Most strings in EVTX are pure ASCII with no escaping needed. For these,
+/// we can skip the heavy iterator machinery entirely:
+/// - No Wtf16LeIterator state machine overhead
+/// - No utf8Encode() calls (ASCII is already valid UTF-8)
+/// - Direct byte copy from UTF-16 low bytes
+///
+/// The fast path processes characters until it hits either:
+/// - A non-ASCII character (high byte != 0)
+/// - A character that needs escaping
+///
+/// ## Phase 2: Iterator Fallback
+///
+/// For the remaining bytes (non-ASCII, surrogates, or escape sequences),
+/// we fall back to the stdlib Wtf16LeIterator which handles all edge cases.
+///
+/// ## Performance Impact
+///
+/// For typical event log data where ~95% of strings are pure ASCII:
+/// - Fast path handles entire string in one pass
+/// - Avoids ~3x overhead of iterator + utf8Encode per character
 fn writeUtf16LeScalar(w: *std.Io.Writer, utf16le: []const u8, num_chars: usize, comptime mode: EscapeMode) WriterError!void {
     var out_buf: [2048]u8 = undefined;
     var out_len: usize = 0;
@@ -123,9 +164,53 @@ fn writeUtf16LeScalar(w: *std.Io.Writer, utf16le: []const u8, num_chars: usize, 
     const max_bytes = @min(num_chars * 2, utf16le.len);
     if (max_bytes < 2) return;
 
-    // Use stdlib iterator - construct directly to accept unaligned []const u8
+    // =========================================================================
+    // Phase 1: ASCII Fast Path
+    // =========================================================================
+    // Process as many pure-ASCII, no-escape characters as possible.
+    // For each UTF-16LE code unit, the high byte must be 0 (ASCII range)
+    // and the low byte must not require escaping.
+
+    var byte_pos: usize = 0;
+
+    ascii_fast_path: while (byte_pos + 1 < max_bytes) {
+        const lo = utf16le[byte_pos];
+        const hi = utf16le[byte_pos + 1];
+
+        // Non-ASCII: high byte non-zero OR low byte > 0x7F
+        // (Latin-1 chars like é = 0xE9 need 2-byte UTF-8 encoding)
+        if (hi != 0 or lo > 0x7F) break :ascii_fast_path;
+
+        // Check if this ASCII byte needs escaping
+        if (asciiNeedsEscape(lo, mode)) break :ascii_fast_path;
+
+        // Pure ASCII, no escape needed - copy low byte directly
+        // (ASCII bytes are valid UTF-8 as-is)
+        if (out_len == out_buf.len) {
+            try w.writeAll(out_buf[0..out_len]);
+            out_len = 0;
+        }
+        out_buf[out_len] = lo;
+        out_len += 1;
+        byte_pos += 2;
+    }
+
+    // If we processed everything in fast path, flush and return
+    if (byte_pos >= max_bytes) {
+        if (out_len > 0) try w.writeAll(out_buf[0..out_len]);
+        return;
+    }
+
+    // =========================================================================
+    // Phase 2: Iterator Fallback
+    // =========================================================================
+    // Handle remaining bytes with full iterator support for:
+    // - Non-ASCII characters (2-4 byte UTF-8 encoding)
+    // - Surrogate pairs
+    // - Characters that need escaping
+
     var it: std.unicode.Wtf16LeIterator = .{
-        .bytes = utf16le[0..max_bytes],
+        .bytes = utf16le[byte_pos..max_bytes],
         .i = 0,
     };
 
