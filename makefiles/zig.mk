@@ -1,4 +1,4 @@
-.PHONY: all build run test fmt clean bench bench-zbench bench-serialize sample xml json jsonl todo build-all package-all snapshot
+.PHONY: all build run test test-zig test-all fmt clean bench bench-zbench bench-serialize sample xml json jsonl todo build-all package-all snapshot
 
 all: build
 
@@ -44,10 +44,17 @@ TEST_FILTER ?=
 TEST_FILE ?= src/tests.zig
 NO_CACHE ?= 0
 
-test:
+# Run Zig tests only
+test-zig:
 	@# Optionally drop caches to rerun everything fresh
 	@if [ "$(NO_CACHE)" = "1" ]; then rm -rf zig-out .zig-cache; fi
 	$(ZIG) build test -Dtarget=$(TARGET) -Doptimize=$(TEST_OPT) -Duse-c-alloc=$(USE_C_ALLOC_BOOL) --summary all
+
+# Run all tests (Zig + Python)
+test-all: test-zig py-test
+
+# Default test target runs Zig tests (use test-all for everything)
+test: test-zig
 
 snapshot: build-zig
 	$(ZIG) build snapshot -Dtarget=$(TARGET) -Doptimize=$(OPT) -Duse-c-alloc=$(USE_C_ALLOC_BOOL)

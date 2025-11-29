@@ -1,4 +1,4 @@
-.PHONY: py-wheel py-sdist py-install py-editable py-uv-venv py-ensure-pydust py-wheel-dump
+.PHONY: py-wheel py-sdist py-install py-editable py-uv-venv py-ensure-pydust py-wheel-dump py-test
 
 UV ?= uv
 VENV ?= .venv
@@ -62,5 +62,11 @@ py-wheel-dump: py-wheel
 	cmd+=( "$$file" ); \
 	echo "Running: $${cmd[*]}"; \
 	"$${cmd[@]}"
+
+# Run Python tests with pytest
+py-test: py-editable
+	@set -euo pipefail; \
+	$(UV) pip install pytest >/dev/null; \
+	$(UV) run pytest tests/test_python.py -v
 
 
