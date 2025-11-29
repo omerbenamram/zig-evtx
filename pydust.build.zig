@@ -60,6 +60,7 @@ pub const PydustStep = struct {
     hexversion: []const u8,
 
     pydust_source_file: []const u8,
+    pydust_ffi_file: []const u8,
     python_include_dir: []const u8,
     python_library_dir: []const u8,
 
@@ -103,6 +104,7 @@ pub const PydustStep = struct {
             .libpython = libpython,
             .hexversion = hexversion,
             .pydust_source_file = "",
+            .pydust_ffi_file = "",
             .python_include_dir = "",
             .python_library_dir = "",
         };
@@ -115,6 +117,9 @@ pub const PydustStep = struct {
         ) catch @panic("Failed to setup Python");
         self.pydust_source_file = self.pythonOutput(
             "import pydust; import os; print(os.path.relpath(os.path.join(os.path.dirname(pydust.__file__), 'src/pydust.zig')), end='')",
+        ) catch @panic("Failed to setup Python");
+        self.pydust_ffi_file = self.pythonOutput(
+            "import pydust; import os; print(os.path.relpath(os.path.join(os.path.dirname(pydust.__file__), 'src/ffi.h')), end='')",
         ) catch @panic("Failed to setup Python");
 
         // Option for emitting test binary based on the given root source. This can be helpful for debugging.
@@ -183,9 +188,17 @@ pub const PydustStep = struct {
             .root_module = lib_root_mod,
         });
         lib.root_module.addOptions("pyconf", pyconf);
+
+        // Create FFI module via translate-c from Python headers
+        const translate_c = self.addTranslateC(options);
+        translate_c.addIncludePath(b.path(self.python_include_dir));
+
         const lib_module = b.createModule(.{
             .root_source_file = b.path(self.pydust_source_file),
-            .imports = &.{.{ .name = "pyconf", .module = pyconf.createModule() }},
+            .imports = &.{
+                .{ .name = "pyconf", .module = pyconf.createModule() },
+                .{ .name = "ffi", .module = translate_c.createModule() },
+            },
         });
         lib_module.addIncludePath(b.path(self.python_include_dir));
         lib.root_module.addImport("pydust", lib_module);
@@ -203,12 +216,10 @@ pub const PydustStep = struct {
 
         // Invoke stub generator on the emitted binary
         const workingDir = std.fs.cwd().realpathAlloc(self.allocator, ".") catch @panic("OOM");
-        var genArgs: []const []const u8 = undefined;
-        if (self.check_stubs) {
-            genArgs = &.{ self.python_exe, "-m", "pydust.generate_stubs", options.name, workingDir, "--check" };
-        } else {
-            genArgs = &.{ self.python_exe, "-m", "pydust.generate_stubs", options.name, workingDir };
-        }
+        const genArgs: []const []const u8 = if (self.check_stubs)
+            &.{ self.python_exe, "-m", "pydust.generate_stubs", options.name, workingDir, "--check" }
+        else
+            &.{ self.python_exe, "-m", "pydust.generate_stubs", options.name, workingDir };
         const stubs = b.addSystemCommand(genArgs);
         stubs.step.dependOn(&install.step);
         self.generate_stubs.dependOn(&stubs.step);
@@ -225,7 +236,10 @@ pub const PydustStep = struct {
         libtest.root_module.addOptions("pyconf", pyconf);
         const libtest_module = b.createModule(.{
             .root_source_file = b.path(self.pydust_source_file),
-            .imports = &.{.{ .name = "pyconf", .module = pyconf.createModule() }},
+            .imports = &.{
+                .{ .name = "pyconf", .module = pyconf.createModule() },
+                .{ .name = "ffi", .module = translate_c.createModule() },
+            },
         });
         libtest_module.addIncludePath(b.path(self.python_include_dir));
         libtest.root_module.addImport("pydust", libtest_module);
@@ -252,6 +266,18 @@ pub const PydustStep = struct {
             .library_step = lib,
             .test_step = libtest,
         };
+    }
+
+    fn addTranslateC(self: PydustStep, options: PythonModuleOptions) *std.Build.Step.TranslateC {
+        const b = self.owner;
+        const translate_c = b.addTranslateC(.{
+            .root_source_file = b.path(self.pydust_ffi_file),
+            .target = b.resolveTargetQuery(options.target),
+            .optimize = options.optimize,
+        });
+        if (options.limited_api)
+            translate_c.defineCMacro("Py_LIMITED_API", self.hexversion);
+        return translate_c;
     }
 
     fn libraryDestRelPath(allocator: std.mem.Allocator, options: PythonModuleOptions) ![]const u8 {

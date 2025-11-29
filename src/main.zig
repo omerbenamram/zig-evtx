@@ -67,7 +67,6 @@ pub fn main() !void {
     var reader = file.reader(&read_buf);
 
     var parser = try evtx.EvtxParser.init(allocator, .{ .validate_checksums = validate_checksums, .verbosity = verbosity, .max_records = max_records, .skip_first = skip_first, .carve = carve, .ordered = ordered });
-    defer parser.deinit();
 
     const cpu_count = try std.Thread.getCpuCount();
     var num_threads: usize = threads_opt orelse cpu_count;

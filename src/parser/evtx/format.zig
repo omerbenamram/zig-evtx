@@ -7,6 +7,23 @@ const render_xml = @import("../render_xml.zig");
 const render_json = @import("../render_json.zig");
 const alloc_mod = @import("alloc");
 
+/// Read all bytes into buffer from any reader type.
+/// Supports both std.fs.File.reader (with .interface) and RecordStream (with .readNoEof).
+fn readAll(reader: anytype, buf: []u8) !void {
+    const Reader = @TypeOf(reader);
+    const ReaderType = switch (@typeInfo(Reader)) {
+        .pointer => |ptr| ptr.child,
+        else => Reader,
+    };
+    if (@hasField(ReaderType, "interface")) {
+        try reader.interface.readSliceAll(buf);
+    } else if (@hasDecl(ReaderType, "readNoEof")) {
+        try reader.readNoEof(buf);
+    } else {
+        @compileError("Reader must have .interface.readSliceAll or .readNoEof method");
+    }
+}
+
 /// Packed struct for file header core fields at offset 8-44
 pub const FileHeaderCore = packed struct {
     first_chunk: u64,
@@ -31,7 +48,7 @@ pub const FileHeader = struct {
 
     pub fn read(reader: anytype) !FileHeader {
         var buf: [4096]u8 = undefined;
-        try reader.interface.readSliceAll(&buf);
+        try readAll(reader, &buf);
         if (!std.mem.eql(u8, buf[0..8], "ElfFile\x00")) return error.BadSignature;
 
         // Read contiguous fields via packed structs (comptime type dispatch)
@@ -46,10 +63,6 @@ pub const FileHeader = struct {
 
         return .{ .core = core, .tail = tail };
     }
-
-    pub fn validateChecksum(self: *const FileHeader) !void {
-        _ = self;
-    }
 };
 
 pub const Chunk = struct {
@@ -58,7 +71,7 @@ pub const Chunk = struct {
 
     pub fn read(reader: anytype) !Chunk {
         var buf: [65536]u8 = undefined;
-        try reader.interface.readSliceAll(&buf);
+        try readAll(reader, &buf);
         const h = try ChunkHeader.parse(&buf);
         return .{ .header = h, .buf = buf };
     }

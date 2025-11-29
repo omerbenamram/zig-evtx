@@ -7,6 +7,16 @@ const alloc_mod = @import("alloc");
 const logger = @import("../../logger.zig");
 const log = logger.scoped("evtx");
 
+const format = @import("format.zig");
+const output = @import("output.zig");
+const parser_mod = @import("parser.zig");
+
+pub const FileHeader = format.FileHeader;
+pub const Chunk = format.Chunk;
+pub const OutputWriter = output.OutputWriter;
+pub const ParserOptions = parser_mod.ParserOptions;
+pub const OutKind = output.OutputMode;
+pub const EventRecordRaw = format.EventRecordRaw;
 /// Ignore SIGPIPE to prevent crashes when stdout is closed (e.g., piped to head/hyperfine).
 fn ignoreSigpipe() void {
     if (comptime builtin.os.tag != .windows) {
@@ -18,17 +28,6 @@ fn ignoreSigpipe() void {
         std.posix.sigaction(std.posix.SIG.PIPE, &act, null);
     }
 }
-
-const format = @import("format.zig");
-const output = @import("output.zig");
-const parser_mod = @import("parser.zig");
-
-pub const FileHeader = format.FileHeader;
-pub const Chunk = format.Chunk;
-pub const OutputWriter = output.OutputWriter;
-pub const ParserOptions = parser_mod.ParserOptions;
-
-pub const OutKind = enum { xml, json_single, json_lines };
 
 /// Output slot for ordered chunk output.
 /// Each slot holds the serialized output for one chunk.
@@ -44,7 +43,6 @@ const SharedState = struct {
     allocator: std.mem.Allocator,
     opts: ParserOptions,
     out_kind: OutKind,
-    json_opts: output.JsonOptions,
     stdout_file: *std.fs.File,
     write_mutex: *std.Thread.Mutex,
     emitted: *usize,
@@ -59,11 +57,7 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
     const opts = shared.opts;
 
     // Serialize-only mode: we get bytes from serializeRecord and write them manually
-    var out = OutputWriter.initSerializeOnlyWithOptions(switch (shared.out_kind) {
-        .xml => .xml,
-        .json_single => .json_single,
-        .json_lines => .json_lines,
-    }, shared.json_opts);
+    var out = OutputWriter.initSerializeOnly(shared.out_kind);
     defer out.deinit();
     var ctx = binxml.Context.init(allocator) catch return;
     defer ctx.deinit();
@@ -99,7 +93,8 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
 
         while (rec_iter.next() catch null) |rec| {
             if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
-            const bytes = out.serializeRecord(rec, &ctx) catch |e| {
+            const view = EventRecordRaw{ .identifier = rec.identifier, .written_time = rec.written_time, .binxml = rec.binxml, .chunk_buf = &mutable_chunk.buf };
+            const bytes = out.serializeRecord(view, &ctx) catch |e| {
                 log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
                 continue;
             };
@@ -131,7 +126,8 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
             }
 
             selected_including_skips += 1;
-            const bytes = out.serializeRecord(rec, &ctx) catch |e| {
+            const view = EventRecordRaw{ .identifier = rec.identifier, .written_time = rec.written_time, .binxml = rec.binxml, .chunk_buf = &mutable_chunk.buf };
+            const bytes = out.serializeRecord(view, &ctx) catch |e| {
                 log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
                 continue;
             };
@@ -156,7 +152,6 @@ pub fn parseConcurrent(
     reader: anytype,
     opts: ParserOptions,
     out_kind: OutKind,
-    json_opts: output.JsonOptions,
     num_threads: usize,
 ) !void {
     // Ignore SIGPIPE so we don't crash when stdout closes (e.g., piping to head)
@@ -185,8 +180,7 @@ pub fn parseConcurrent(
     // Set trace level for binxml if highest verbosity - done here once before spawning threads
     if (opts.verbosity >= 3) logger.setModuleLevel("binxml", .trace);
 
-    var hdr: FileHeader = try FileHeader.read(reader);
-    if (opts.validate_checksums) try hdr.validateChecksum();
+    const hdr: FileHeader = try FileHeader.read(reader);
 
     // Initialize thread pool
     var pool: std.Thread.Pool = undefined;
@@ -222,7 +216,6 @@ pub fn parseConcurrent(
         .allocator = allocator,
         .opts = opts,
         .out_kind = out_kind,
-        .json_opts = json_opts,
         .stdout_file = &stdout_file,
         .write_mutex = &write_mutex,
         .emitted = &emitted_count,

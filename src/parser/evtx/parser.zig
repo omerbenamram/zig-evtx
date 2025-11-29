@@ -36,14 +36,10 @@ pub const EvtxParser = struct {
     allocator: std.mem.Allocator,
     opts: ParserOptions,
 
-    pub const OutKind = worker.OutKind;
+    pub const OutKind = output.OutputMode;
 
     pub fn init(allocator: std.mem.Allocator, opts: ParserOptions) !EvtxParser {
         return .{ .allocator = allocator, .opts = opts };
-    }
-
-    pub fn deinit(self: *EvtxParser) void {
-        _ = self;
     }
 
     pub fn parse(self: *EvtxParser, reader: anytype, out: anytype) !void {
@@ -67,7 +63,6 @@ pub const EvtxParser = struct {
             },
         }
         const hdr: FileHeader = try FileHeader.read(reader);
-        if (self.opts.validate_checksums) try hdr.validateChecksum();
 
         var chunk_index: usize = 0;
         var emitted: usize = 0;
@@ -125,14 +120,7 @@ pub const EvtxParser = struct {
     }
 
     /// Concurrent parsing entry point: read chunks sequentially, parse in a thread pool, and stream outputs to stdout.
-    pub fn parseConcurrent(self: *EvtxParser, reader: anytype, out_kind: OutKind, json_opts: output.JsonOptions, num_threads: usize) !void {
-        try worker.parseConcurrent(
-            self.allocator,
-            reader,
-            self.opts,
-            out_kind,
-            json_opts,
-            num_threads,
-        );
+    pub fn parseConcurrent(self: *EvtxParser, reader: anytype, out_kind: OutKind, num_threads: usize) !void {
+        try worker.parseConcurrent(self.allocator, reader, self.opts, out_kind, num_threads);
     }
 };

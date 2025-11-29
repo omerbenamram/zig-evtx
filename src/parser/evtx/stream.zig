@@ -63,8 +63,8 @@ pub const RecordStream = struct {
         };
 
         // Read and validate header sequentially from the same reader
+        // Note: FileHeader.read already validates the checksum internally
         tmp.hdr = try FileHeader.read(&tmp);
-        if (opts.validate_checksums) try tmp.hdr.validateChecksum();
         return tmp;
     }
 

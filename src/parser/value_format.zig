@@ -81,9 +81,9 @@ fn readAndFormatInt(w: *std.Io.Writer, comptime T: type, data: []const u8) Write
     }
 }
 
-/// Format a hex integer to concrete std.Io.Writer.
-pub fn formatHexUpper(w: *std.Io.Writer, comptime T: type, value: T) WriterError!void {
-    try w.print("0x{X}", .{value});
+/// Format a hex integer to concrete std.Io.Writer (lowercase for Rust compatibility).
+pub fn formatHex(w: *std.Io.Writer, comptime T: type, value: T) WriterError!void {
+    try w.print("0x{x}", .{value});
 }
 
 /// Format f32 to concrete std.Io.Writer.
@@ -167,16 +167,16 @@ pub fn formatValueXml(w: *std.Io.Writer, vtype: ValueType, data: []const u8) Wri
         .guid => if (reader.readGuid(data)) |g| try formatGuidXml(w, g),
         .size_t => {
             if (data.len >= 8) {
-                if (reader.readValue(u64, data)) |v| try formatHexUpper(w, u64, v);
+                if (reader.readValue(u64, data)) |v| try formatHex(w, u64, v);
             } else if (data.len >= 4) {
-                if (reader.readValue(u32, data)) |v| try formatHexUpper(w, u32, v);
+                if (reader.readValue(u32, data)) |v| try formatHex(w, u32, v);
             }
         },
         .filetime => if (reader.readFileTime(data)) |ft| try formatFileTimeXml(w, ft),
         .systime => if (reader.readSystemTime(data)) |st| try formatSystemTimeXml(w, st),
         .sid => if (reader.readSid(data)) |s| try formatSidXml(w, s),
-        .hex_int32 => if (reader.readValue(u32, data)) |v| try formatHexUpper(w, u32, v),
-        .hex_int64 => if (reader.readValue(u64, data)) |v| try formatHexUpper(w, u64, v),
+        .hex_int32 => if (reader.readValue(u32, data)) |v| try formatHex(w, u32, v),
+        .hex_int64 => if (reader.readValue(u64, data)) |v| try formatHex(w, u64, v),
         .evt_handle => {
             if (data.len >= 8) {
                 if (reader.readValue(u64, data)) |v| try formatDecimal(w, u64, v);
@@ -401,7 +401,7 @@ test "formatValueXml with hex_int32" {
     var buf: [16]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     try formatValueXml(&w, .hex_int32, &data);
-    try std.testing.expectEqualStrings("0xCDAB", buf[0..w.end]);
+    try std.testing.expectEqualStrings("0xcdab", buf[0..w.end]);
 }
 
 test "formatValueXml with truncated data returns gracefully" {

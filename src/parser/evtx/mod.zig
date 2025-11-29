@@ -10,10 +10,9 @@ pub const EvtxParser = @import("parser.zig").EvtxParser;
 
 pub const OutputWriter = @import("output.zig").OutputWriter;
 pub const JsonMode = @import("output.zig").JsonMode;
-pub const JsonOptions = @import("output.zig").JsonOptions;
 
 pub const RecordStream = @import("stream.zig").RecordStream;
-pub const OutputMode = @import("stream.zig").OutputMode;
+pub const OutputMode = @import("output.zig").OutputMode;
 
 pub const EventRecordRaw = @import("format.zig").EventRecordRaw;
 pub const RecordIterator = @import("format.zig").RecordIterator;
