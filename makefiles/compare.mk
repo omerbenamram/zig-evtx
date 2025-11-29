@@ -1,4 +1,4 @@
-.PHONY: install-evtx xml-rs xml-zig compare-first xml-all-rs xml-all-zig compare-all record compare-time time-zig time-rust hexdump snapshot-update
+.PHONY: install-evtx xml-rs xml-zig compare-first xml-all-rs xml-all-zig compare-all record compare-time time-zig time-rust bench-hyperfine bench-hyperfine-mt hexdump snapshot-update
 
 EVTX_DUMP ?= evtx_dump
 OUT_DIR ?= out
@@ -136,6 +136,71 @@ hexdump:
 	else echo "Provide N=<index>, RID=<EventRecordID>, or ALL=1"; exit 1; fi; \
 	if [ -n "$(LIMIT)" ]; then args="$$args --limit $(LIMIT)"; fi; \
 	$(PYTHON) scripts/record_hexdump.py $$args
+
+# Benchmark using hyperfine (single-threaded)
+# Usage: make bench-hyperfine FILE=samples/security.evtx [EVTX_DUMP=~/Workspace/evtx/target/release/evtx_dump] [WARMUP=2] [MIN_RUNS=10]
+bench-hyperfine: build-zig
+	@set -euo pipefail; \
+	if [ -z "$(FILE)" ]; then echo "Usage: make bench-hyperfine FILE=path/to/file.evtx [EVTX_DUMP=path] [WARMUP=2] [MIN_RUNS=10]"; exit 1; fi; \
+	WARMUP=$${WARMUP:-2}; \
+	MIN_RUNS=$${MIN_RUNS:-10}; \
+	mkdir -p $(OUT_DIR); \
+	echo "Building Zig ($(OPT))..."; \
+	$(ZIG) build -Dtarget=$(TARGET) -Doptimize=$(OPT) -Duse-c-alloc=$(USE_C_ALLOC_BOOL) -Dwith-python=false >/dev/null; \
+	echo "Benchmarking with hyperfine (warmup=$$WARMUP, min-runs=$$MIN_RUNS)..."; \
+	RS_BIN=$$(echo "$(EVTX_DUMP)" | sed "s|^~|$$HOME|"); \
+	hyperfine \
+		--warmup $$WARMUP \
+		--min-runs $$MIN_RUNS \
+		-N \
+		--export-json "$(OUT_DIR)/bench-hyperfine.json" \
+		--export-markdown "$(OUT_DIR)/bench-hyperfine.md" \
+		-n "Zig (1 thread)" "zig-out/bin/evtx_dump_zig --no-checks --carve -t 1 -o xml $(FILE)" \
+		-n "Rust (1 thread)" "$$RS_BIN -t 1 -o xml $(FILE)"; \
+	echo ""; \
+	echo "Results saved to:"; \
+	echo "  - $(OUT_DIR)/bench-hyperfine.json"; \
+	echo "  - $(OUT_DIR)/bench-hyperfine.md"
+
+# Benchmark using hyperfine (multithreaded comparison)
+# Usage: make bench-hyperfine-mt FILE=samples/security.evtx [EVTX_DUMP=~/Workspace/evtx/target/release/evtx_dump] [THREADS=0] [WARMUP=2] [MIN_RUNS=10]
+# THREADS=0 uses default (CPU count), otherwise specify number
+bench-hyperfine-mt: build-zig
+	@set -euo pipefail; \
+	if [ -z "$(FILE)" ]; then echo "Usage: make bench-hyperfine-mt FILE=path/to/file.evtx [EVTX_DUMP=path] [THREADS=0] [WARMUP=2] [MIN_RUNS=10]"; exit 1; fi; \
+	WARMUP=$${WARMUP:-2}; \
+	MIN_RUNS=$${MIN_RUNS:-10}; \
+	THREADS=$${THREADS:-0}; \
+	mkdir -p $(OUT_DIR); \
+	echo "Building Zig ($(OPT))..."; \
+	$(ZIG) build -Dtarget=$(TARGET) -Doptimize=$(OPT) -Duse-c-alloc=$(USE_C_ALLOC_BOOL) -Dwith-python=false >/dev/null; \
+	echo "Benchmarking multithreaded with hyperfine (warmup=$$WARMUP, min-runs=$$MIN_RUNS)..."; \
+	RS_BIN=$$(echo "$(EVTX_DUMP)" | sed "s|^~|$$HOME|"); \
+	if [ "$$THREADS" = "0" ]; then \
+		ZIG_MT="zig-out/bin/evtx_dump_zig --no-checks --carve -o xml $(FILE)"; \
+		RS_MT="$$RS_BIN -o xml $(FILE)"; \
+		ZIG_ST="zig-out/bin/evtx_dump_zig --no-checks --carve -t 1 -o xml $(FILE)"; \
+		RS_ST="$$RS_BIN -t 1 -o xml $(FILE)"; \
+	else \
+		ZIG_MT="zig-out/bin/evtx_dump_zig --no-checks --carve -t $$THREADS -o xml $(FILE)"; \
+		RS_MT="$$RS_BIN -t $$THREADS -o xml $(FILE)"; \
+		ZIG_ST="zig-out/bin/evtx_dump_zig --no-checks --carve -t 1 -o xml $(FILE)"; \
+		RS_ST="$$RS_BIN -t 1 -o xml $(FILE)"; \
+	fi; \
+	hyperfine \
+		--warmup $$WARMUP \
+		--min-runs $$MIN_RUNS \
+		-N \
+		--export-json "$(OUT_DIR)/bench-hyperfine-mt.json" \
+		--export-markdown "$(OUT_DIR)/bench-hyperfine-mt.md" \
+		-n "Zig (1 thread)" "$$ZIG_ST" \
+		-n "Zig (MT)" "$$ZIG_MT" \
+		-n "Rust (1 thread)" "$$RS_ST" \
+		-n "Rust (MT)" "$$RS_MT"; \
+	echo ""; \
+	echo "Results saved to:"; \
+	echo "  - $(OUT_DIR)/bench-hyperfine-mt.json"; \
+	echo "  - $(OUT_DIR)/bench-hyperfine-mt.md"
 
 # Update snapshots from current Zig output (uses Zig snapshot tool)
 snapshot-update: build-zig
