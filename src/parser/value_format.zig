@@ -105,9 +105,9 @@ pub fn formatBool(w: *std.Io.Writer, value: bool) WriterError!void {
     try w.writeAll(if (value) "true" else "false");
 }
 
-/// Write bytes as lowercase hex string to concrete std.Io.Writer.
-pub fn formatHexBytesLower(w: *std.Io.Writer, bytes: []const u8) WriterError!void {
-    const hex_chars = "0123456789abcdef";
+/// Write bytes as uppercase hex string to concrete std.Io.Writer.
+pub fn formatHexBytesUpper(w: *std.Io.Writer, bytes: []const u8) WriterError!void {
+    const hex_chars = "0123456789ABCDEF";
     for (bytes) |b| {
         try w.writeByte(hex_chars[b >> 4]);
         try w.writeByte(hex_chars[b & 0x0F]);
@@ -137,8 +137,13 @@ pub fn formatUtf16StringXml(w: *std.Io.Writer, data: []const u8) WriterError!voi
 }
 
 /// Format ANSI string for XML to concrete std.Io.Writer.
+/// Strips trailing null terminator.
 pub fn formatAnsiStringXml(w: *std.Io.Writer, data: []const u8) WriterError!void {
-    try util.writeAnsiCp1252Escaped(w, data);
+    var len = data.len;
+    // Strip trailing null terminator
+    if (len > 0 and data[len - 1] == 0) len -= 1;
+    if (len == 0) return;
+    try util.writeAnsiCp1252Escaped(w, data[0..len]);
 }
 
 /// Format a binary value to XML based on its ValueType to concrete std.Io.Writer.
@@ -158,7 +163,7 @@ pub fn formatValueXml(w: *std.Io.Writer, vtype: ValueType, data: []const u8) Wri
         .real32 => if (vr.readValue(f32, data)) |f| try formatFloat32Xml(w, f),
         .real64 => if (vr.readValue(f64, data)) |f| try formatFloat64Xml(w, f),
         .bool => if (vr.readValue(bool, data)) |b| try formatBool(w, b),
-        .binary => try formatHexBytesLower(w, data),
+        .binary => try formatHexBytesUpper(w, data),
         .guid => if (vr.readGuid(data)) |g| try formatGuidXml(w, g),
         .size_t => {
             if (data.len >= 8) {
@@ -180,16 +185,91 @@ pub fn formatValueXml(w: *std.Io.Writer, vtype: ValueType, data: []const u8) Wri
             }
         },
         .bin_xml => {},
-        .evt_xml => try formatHexBytesLower(w, data),
+        .evt_xml => try formatHexBytesUpper(w, data),
         else => {},
     }
 }
 
 /// Convenience: format from raw u8 type code for XML to concrete std.Io.Writer.
 pub fn formatValueXmlFromRaw(w: *std.Io.Writer, raw_type: u8, data: []const u8) WriterError!void {
+    const is_array = (raw_type & ValueType.ARRAY_FLAG) != 0;
     const base = raw_type & 0x7F;
+
+    // Handle string arrays specially: split by null, join with comma
+    if (is_array) {
+        if (base == @intFromEnum(ValueType.ansi_string)) {
+            try formatAnsiStringArrayXml(w, data);
+            return;
+        } else if (base == @intFromEnum(ValueType.string)) {
+            try formatUtf16StringArrayXml(w, data);
+            return;
+        }
+        // For fixed-size element arrays, format each element separated by comma
+        if (ValueType.fixedSizeFromRaw(base)) |elem_size| {
+            var first = true;
+            var offset: usize = 0;
+            while (offset + elem_size <= data.len) : (offset += elem_size) {
+                if (!first) try w.writeByte(',');
+                first = false;
+                const elem_data = data[offset .. offset + elem_size];
+                const vtype = std.meta.intToEnum(ValueType, base) catch return;
+                try formatValueXml(w, vtype, elem_data);
+            }
+            return;
+        }
+    }
+
     const vtype = std.meta.intToEnum(ValueType, base) catch return;
     try formatValueXml(w, vtype, data);
+}
+
+/// Format ANSI string array: null-separated strings joined with comma.
+fn formatAnsiStringArrayXml(w: *std.Io.Writer, data: []const u8) WriterError!void {
+    var first = true;
+    var start: usize = 0;
+    for (data, 0..) |b, i| {
+        if (b == 0) {
+            if (!first) try w.writeByte(',');
+            first = false;
+            // Write the segment (may be empty for consecutive nulls)
+            try util.writeAnsiCp1252Escaped(w, data[start..i]);
+            start = i + 1;
+        }
+    }
+    // Handle trailing segment without null terminator
+    if (start < data.len) {
+        if (!first) try w.writeByte(',');
+        try util.writeAnsiCp1252Escaped(w, data[start..]);
+    }
+}
+
+/// Format UTF-16LE string array: null-separated strings joined with comma.
+fn formatUtf16StringArrayXml(w: *std.Io.Writer, data: []const u8) WriterError!void {
+    if (data.len < 2 or (data.len & 1) != 0) return;
+    var first = true;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i + 2 <= data.len) : (i += 2) {
+        const ch = std.mem.readInt(u16, data[i..][0..2], .little);
+        if (ch == 0) {
+            if (!first) try w.writeByte(',');
+            first = false;
+            // Write the segment
+            const seg = data[start..i];
+            if (seg.len > 0) {
+                try util.writeUtf16LeXmlEscaped(w, seg, seg.len / 2);
+            }
+            start = i + 2;
+        }
+    }
+    // Handle trailing segment
+    if (start < data.len) {
+        if (!first) try w.writeByte(',');
+        const seg = data[start..];
+        if (seg.len >= 2) {
+            try util.writeUtf16LeXmlEscaped(w, seg, seg.len / 2);
+        }
+    }
 }
 
 // ============================================================================
@@ -333,12 +413,12 @@ test "formatValueXml with truncated data returns gracefully" {
     try std.testing.expectEqualStrings("", buf[0..w.end]); // Nothing written
 }
 
-test "formatHexBytesLower produces lowercase hex" {
+test "formatHexBytesUpper produces uppercase hex" {
     const data = [_]u8{ 0xDE, 0xAD, 0xBE, 0xEF };
     var buf: [16]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
-    try formatHexBytesLower(&w, &data);
-    try std.testing.expectEqualStrings("deadbeef", buf[0..w.end]);
+    try formatHexBytesUpper(&w, &data);
+    try std.testing.expectEqualStrings("DEADBEEF", buf[0..w.end]);
 }
 
 test "formatFloat32Xml handles special values" {

@@ -60,14 +60,29 @@ TESTS = [
         record_id=38,
         expected_file="record_38_nested_binxml.expected.xml",
     ),
+    SnapshotTest(
+        name="ansi_string_array",
+        description="ANSI string arrays should be comma-separated (e.g., '10.00.,15063,,Multiprocessor Free,0')",
+        evtx_file="system.evtx",
+        record_id=1,
+        expected_file="record_1_ansi_string_array.expected.xml",
+    ),
+    SnapshotTest(
+        name="ansi_string_null",
+        description="ANSI strings should have trailing null stripped (e.g., 'NOEXECUTE=OPTIN')",
+        evtx_file="system.evtx",
+        record_id=5,
+        expected_file="record_5_ansi_string_null.expected.xml",
+    ),
 ]
 
 
 def get_record_by_id(evtx_path: Path, record_id: int) -> str:
     """Extract a single record by EventRecordID using the Zig parser."""
     # Use the parser to output all records, then filter
+    # --carve ensures we read all chunks even if header is stale
     result = subprocess.run(
-        [str(ZIG_BINARY), "-o", "xml", "-t", "1", str(evtx_path)],
+        [str(ZIG_BINARY), "-o", "xml", "-t", "1", "--carve", str(evtx_path)],
         capture_output=True,
         text=True,
     )

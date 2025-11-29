@@ -1,0 +1,22 @@
+<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event">
+  <System>
+    <Provider Name="Microsoft-Windows-Kernel-Boot" Guid="{15ca44ff-4d7a-4baa-bba5-0998955e531e}"></Provider>
+    <EventID Qualifiers="">27</EventID>
+    <Version>1</Version>
+    <Level>4</Level>
+    <Task>33</Task>
+    <Opcode>0</Opcode>
+    <Keywords>0x8000000000000000</Keywords>
+    <TimeCreated SystemTime="2017-07-12T17:16:05.539657Z"></TimeCreated>
+    <EventRecordID>5</EventRecordID>
+    <Correlation ActivityID="" RelatedActivityID=""></Correlation>
+    <Execution ProcessID="4" ThreadID="8"></Execution>
+    <Channel>System</Channel>
+    <Computer>WIN-P4SIAA0SQCO</Computer>
+    <Security UserID="S-1-5-18"></Security>
+  </System>
+  <EventData>
+    <Data Name="BootType">0</Data>
+    <Data Name="LoadOptions"> NOEXECUTE=OPTIN</Data>
+  </EventData>
+</Event>
