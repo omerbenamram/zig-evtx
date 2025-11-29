@@ -14,7 +14,6 @@ const tokens = @import("tokens.zig");
 const util = @import("../util.zig");
 const utf16EqualsAscii = util.utf16EqualsAscii;
 const binxml_name = @import("name.zig");
-const common = @import("common.zig");
 
 /// Context required for parsing BinXML elements.
 ///
@@ -95,7 +94,7 @@ pub fn parseRecord(ctx: *Context, chunk: []const u8, bin: []const u8) !ElementTr
     const allocator = ctx.arena.allocator();
 
     // Skip fragment header if present
-    const start_offset = common.skipFragmentHeader(bin, 0);
+    const start_offset = skipFragmentHeader(bin, 0);
 
     // Handle empty event case
     if (start_offset >= bin.len) {
@@ -124,6 +123,52 @@ pub fn parseRecord(ctx: *Context, chunk: []const u8, bin: []const u8) !ElementTr
 }
 
 // --- Template Instance Parsing ---
+
+/// Returns offset after fragment header if present, otherwise same offset.
+fn skipFragmentHeader(data: []const u8, offset: usize) usize {
+    if (offset + @sizeOf(types.FragmentHeader) <= data.len and data[offset] == tokens.TOK_FRAGMENT_HEADER) {
+        return offset + @sizeOf(types.FragmentHeader);
+    }
+    return offset;
+}
+
+/// Reads a TemplateDefinitionHeader from chunk at given offset.
+fn readTemplateDefHeader(chunk: []const u8, offset: usize) types.TemplateDefinitionHeader {
+    const slice = chunk[offset..][0..@sizeOf(types.TemplateDefinitionHeader)];
+    return std.mem.bytesToValue(types.TemplateDefinitionHeader, slice);
+}
+
+/// Calculates where substitution values start within a template instance.
+///
+/// Template instances have this structure:
+/// - TemplateInstanceStart header (10 bytes)
+/// - Inline template definitions (if def_data_off == position after header)
+/// - Substitution values
+///
+/// If the template definition is inline, we follow the chain of definitions
+/// (via next_offset) to find where substitution values begin.
+///
+/// Returns the chunk offset where substitution values start.
+fn calcValuesOffset(chunk: []const u8, after_header: usize, def_data_off: u32) usize {
+    // If definition is NOT inline (stored elsewhere in chunk), values start immediately
+    if (def_data_off != after_header) return after_header;
+
+    // Definition is inline - skip past it (and any chained definitions)
+    var offset = after_header;
+    while (offset + @sizeOf(types.TemplateDefinitionHeader) <= chunk.len) {
+        const hdr = readTemplateDefHeader(chunk, offset);
+        const data_end = offset + @sizeOf(types.TemplateDefinitionHeader) + hdr.data_size;
+
+        if (data_end > chunk.len) break;
+        offset = data_end;
+
+        // next_offset == 0 means no more chained definitions
+        // next_offset pointing elsewhere means we're done with inline defs
+        if (hdr.next_offset == 0 or hdr.next_offset != offset) break;
+    }
+
+    return offset;
+}
 
 /// Parses a template instance by getting/caching the template and instantiating it.
 ///
@@ -154,7 +199,7 @@ fn parseTemplateInstance(ctx: *Context, chunk: []const u8, bin: []const u8, star
     // r.pos: how many bytes we've read (the header size as determined by Reader)
     const chunk_base = @intFromPtr(bin.ptr) - @intFromPtr(chunk.ptr);
     const after_header = chunk_base + start_offset + r.pos;
-    const values_offset = common.calcValuesOffset(chunk, after_header, header.def_data_off);
+    const values_offset = calcValuesOffset(chunk, after_header, header.def_data_off);
 
     if (values_offset >= chunk.len) {
         log.err("parseTemplateInstance: values_offset 0x{x} >= chunk.len 0x{x}", .{ values_offset, chunk.len });
@@ -185,8 +230,9 @@ fn getOrCacheTemplate(ctx: *Context, chunk: []const u8, def_data_off: u32) !Temp
             return error.OutOfBounds;
         }
 
-        const data_size = common.readTemplateDefSize(chunk, def_data_off);
-        const data_start = off + 24; // Header is 24 bytes
+        const def_header = readTemplateDefHeader(chunk, off);
+        const data_size = def_header.data_size;
+        const data_start = off + @sizeOf(types.TemplateDefinitionHeader);
 
         if (data_start + data_size > chunk.len) {
             return error.OutOfBounds;
@@ -197,7 +243,7 @@ fn getOrCacheTemplate(ctx: *Context, chunk: []const u8, def_data_off: u32) !Temp
         var def_r = Reader.init(def_data);
 
         // Skip fragment header if present
-        const frag_offset = common.skipFragmentHeader(def_data, 0);
+        const frag_offset = skipFragmentHeader(def_data, 0);
         def_r.pos = frag_offset;
 
         // Parse with parsing_template_def=true so substitutions become Placeholder nodes
@@ -489,7 +535,7 @@ pub fn parseNestedBinXmlIntoResolved(
     if (binxml_data.len == 0) return;
 
     // Skip fragment header if present
-    const start_offset = common.skipFragmentHeader(binxml_data, 0);
+    const start_offset = skipFragmentHeader(binxml_data, 0);
     if (start_offset >= binxml_data.len) return;
 
     // Check if this is a template instance or direct element

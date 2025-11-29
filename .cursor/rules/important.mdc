@@ -30,6 +30,9 @@ alwaysApply: true
 ## Reading binary data
     - Always use methods from @reader.zig/value_reader.zig to read binary data.
         - avoid using std.mem.readInt manually into the byte buffer.
+    - Use a structured parsing approach that aligns with the spec (Windows XML Event Log (EVTX).asciidoc).
+        - Parsing logic (conditionals, skip-if-present, offset calculations) belongs in the parser.
+        - To read a struct: use `std.mem.bytesToValue` or `Reader.readStruct`, then access fields directly.
 
 # Python integration
 

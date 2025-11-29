@@ -26,8 +26,6 @@ pub const OutputWriter = struct {
     scratch: std.Io.Writer.Allocating,
     /// Size hint for pre-allocation
     last_size_hint: usize,
-    /// Optional reusable rendering context provided by parser (per-chunk)
-    ctx: ?*binxml.Context = null,
     /// Exponential moving average of previous serialized sizes for pre-sizing
     ema_size: f64 = 0.0,
     ema_alpha: f64 = 0.25,
@@ -51,7 +49,7 @@ pub const OutputWriter = struct {
     }
 
     /// Initialize for serialize-only mode (no destination writer needed).
-    /// Use serializeRecord() to get bytes; writeRecord() will fail.
+    /// Use serializeRecord() to get bytes.
     pub fn initSerializeOnly(mode_: OutputMode) OutputWriter {
         return .{
             .dest = null,
@@ -63,10 +61,6 @@ pub const OutputWriter = struct {
 
     pub fn deinit(self: *OutputWriter) void {
         self.scratch.deinit();
-    }
-
-    pub fn setContext(self: *OutputWriter, c: *binxml.Context) void {
-        self.ctx = c;
     }
 
     fn reserveScratch(self: *OutputWriter) void {
@@ -87,74 +81,19 @@ pub const OutputWriter = struct {
         self.scratch.ensureTotalCapacity(target) catch {};
     }
 
-    pub fn writeRecord(self: *OutputWriter, record: EventRecordView) !void {
+    pub fn serializeRecord(self: *OutputWriter, record: EventRecordView, ctx: *binxml.Context) ![]const u8 {
         self.reserveScratch();
         const w: *std.Io.Writer = &self.scratch.writer;
         switch (self.mode) {
             .xml => {
-                if (self.ctx) |ctx| {
-                    try render_xml.renderXmlWithContext(ctx, record.chunk_buf, record.raw_xml, w);
-                } else {
-                    var local_ctx = try binxml.Context.init(alloc_mod.get());
-                    defer local_ctx.deinit();
-                    try render_xml.renderXmlWithContext(&local_ctx, record.chunk_buf, record.raw_xml, w);
-                }
+                try render_xml.renderXmlWithContext(ctx, record.chunk_buf, record.raw_xml, w);
                 try w.writeByte('\n');
             },
             .json_single, .json_lines => {
                 try w.writeAll("{");
                 try w.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
-                if (self.ctx) |ctx| {
-                    const tree = try binxml.parseRecord(ctx, record.chunk_buf, record.raw_xml);
-                    try render_json.renderElementJson(tree.element, ctx.arena.allocator(), w);
-                } else {
-                    var local_ctx = try binxml.Context.init(alloc_mod.get());
-                    defer local_ctx.deinit();
-                    const tree = try binxml.parseRecord(&local_ctx, record.chunk_buf, record.raw_xml);
-                    try render_json.renderElementJson(tree.element, local_ctx.arena.allocator(), w);
-                }
-                try w.writeAll("}\n");
-            },
-        }
-        // Emit once to the underlying writer and update size hint
-        const written = self.scratch.written();
-        if (self.dest) |dest| try dest.writeAll(written);
-        self.last_size_hint = written.len;
-        // Update EMA for future reservations
-        const cur_len_f: f64 = @floatFromInt(written.len);
-        if (self.ema_size == 0.0) {
-            self.ema_size = cur_len_f;
-        } else {
-            self.ema_size = self.ema_size + self.ema_alpha * (cur_len_f - self.ema_size);
-        }
-    }
-
-    pub fn serializeRecord(self: *OutputWriter, record: EventRecordView) ![]const u8 {
-        self.reserveScratch();
-        const w: *std.Io.Writer = &self.scratch.writer;
-        switch (self.mode) {
-            .xml => {
-                if (self.ctx) |ctx| {
-                    try render_xml.renderXmlWithContext(ctx, record.chunk_buf, record.raw_xml, w);
-                } else {
-                    var local_ctx = try binxml.Context.init(alloc_mod.get());
-                    defer local_ctx.deinit();
-                    try render_xml.renderXmlWithContext(&local_ctx, record.chunk_buf, record.raw_xml, w);
-                }
-                try w.writeByte('\n');
-            },
-            .json_single, .json_lines => {
-                try w.writeAll("{");
-                try w.print("\"event_record_id\":{d},\"timestamp_filetime\":{d},\"Event\":", .{ record.id, record.timestamp_filetime });
-                if (self.ctx) |ctx| {
-                    const tree = try binxml.parseRecord(ctx, record.chunk_buf, record.raw_xml);
-                    try render_json.renderElementJson(tree.element, ctx.arena.allocator(), w);
-                } else {
-                    var local_ctx = try binxml.Context.init(alloc_mod.get());
-                    defer local_ctx.deinit();
-                    const tree = try binxml.parseRecord(&local_ctx, record.chunk_buf, record.raw_xml);
-                    try render_json.renderElementJson(tree.element, local_ctx.arena.allocator(), w);
-                }
+                const tree = try binxml.parseRecord(ctx, record.chunk_buf, record.raw_xml);
+                try render_json.renderElementJson(tree.element, ctx.arena.allocator(), w);
                 try w.writeAll("}\n");
             },
         }

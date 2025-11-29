@@ -77,7 +77,6 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
     ctx.resetPerChunk();
     ctx.preCacheFromChunkHeader(&mutable_chunk.buf, &mutable_chunk.header.common_string_offsets);
     if (opts.verbosity >= 3) logger.setModuleLevel("binxml", .trace);
-    out.setContext(&ctx);
 
     var rec_iter = mutable_chunk.records();
     const has_limits = (opts.max_records != 0) or (opts.skip_first > 0);
@@ -91,7 +90,7 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
         while (rec_iter.next() catch null) |rec| {
             if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
             const view = EventRecordView{ .id = rec.identifier, .timestamp_filetime = rec.written_time, .raw_xml = rec.binxml, .chunk_buf = rec.chunk_buf };
-            const bytes = out.serializeRecord(view) catch |e| {
+            const bytes = out.serializeRecord(view, &ctx) catch |e| {
                 log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
                 continue;
             };
@@ -118,7 +117,7 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
 
             selected_including_skips += 1;
             const view = EventRecordView{ .id = rec.identifier, .timestamp_filetime = rec.written_time, .raw_xml = rec.binxml, .chunk_buf = rec.chunk_buf };
-            const bytes = out.serializeRecord(view) catch |e| {
+            const bytes = out.serializeRecord(view, &ctx) catch |e| {
                 log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
                 continue;
             };

@@ -83,7 +83,6 @@ pub const RecordStream = struct {
         // Pre-cache common strings from chunk header for faster lookups
         self.ctx.preCacheFromChunkHeader(&self.current_chunk.buf, &self.current_chunk.header.common_string_offsets);
         if (self.opts.verbosity >= 3) logger.setModuleLevel("binxml", .trace);
-        self.out.setContext(&self.ctx);
         self.rec_iter = self.current_chunk.records();
         self.have_iter = true;
         return true;
@@ -100,7 +99,7 @@ pub const RecordStream = struct {
                 }
                 self.selected_including_skips += 1;
                 const view = EventRecordView{ .id = rec.identifier, .timestamp_filetime = rec.written_time, .raw_xml = rec.binxml, .chunk_buf = rec.chunk_buf };
-                const bytes = try self.out.serializeRecord(view);
+                const bytes = try self.out.serializeRecord(view, &self.ctx);
                 self.emitted += 1;
                 if (self.opts.max_records != 0 and self.emitted >= self.opts.max_records) {
                     // Mark exhausted so subsequent calls return null

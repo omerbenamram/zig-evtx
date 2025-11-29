@@ -80,10 +80,6 @@ pub const EvtxParser = struct {
             ctx.preCacheFromChunkHeader(&chunk.buf, &chunk.header.common_string_offsets);
             // Only enable deepest renderer-specific traces at -vvv
             if (self.opts.verbosity >= 3) logger.setModuleLevel("binxml", .trace);
-            // Provide output with reusable context for this chunk
-            if (@hasDecl(@TypeOf(out_mut.*), "setContext")) {
-                out_mut.setContext(&ctx);
-            }
             var rec_iter = chunk.records();
             var selected_including_skips: usize = 0;
             while (try rec_iter.next()) |rec| {
@@ -95,7 +91,7 @@ pub const EvtxParser = struct {
                 }
                 selected_including_skips += 1;
                 const view = EventRecordView{ .id = rec.identifier, .timestamp_filetime = rec.written_time, .raw_xml = rec.binxml, .chunk_buf = rec.chunk_buf };
-                out_mut.writeRecord(view) catch |e| {
+                const bytes = out_mut.serializeRecord(view, &ctx) catch |e| {
                     failed += 1;
                     log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
                     // If isolating with skip_first, respect -n even when the selected record fails
@@ -104,6 +100,7 @@ pub const EvtxParser = struct {
                     }
                     continue; // keep going to inspect later records and compare outputs
                 };
+                if (out_mut.dest) |dest| try dest.writeAll(bytes);
                 emitted += 1;
                 if (self.opts.max_records != 0) {
                     if (self.opts.skip_first > 0) {

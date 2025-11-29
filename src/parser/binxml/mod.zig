@@ -15,7 +15,6 @@ pub const Context = context_mod.Context;
 pub const Template = context_mod.Template;
 pub const ElementTree = context_mod.ElementTree;
 pub const parser = @import("parser.zig");
-pub const common = @import("common.zig");
 pub const value_reader = @import("value_reader.zig");
 
 /// Main entry point: parses a BinXML record into a fully resolved ElementTree.
