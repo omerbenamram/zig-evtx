@@ -22,20 +22,14 @@ pub const OutputWriter = struct {
     dest: ?*std.Io.Writer,
     /// Output format mode
     mode: OutputMode,
-    /// Allocating writer for building serialized output
+    /// Allocating writer for building serialized output (auto-grows, retains capacity)
     scratch: std.Io.Writer.Allocating,
-    /// Size hint for pre-allocation
-    last_size_hint: usize,
-    /// Exponential moving average of previous serialized sizes for pre-sizing
-    ema_size: f64 = 0.0,
-    ema_alpha: f64 = 0.25,
 
     pub fn initXml(dest: *std.Io.Writer) OutputWriter {
         return .{
             .dest = dest,
             .mode = .xml,
-            .scratch = std.Io.Writer.Allocating.initCapacity(alloc_mod.get(), 4096) catch std.Io.Writer.Allocating.init(alloc_mod.get()),
-            .last_size_hint = 4096,
+            .scratch = std.Io.Writer.Allocating.initCapacity(alloc_mod.get(), 4096) catch .init(alloc_mod.get()),
         };
     }
 
@@ -43,19 +37,16 @@ pub const OutputWriter = struct {
         return .{
             .dest = dest,
             .mode = if (json_mode == .single) .json_single else .json_lines,
-            .scratch = std.Io.Writer.Allocating.initCapacity(alloc_mod.get(), 4096) catch std.Io.Writer.Allocating.init(alloc_mod.get()),
-            .last_size_hint = 4096,
+            .scratch = std.Io.Writer.Allocating.initCapacity(alloc_mod.get(), 4096) catch .init(alloc_mod.get()),
         };
     }
 
     /// Initialize for serialize-only mode (no destination writer needed).
-    /// Use serializeRecord() to get bytes.
     pub fn initSerializeOnly(mode_: OutputMode) OutputWriter {
         return .{
             .dest = null,
             .mode = mode_,
-            .scratch = std.Io.Writer.Allocating.initCapacity(alloc_mod.get(), 4096) catch std.Io.Writer.Allocating.init(alloc_mod.get()),
-            .last_size_hint = 4096,
+            .scratch = std.Io.Writer.Allocating.initCapacity(alloc_mod.get(), 4096) catch .init(alloc_mod.get()),
         };
     }
 
@@ -63,26 +54,8 @@ pub const OutputWriter = struct {
         self.scratch.deinit();
     }
 
-    fn reserveScratch(self: *OutputWriter) void {
-        // Reserve based on last serialized size (+25%) and EMA of recent sizes.
-        const slack: usize = 512;
-        const growth: usize = self.last_size_hint / 4; // +25%
-        var target: usize = self.last_size_hint + growth + slack;
-        if (self.ema_size > 0.0) {
-            const ema_scaled: f64 = self.ema_size * 1.10 + 512.0;
-            const ema_usize: usize = @intFromFloat(ema_scaled);
-            if (ema_usize > target) target = ema_usize;
-        }
-        const max_cap: usize = 4 * 1024 * 1024; // clamp to 4 MiB retained capacity
-        if (target > max_cap) target = max_cap;
-
-        // Clear scratch buffer (keep capacity)
-        self.scratch.clearRetainingCapacity();
-        self.scratch.ensureTotalCapacity(target) catch {};
-    }
-
     pub fn serializeRecord(self: *OutputWriter, record: EventRecordView, ctx: *binxml.Context) ![]const u8 {
-        self.reserveScratch();
+        self.scratch.clearRetainingCapacity();
         const w: *std.Io.Writer = &self.scratch.writer;
         switch (self.mode) {
             .xml => {
@@ -97,11 +70,7 @@ pub const OutputWriter = struct {
                 try w.writeAll("}\n");
             },
         }
-        const written = self.scratch.written();
-        self.last_size_hint = written.len;
-        const cur_len_f: f64 = @floatFromInt(written.len);
-        if (self.ema_size == 0.0) self.ema_size = cur_len_f else self.ema_size = self.ema_size + self.ema_alpha * (cur_len_f - self.ema_size);
-        return written;
+        return self.scratch.written();
     }
 
     pub fn flush(self: *OutputWriter) void {
