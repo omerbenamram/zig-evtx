@@ -17,10 +17,20 @@ const CaseId = enum {
     long_ascii,
 };
 
+/// Convert ASCII string to UTF-16LE bytes (test helper)
+fn asciiToUtf16(alloc: std.mem.Allocator, ascii: []const u8) ![]u8 {
+    const buf = try alloc.alloc(u8, ascii.len * 2);
+    for (ascii, 0..) |c, i| {
+        buf[i * 2] = c;
+        buf[i * 2 + 1] = 0;
+    }
+    return buf;
+}
+
 fn buildUtf16Case(alloc: std.mem.Allocator, id: CaseId) ![]u8 {
     switch (id) {
-        .ascii => return util.utf16FromAscii(alloc, "Hello &<>\"' World"),
-        .long_ascii => return util.utf16FromAscii(alloc, "aaaaaaa&bbbbbbb&ccccccc<dddddd>eeeeee\"fffffff'gggggg"),
+        .ascii => return asciiToUtf16(alloc, "Hello &<>\"' World"),
+        .long_ascii => return asciiToUtf16(alloc, "aaaaaaa&bbbbbbb&ccccccc<dddddd>eeeeee\"fffffff'gggggg"),
         .euro => return alloc.dupe(u8, &[_]u8{ 0xAC, 0x20 }),
         .e_acute => return alloc.dupe(u8, &[_]u8{ 0xE9, 0x00 }),
         .two_byte_max => return alloc.dupe(u8, &[_]u8{ 0xFF, 0x07 }),

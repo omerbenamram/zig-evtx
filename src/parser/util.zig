@@ -114,16 +114,6 @@ pub fn formatIso8601UtcFromFiletimeMicros(buf: []u8, filetime: u64) ![]const u8 
     });
 }
 
-pub fn utf16FromAscii(alloc: std.mem.Allocator, ascii: []const u8) ![]u8 {
-    if (ascii.len == 0) return try alloc.alloc(u8, 0);
-    const buf = try alloc.alloc(u8, ascii.len * 2);
-    for (ascii, 0..) |c, i| {
-        buf[i * 2] = c;
-        buf[i * 2 + 1] = 0;
-    }
-    return buf;
-}
-
 // ============================================================================
 // Concrete std.Io.Writer Variants (Zig 0.15+)
 // ============================================================================

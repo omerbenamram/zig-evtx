@@ -94,20 +94,14 @@ pub const Reader = struct {
         };
     }
 
-    /// Reads exactly `n` bytes from the current position.
+    /// Reads exactly `n` bytes, but fails if reading would exceed `end_pos`.
+    /// Used when parsing bounded regions within a larger buffer.
     /// Returns a slice into the underlying buffer (zero-copy).
-    pub inline fn readFixedBytes(self: *Reader, n: usize) ![]const u8 {
-        if (self.rem() < n) return BinXmlError.UnexpectedEof;
+    pub inline fn readFixedBytesBounded(self: *Reader, n: usize, end_pos: usize) ![]const u8 {
+        if (self.pos + n > end_pos) return BinXmlError.UnexpectedEof;
         const slice = self.buf[self.pos .. self.pos + n];
         self.pos += n;
         return slice;
-    }
-
-    /// Reads exactly `n` bytes, but fails if reading would exceed `end_pos`.
-    /// Used when parsing bounded regions within a larger buffer.
-    pub inline fn readFixedBytesBounded(self: *Reader, n: usize, end_pos: usize) ![]const u8 {
-        if (self.pos + n > end_pos) return BinXmlError.UnexpectedEof;
-        return self.readFixedBytes(n);
     }
 
     /// Reads a length-prefixed slice.

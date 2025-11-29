@@ -54,9 +54,8 @@ const MAX_UNIQUE_NAMES: usize = 64;
 // Content Rendering
 // ============================================================================
 
-/// Render IR nodes as a JSON string value
-fn renderTextToJsonString(nodes: []const IR.Node, writer: *std.Io.Writer) WriterError!void {
-    try writer.writeByte('"');
+/// Render IR nodes as JSON-escaped text content (without surrounding quotes)
+fn renderJsonTextContent(nodes: []const IR.Node, writer: *std.Io.Writer) WriterError!void {
     for (nodes) |node| {
         switch (node) {
             .Text => |text| try util.writeUtf16LeJsonEscaped(writer, text.utf16, text.num_chars),
@@ -68,6 +67,12 @@ fn renderTextToJsonString(nodes: []const IR.Node, writer: *std.Io.Writer) Writer
             .Placeholder => unreachable, // ElementTree guarantees no placeholders
         }
     }
+}
+
+/// Render IR nodes as a JSON string value (with surrounding quotes)
+fn renderTextToJsonString(nodes: []const IR.Node, writer: *std.Io.Writer) WriterError!void {
+    try writer.writeByte('"');
+    try renderJsonTextContent(nodes, writer);
     try writer.writeByte('"');
 }
 
@@ -176,19 +181,7 @@ fn writeElementBodyJson(element: *const IR.Element, allocator: std.mem.Allocator
     if (has_textual_content) {
         if (wrote_any) try writer.writeByte(',');
         try writer.writeAll("\"#text\":");
-        try writer.writeByte('"');
-        for (element.children.items) |node| {
-            switch (node) {
-                .Text => |text| try util.writeUtf16LeJsonEscaped(writer, text.utf16, text.num_chars),
-                .Value => |val| try vf.formatValueXmlFromRaw(writer, val.vtype, val.bytes),
-                .CharRef => |charref| try writer.print("&#{d};", .{charref}),
-                .EntityRef => try writer.writeByte('&'),
-                .CData => |cdata| try util.writeUtf16LeJsonEscaped(writer, cdata.utf16, cdata.num_chars),
-                .PITarget, .PIData, .Element => {},
-                .Placeholder => unreachable, // ElementTree guarantees no placeholders
-            }
-        }
-        try writer.writeByte('"');
+        try renderTextToJsonString(element.children.items, writer);
         wrote_any = true;
     }
 

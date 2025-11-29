@@ -73,12 +73,11 @@ pub fn formatDecimal(w: *std.Io.Writer, comptime T: type, value: T) WriterError!
 }
 
 /// Read and format an integer to concrete std.Io.Writer.
-pub fn readAndFormatInt(w: *std.Io.Writer, comptime T: type, data: []const u8) WriterError!bool {
+/// Does nothing if data is too short for the requested type.
+fn readAndFormatInt(w: *std.Io.Writer, comptime T: type, data: []const u8) WriterError!void {
     if (vr.readValue(T, data)) |v| {
         try formatDecimal(w, T, v);
-        return true;
     }
-    return false;
 }
 
 /// Format a hex integer to concrete std.Io.Writer.
@@ -152,14 +151,14 @@ pub fn formatValueXml(w: *std.Io.Writer, vtype: ValueType, data: []const u8) Wri
         .null => {},
         .string => try formatUtf16StringXml(w, data),
         .ansi_string => try formatAnsiStringXml(w, data),
-        .int8 => _ = try readAndFormatInt(w, i8, data),
-        .uint8 => _ = try readAndFormatInt(w, u8, data),
-        .int16 => _ = try readAndFormatInt(w, i16, data),
-        .uint16 => _ = try readAndFormatInt(w, u16, data),
-        .int32 => _ = try readAndFormatInt(w, i32, data),
-        .uint32 => _ = try readAndFormatInt(w, u32, data),
-        .int64 => _ = try readAndFormatInt(w, i64, data),
-        .uint64 => _ = try readAndFormatInt(w, u64, data),
+        .int8 => try readAndFormatInt(w, i8, data),
+        .uint8 => try readAndFormatInt(w, u8, data),
+        .int16 => try readAndFormatInt(w, i16, data),
+        .uint16 => try readAndFormatInt(w, u16, data),
+        .int32 => try readAndFormatInt(w, i32, data),
+        .uint32 => try readAndFormatInt(w, u32, data),
+        .int64 => try readAndFormatInt(w, i64, data),
+        .uint64 => try readAndFormatInt(w, u64, data),
         .real32 => if (vr.readValue(f32, data)) |f| try formatFloat32Xml(w, f),
         .real64 => if (vr.readValue(f64, data)) |f| try formatFloat64Xml(w, f),
         .bool => if (vr.readValue(bool, data)) |b| try formatBool(w, b),
@@ -186,7 +185,6 @@ pub fn formatValueXml(w: *std.Io.Writer, vtype: ValueType, data: []const u8) Wri
         },
         .bin_xml => {},
         .evt_xml => try formatHexBytesUpper(w, data),
-        else => {},
     }
 }
 

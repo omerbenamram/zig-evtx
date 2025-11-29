@@ -16,8 +16,8 @@ const util = @import("../util.zig");
 /// Context required for parsing BinXML elements.
 ///
 /// BinXML element headers have two variations based on where they appear:
-/// - **Template definitions**: headers include a dependency ID (2 bytes)
-/// - **Direct elements**: headers omit the dependency ID
+/// - **Template definitions**: headers include a dependency ID (2 bytes), substitutions become Placeholders
+/// - **Direct elements**: headers omit the dependency ID, substitutions are an error
 ///
 /// Additionally, element names can be stored inline or referenced by offset:
 /// - **Inline**: name immediately follows the offset field (offset == current chunk position)
@@ -31,13 +31,9 @@ pub const ElementContext = struct {
     chunk_base: usize,
 
     /// Whether element headers contain a dependency ID field.
-    /// True for template definitions, false for direct record elements.
+    /// True for template definitions (substitutions become Placeholder nodes),
+    /// false for direct record elements (substitutions are an error).
     has_dep_id: bool,
-
-    /// Whether we're parsing a template definition (for caching).
-    /// When true, substitution tokens become Placeholder nodes.
-    /// When false, substitution tokens are an error (shouldn't appear outside templates).
-    parsing_template_def: bool = false,
 };
 
 /// Bundles common parsing state to reduce function signature noise.
@@ -47,7 +43,6 @@ pub const ParseState = struct {
     r: *Reader,
     chunk_base: usize,
     has_dep_id: bool,
-    parsing_template_def: bool,
 
     pub fn init(ctx: *Context, chunk: []const u8, r: *Reader, elem_ctx: ElementContext) ParseState {
         return .{
@@ -56,7 +51,6 @@ pub const ParseState = struct {
             .r = r,
             .chunk_base = elem_ctx.chunk_base,
             .has_dep_id = elem_ctx.has_dep_id,
-            .parsing_template_def = elem_ctx.parsing_template_def,
         };
     }
 
@@ -115,7 +109,6 @@ pub fn parseRecord(ctx: *Context, chunk: []const u8, bin: []const u8) !ElementTr
     const el = try parseElementIR(ctx, chunk, &r, .{
         .chunk_base = chunk_base,
         .has_dep_id = false,
-        .parsing_template_def = false,
     });
     return .{ .element = el };
 }
@@ -239,11 +232,10 @@ fn getOrCacheTemplate(ctx: *Context, chunk: []const u8, def_data_off: u32) !Temp
     const frag_offset = skipFragmentHeader(def_data, 0);
     def_r.pos = frag_offset;
 
-    // Parse with parsing_template_def=true so substitutions become Placeholder nodes
+    // Parse with has_dep_id=true so substitutions become Placeholder nodes
     const root = try parseElementIR(ctx, chunk, &def_r, .{
         .chunk_base = data_start,
         .has_dep_id = true, // Template definitions include dependency IDs
-        .parsing_template_def = true,
     });
 
     // Cache by GUID on success
@@ -326,7 +318,7 @@ fn parseElementIRImpl(ps: *ParseState) !*IR.Element {
     }
 
     // 2. Parse Element Header (Name, DataSize, etc.)
-    const header = try parseElementHeaderAndEnd(ps, element_start_pos);
+    const header = try parseElementHeader(ps, element_start_pos);
     const element_end_pos = header.element_end;
 
     // 3. Create IR Element
@@ -444,8 +436,8 @@ fn parseAttributeListIR(ps: *ParseState, max_end: usize) !std.ArrayList(IR.Attr)
 }
 
 /// Collects a sequence of value tokens (Value, Subst, CharRef, etc.) into a list of IR Nodes.
-/// When parsing_template_def is true, substitution tokens become Placeholder nodes.
-/// When parsing_template_def is false, substitution tokens are an error.
+/// When has_dep_id is true (template definition), substitution tokens become Placeholder nodes.
+/// When has_dep_id is false, substitution tokens are an error.
 fn collectValueTokens(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize) !void {
     while (ps.r.rem() > 0 and ps.r.pos < end_pos) {
         const pk = ps.r.peekByte() catch break;
@@ -460,8 +452,8 @@ fn collectValueTokens(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: us
                 const h = try readHeaderChecked(ps.r, types.SubstitutionHeader, end_pos);
                 const optional = tokens.isToken(h.token, tokens.TOK_OPTIONAL_SUBST);
 
-                if (ps.parsing_template_def) {
-                    // Create Placeholder node for later resolution during instantiation
+                if (ps.has_dep_id) {
+                    // Template definition: substitutions become Placeholder nodes for later resolution
                     try out.append(ps.alloc(), .{
                         .Placeholder = .{ .id = h.id, .vtype = h.vtype, .optional = optional },
                     });
@@ -525,7 +517,6 @@ pub fn parseNestedBinXmlIntoResolved(
         const elem = try parseElementIR(ctx, chunk, &nested_r, .{
             .chunk_base = chunk_base,
             .has_dep_id = false,
-            .parsing_template_def = false,
         });
         try out.append(allocator, .{ .Element = elem });
     }
@@ -688,48 +679,14 @@ fn readNameIRBounded(ps: *ParseState, end_pos: usize) !IR.Name {
 
 const ElementHeader = struct {
     name: IR.Name,
-    data_size: u32,
-    header_len: usize,
     element_end: usize,
 };
 
-fn parseElementHeaderAndEnd(ps: *ParseState, element_start: usize) !ElementHeader {
-    const hdr = try parseElementHeader(ps);
-
-    const element_end = element_start + hdr.header_len + @as(usize, hdr.data_size);
-
-    if (log.enabled(.trace)) {
-        log.trace("elem hdr: start=0x{x} header_len=0x{x} data_size=0x{x} end=0x{x} buf_len=0x{x}", .{
-            element_start, hdr.header_len, hdr.data_size, element_end, ps.r.buf.len,
-        });
-    }
-
-    if (element_end > ps.r.buf.len or element_end < element_start) {
-        log.err("parseElementHeaderAndEnd: bounds check failed! start=0x{x} header_len=0x{x} data_size=0x{x} end=0x{x} buf_len=0x{x}", .{
-            element_start, hdr.header_len, hdr.data_size, element_end, ps.r.buf.len,
-        });
-        return BinXmlError.UnexpectedEof;
-    }
-
-    return .{
-        .name = hdr.name,
-        .data_size = hdr.data_size,
-        .header_len = hdr.header_len,
-        .element_end = element_end,
-    };
-}
-
-const PartialElementHeader = struct {
-    name: IR.Name,
-    data_size: u32,
-    header_len: usize,
-};
-
-/// Parses an element header (after the OpenStart token).
+/// Parses an element header (after the OpenStart token) and computes element bounds.
 /// Handles both formats:
 /// - Template definitions: dep_id (2 bytes) + data_size (4 bytes) + name_offset (4 bytes)
 /// - Direct elements: data_size (4 bytes) + name_offset (4 bytes)
-fn parseElementHeader(ps: *ParseState) !PartialElementHeader {
+fn parseElementHeader(ps: *ParseState, element_start: usize) !ElementHeader {
     const pos_before = ps.r.pos;
 
     // Template definitions have a dependency ID, direct elements don't
@@ -749,8 +706,22 @@ fn parseElementHeader(ps: *ParseState) !PartialElementHeader {
 
     // Header length: 1 byte token + optional 2 bytes dep_id + 4 bytes data_size
     const header_len: usize = 1 + (if (ps.has_dep_id) @as(usize, 2) else 0) + 4;
+    const element_end = element_start + header_len + @as(usize, data_size);
 
-    return .{ .name = name, .data_size = data_size, .header_len = header_len };
+    if (log.enabled(.trace)) {
+        log.trace("elem hdr: start=0x{x} header_len=0x{x} data_size=0x{x} end=0x{x} buf_len=0x{x}", .{
+            element_start, header_len, data_size, element_end, ps.r.buf.len,
+        });
+    }
+
+    if (element_end > ps.r.buf.len or element_end < element_start) {
+        log.err("parseElementHeader: bounds check failed! start=0x{x} header_len=0x{x} data_size=0x{x} end=0x{x} buf_len=0x{x}", .{
+            element_start, header_len, data_size, element_end, ps.r.buf.len,
+        });
+        return BinXmlError.UnexpectedEof;
+    }
+
+    return .{ .name = name, .element_end = element_end };
 }
 
 fn logTraceContext(msg: []const u8, r: *Reader, pos_override: ?usize) void {

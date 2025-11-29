@@ -29,32 +29,7 @@ pub const ValueType = enum(u8) {
     bin_xml = 0x21,
     evt_xml = 0x23,
 
-    // Array types (0x80 | base_type)
-    string_array = 0x81,
-    ansi_string_array = 0x82,
-    int8_array = 0x83,
-    uint8_array = 0x84,
-    int16_array = 0x85,
-    uint16_array = 0x86,
-    int32_array = 0x87,
-    uint32_array = 0x88,
-    int64_array = 0x89,
-    uint64_array = 0x8a,
-    real32_array = 0x8b,
-    real64_array = 0x8c,
-    bool_array = 0x8d,
-    binary_array = 0x8e,
-    guid_array = 0x8f,
-    size_t_array = 0x90,
-    filetime_array = 0x91,
-    systime_array = 0x92,
-    sid_array = 0x93,
-    hex_int32_array = 0x94,
-    hex_int64_array = 0x95,
-    evt_handle_array = 0xa0,
-    bin_xml_array = 0xa1,
-    evt_xml_array = 0xa3,
-
+    // Array types use ARRAY_FLAG (0x80) | base_type - no explicit enum variants needed
     pub const ARRAY_FLAG = 0x80;
 
     /// Returns the fixed byte size for a raw type byte, or null if variable-length.
@@ -76,16 +51,12 @@ pub const FragmentHeader = packed struct {
     major_version: u8,
     minor_version: u8,
     flags: u8,
-
-    pub const binary_size: usize = 4;
 };
 
 pub const ValueDescriptor = packed struct {
     size: u16,
     value_type: ValueType,
     unknown: u8,
-
-    pub const binary_size: usize = 4;
 };
 
 pub const TemplateValue = struct {
@@ -97,14 +68,10 @@ pub const NameHeader = packed struct {
     next_offset: u32,
     hash: u16,
     num_chars: u16,
-
-    pub const binary_size: usize = 8;
 };
 
 pub const AttributeListHeader = packed struct {
     data_size: u32,
-
-    pub const binary_size: usize = 4;
 };
 
 /// Template definition header in BinXML format.
@@ -130,35 +97,25 @@ pub const TemplateDefinitionHeader = struct {
 pub const ValueTokenHeader = packed struct {
     token: u8,
     vtype: u8,
-
-    pub const binary_size: usize = 2;
 };
 
 pub const SubstitutionHeader = packed struct {
     token: u8,
     id: u16,
     vtype: u8,
-
-    pub const binary_size: usize = 4;
 };
 
 pub const CharRefHeader = packed struct {
     token: u8,
     value: u16,
-
-    pub const binary_size: usize = 3;
 };
 
 pub const TokenHeader = packed struct {
     token: u8,
-
-    pub const binary_size: usize = 1;
 };
 
 pub const NameOffsetHeader = packed struct {
     offset: u32,
-
-    pub const binary_size: usize = 4;
 };
 
 pub const TemplateInstanceStart = packed struct {
@@ -166,6 +123,4 @@ pub const TemplateInstanceStart = packed struct {
     version: u8,
     template_id: u32,
     def_data_off: u32,
-
-    pub const binary_size: usize = 10;
 };
