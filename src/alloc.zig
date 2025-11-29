@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-var gpa_state: std.heap.GeneralPurposeAllocator(.{}) = .{};
+var gpa_state: std.heap.GeneralPurposeAllocator(.{ .thread_safe = true }) = .{};
 
 pub fn get() std.mem.Allocator {
     if (builtin.link_libc) {

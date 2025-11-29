@@ -4,6 +4,9 @@ const alloc_mod = @import("alloc");
 
 pub const Level = enum(u8) { err = 1, warn = 2, info = 3, debug = 4, trace = 5 };
 
+/// Mutex protecting writes to module_levels hashmap
+var logger_mutex: std.Thread.Mutex = .{};
+
 fn parseLevel(s: []const u8) ?Level {
     if (std.ascii.eqlIgnoreCase(s, "error") or std.mem.eql(u8, s, "1")) return .err;
     if (std.ascii.eqlIgnoreCase(s, "warn") or std.mem.eql(u8, s, "warning") or std.mem.eql(u8, s, "2")) return .warn;
@@ -13,13 +16,15 @@ fn parseLevel(s: []const u8) ?Level {
     return null;
 }
 
-var global_level: Level = .warn;
+// Use atomic for lock-free reads
+var global_level_atomic: std.atomic.Value(u8) = std.atomic.Value(u8).init(@intFromEnum(Level.warn));
 var global_level_loaded: bool = false;
 
 // Compile-time switch: TRACE logs are only enabled in Debug builds
 const TRACE_ENABLED: bool = builtin.mode == .Debug;
 
-fn loadGlobalLevel() void {
+/// Called once at startup with lock held
+fn loadGlobalLevelLocked() void {
     if (global_level_loaded) return;
     global_level_loaded = true;
     const allocator = alloc_mod.get();
@@ -29,14 +34,15 @@ fn loadGlobalLevel() void {
         if (std.process.getEnvVarOwned(allocator, key_list[i])) |val| {
             defer allocator.free(val);
             if (parseLevel(std.mem.trim(u8, val, " \t\r\n"))) |lvl| {
-                global_level = lvl;
+                global_level_atomic.store(@intFromEnum(lvl), .release);
                 return;
             }
         } else |_| {}
     }
 }
 
-fn ensureMap() *std.StringHashMap(Level) {
+/// Must be called with logger_mutex held
+fn ensureMapLocked() *std.StringHashMap(Level) {
     if (!module_levels_inited) {
         module_levels = std.StringHashMap(Level).init(alloc_mod.get());
         module_levels_inited = true;
@@ -46,16 +52,31 @@ fn ensureMap() *std.StringHashMap(Level) {
 
 var module_levels_inited: bool = false;
 var module_levels: std.StringHashMap(Level) = undefined;
+// After setup, cache pointers for fast lock-free access to known modules
+var evtx_level_ptr: ?*Level = null;
+var binxml_level_ptr: ?*Level = null;
 
-fn cacheModuleLevel(module: []const u8, lvl: Level) void {
-    var map = ensureMap();
+fn cacheModuleLevelLocked(module: []const u8, lvl: Level) void {
+    var map = ensureMapLocked();
     const mod_copy = alloc_mod.get().dupe(u8, module) catch return;
-    map.put(mod_copy, lvl) catch {};
+    const result = map.getOrPut(mod_copy) catch return;
+    result.value_ptr.* = lvl;
+
+    // Cache pointers for known hot modules
+    if (std.mem.eql(u8, module, "evtx")) {
+        evtx_level_ptr = result.value_ptr;
+    } else if (std.mem.eql(u8, module, "binxml")) {
+        binxml_level_ptr = result.value_ptr;
+    }
 }
 
 pub fn clearModuleLevelCache() void {
+    logger_mutex.lock();
+    defer logger_mutex.unlock();
     if (!module_levels_inited) return;
     module_levels.clearRetainingCapacity();
+    evtx_level_ptr = null;
+    binxml_level_ptr = null;
 }
 
 fn upperModuleName(buf: []u8, module: []const u8) []const u8 {
@@ -72,7 +93,6 @@ fn upperModuleName(buf: []u8, module: []const u8) []const u8 {
 }
 
 fn envKeyForModule(buf: []u8, module: []const u8) []const u8 {
-    // Format: EVTX_LOG_<UPPERCASE_MODULE>
     var i: usize = 0;
     const prefix = "EVTX_LOG_";
     if (buf.len < prefix.len) return buf[0..0];
@@ -84,10 +104,27 @@ fn envKeyForModule(buf: []u8, module: []const u8) []const u8 {
     return buf[0 .. i + u.len];
 }
 
-fn getModuleLevel(module: []const u8) Level {
-    loadGlobalLevel();
-    var map = ensureMap();
+/// Lock-free fast path for known modules
+fn getModuleLevelFast(module: []const u8) ?Level {
+    // Check cached pointers first (lock-free)
+    if (std.mem.eql(u8, module, "evtx")) {
+        if (evtx_level_ptr) |ptr| return ptr.*;
+    } else if (std.mem.eql(u8, module, "binxml")) {
+        if (binxml_level_ptr) |ptr| return ptr.*;
+    }
+    return null;
+}
+
+/// Slow path with locking
+fn getModuleLevelSlow(module: []const u8) Level {
+    logger_mutex.lock();
+    defer logger_mutex.unlock();
+
+    loadGlobalLevelLocked();
+    var map = ensureMapLocked();
+
     if (map.get(module)) |lvl| return lvl;
+
     // Check env override
     var key_buf: [128]u8 = undefined;
     const key = envKeyForModule(&key_buf, module);
@@ -95,14 +132,22 @@ fn getModuleLevel(module: []const u8) Level {
         if (std.process.getEnvVarOwned(alloc_mod.get(), key)) |val| {
             defer alloc_mod.get().free(val);
             if (parseLevel(std.mem.trim(u8, val, " \t\r\n"))) |lvl| {
-                cacheModuleLevel(module, lvl);
+                cacheModuleLevelLocked(module, lvl);
                 return lvl;
             }
         } else |_| {}
     }
-    // Fallback to global; cache this decision to avoid repeated getenv calls
-    cacheModuleLevel(module, global_level);
-    return global_level;
+
+    const global = @as(Level, @enumFromInt(global_level_atomic.load(.acquire)));
+    cacheModuleLevelLocked(module, global);
+    return global;
+}
+
+fn getModuleLevel(module: []const u8) Level {
+    // Fast path: check cached pointers (lock-free)
+    if (getModuleLevelFast(module)) |lvl| return lvl;
+    // Slow path: use locking
+    return getModuleLevelSlow(module);
 }
 
 fn levelTag(lvl: Level) []const u8 {
@@ -122,10 +167,9 @@ fn shouldLog(module: []const u8, lvl: Level) bool {
 }
 
 fn writePrefix(w: anytype, lvl: Level, module: []const u8) !void {
-    // Minimal timestamp (ms since start)
     const ts_ms: i128 = std.time.milliTimestamp();
     try w.print("[{s}] {s}: ", .{ levelTag(lvl), module });
-    _ = ts_ms; // keep for future if needed
+    _ = ts_ms;
 }
 
 fn logInternal(module: []const u8, lvl: Level, comptime fmt: []const u8, args: anytype) void {
@@ -169,15 +213,20 @@ pub fn scoped(module: []const u8) Logger {
 }
 
 pub fn setGlobalLevel(lvl: Level) void {
-    global_level = lvl;
+    logger_mutex.lock();
+    defer logger_mutex.unlock();
+    global_level_atomic.store(@intFromEnum(lvl), .release);
     global_level_loaded = true;
-    // Changing the global level should invalidate per-module cached levels
-    clearModuleLevelCache();
+    if (module_levels_inited) {
+        module_levels.clearRetainingCapacity();
+        evtx_level_ptr = null;
+        binxml_level_ptr = null;
+    }
 }
 
 pub fn setModuleLevel(module: []const u8, lvl: Level) void {
-    var map = ensureMap();
-    // Store owned key to make it stable
-    const mod_copy = alloc_mod.get().dupe(u8, module) catch return;
-    map.put(mod_copy, lvl) catch {};
+    logger_mutex.lock();
+    defer logger_mutex.unlock();
+    loadGlobalLevelLocked();
+    cacheModuleLevelLocked(module, lvl);
 }

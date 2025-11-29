@@ -130,12 +130,6 @@ fn skipFragmentHeader(data: []const u8, offset: usize) usize {
     return offset;
 }
 
-/// Reads a TemplateDefinitionHeader from chunk at given offset.
-fn readTemplateDefHeader(chunk: []const u8, offset: usize) types.TemplateDefinitionHeader {
-    const slice = chunk[offset..][0..@sizeOf(types.TemplateDefinitionHeader)];
-    return std.mem.bytesToValue(types.TemplateDefinitionHeader, slice);
-}
-
 /// Calculates where substitution values start within a template instance.
 ///
 /// Template instances have this structure:
@@ -153,9 +147,9 @@ fn calcValuesOffset(chunk: []const u8, after_header: usize, def_data_off: u32) u
 
     // Definition is inline - skip past it (and any chained definitions)
     var offset = after_header;
-    while (offset + @sizeOf(types.TemplateDefinitionHeader) <= chunk.len) {
-        const hdr = readTemplateDefHeader(chunk, offset);
-        const data_end = offset + @sizeOf(types.TemplateDefinitionHeader) + hdr.data_size;
+    while (offset + types.TemplateDefinitionHeader.binary_size <= chunk.len) {
+        const hdr = types.TemplateDefinitionHeader.read(chunk, offset);
+        const data_end = offset + types.TemplateDefinitionHeader.binary_size + hdr.data_size;
 
         if (data_end > chunk.len) break;
         offset = data_end;
@@ -217,55 +211,45 @@ fn parseTemplateInstance(ctx: *Context, chunk: []const u8, bin: []const u8, star
 
 /// Gets or parses and caches a template definition.
 /// Returns a Template containing the parsed IR with Placeholder nodes for substitutions.
+/// Templates are cached by their GUID, which uniquely identifies them.
 fn getOrCacheTemplate(ctx: *Context, chunk: []const u8, def_data_off: u32) !Template {
-    const key = makeDefCacheKey(chunk, def_data_off);
-    const got = try ctx.cache.getOrPut(key);
-
-    if (!got.found_existing) {
-        // Parse template definition with Placeholder nodes
-        const off: usize = @intCast(def_data_off);
-        if (off + @sizeOf(types.TemplateDefinitionHeader) > chunk.len) {
-            return error.OutOfBounds;
-        }
-
-        const def_header = readTemplateDefHeader(chunk, off);
-        const data_size = def_header.data_size;
-        const data_start = off + @sizeOf(types.TemplateDefinitionHeader);
-
-        if (data_start + data_size > chunk.len) {
-            return error.OutOfBounds;
-        }
-
-        // Parse template definition data
-        const def_data = chunk[data_start .. data_start + data_size];
-        var def_r = Reader.init(def_data);
-
-        // Skip fragment header if present
-        const frag_offset = skipFragmentHeader(def_data, 0);
-        def_r.pos = frag_offset;
-
-        // Parse with parsing_template_def=true so substitutions become Placeholder nodes
-        const root = try parseElementIR(ctx, chunk, &def_r, .{
-            .chunk_base = data_start,
-            .has_dep_id = true, // Template definitions include dependency IDs
-            .parsing_template_def = true,
-        });
-
-        got.value_ptr.* = .{ .root = root };
+    const off: usize = @intCast(def_data_off);
+    if (off + types.TemplateDefinitionHeader.binary_size > chunk.len) {
+        return error.OutOfBounds;
     }
 
-    return got.value_ptr.*;
-}
+    const def_header = types.TemplateDefinitionHeader.read(chunk, off);
 
-/// Creates a cache key for template definitions.
-/// Uses offset + GUID to ensure uniqueness across different template definitions.
-fn makeDefCacheKey(chunk: []const u8, def_data_off: u32) Context.DefKey {
-    var guid: [16]u8 = undefined;
-    const base: usize = @intCast(def_data_off);
-    // GUID is at offset 4 in TemplateDefinitionHeader (after next_offset u32)
-    const guid_slice = chunk[base + 4 .. base + 20];
-    @memcpy(guid[0..], guid_slice);
-    return .{ .def_data_off = def_data_off, .guid = guid };
+    // Cache by GUID - the unique identifier for template definitions
+    if (ctx.cache.get(def_header.guid)) |cached| {
+        return cached;
+    }
+
+    const data_start = off + types.TemplateDefinitionHeader.binary_size;
+
+    if (data_start + def_header.data_size > chunk.len) {
+        return error.OutOfBounds;
+    }
+
+    // Parse template definition data
+    const def_data = chunk[data_start .. data_start + def_header.data_size];
+    var def_r = Reader.init(def_data);
+
+    // Skip fragment header if present
+    const frag_offset = skipFragmentHeader(def_data, 0);
+    def_r.pos = frag_offset;
+
+    // Parse with parsing_template_def=true so substitutions become Placeholder nodes
+    const root = try parseElementIR(ctx, chunk, &def_r, .{
+        .chunk_base = data_start,
+        .has_dep_id = true, // Template definitions include dependency IDs
+        .parsing_template_def = true,
+    });
+
+    // Cache by GUID on success
+    const template = Template{ .root = root };
+    try ctx.cache.put(def_header.guid, template);
+    return template;
 }
 
 // --- Template Instance Value Parsing ---

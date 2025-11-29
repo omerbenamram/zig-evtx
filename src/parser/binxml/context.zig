@@ -216,19 +216,13 @@ fn resolveArrayValue(
 /// arena allocator. All chunk-scoped allocations use the arena, which is reset
 /// atomically between chunks via `resetPerChunk()`.
 pub const Context = struct {
-    /// Cache key for template definitions: offset + GUID for uniqueness.
-    pub const DefKey = struct {
-        def_data_off: u32,
-        guid: [16]u8,
-    };
-
     /// Backing allocator for long-lived allocations (cache hash maps).
     allocator: std.mem.Allocator,
     /// Arena for chunk-scoped allocations (IR elements, names, etc.).
     arena: std.heap.ArenaAllocator,
-    /// Template definition cache: DefKey -> parsed Template with Placeholder nodes.
-    /// Instantiation clones the template and resolves placeholders.
-    cache: std.AutoHashMap(DefKey, Template),
+    /// Template definition cache: GUID -> parsed Template with Placeholder nodes.
+    /// The GUID uniquely identifies each template definition.
+    cache: std.AutoHashMap([16]u8, Template),
     /// Name cache: offset -> (UTF-16 bytes, char count).
     name_cache: std.AutoHashMap(u32, NameCacheEntry),
 
@@ -237,7 +231,7 @@ pub const Context = struct {
         return .{
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
-            .cache = std.AutoHashMap(DefKey, Template).init(allocator),
+            .cache = std.AutoHashMap([16]u8, Template).init(allocator),
             .name_cache = std.AutoHashMap(u32, NameCacheEntry).init(allocator),
         };
     }

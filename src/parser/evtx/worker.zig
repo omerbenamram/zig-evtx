@@ -76,7 +76,6 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
 
     ctx.resetPerChunk();
     ctx.preCacheFromChunkHeader(&mutable_chunk.buf, &mutable_chunk.header.common_string_offsets);
-    if (opts.verbosity >= 3) logger.setModuleLevel("binxml", .trace);
 
     var rec_iter = mutable_chunk.records();
     const has_limits = (opts.max_records != 0) or (opts.skip_first > 0);
@@ -166,6 +165,9 @@ pub fn parseConcurrent(
             log.info("reading file header...", .{});
         },
     }
+
+    // Set trace level for binxml if highest verbosity - done here once before spawning threads
+    if (opts.verbosity >= 3) logger.setModuleLevel("binxml", .trace);
 
     var hdr: FileHeader = try FileHeader.read(reader);
     if (opts.validate_checksums) try hdr.validateChecksum();

@@ -76,12 +76,16 @@ pub const FragmentHeader = packed struct {
     major_version: u8,
     minor_version: u8,
     flags: u8,
+
+    pub const binary_size: usize = 4;
 };
 
 pub const ValueDescriptor = packed struct {
     size: u16,
     value_type: ValueType,
     unknown: u8,
+
+    pub const binary_size: usize = 4;
 };
 
 pub const TemplateValue = struct {
@@ -93,41 +97,68 @@ pub const NameHeader = packed struct {
     next_offset: u32,
     hash: u16,
     num_chars: u16,
+
+    pub const binary_size: usize = 8;
 };
 
 pub const AttributeListHeader = packed struct {
     data_size: u32,
+
+    pub const binary_size: usize = 4;
 };
 
-pub const TemplateDefinitionHeader = packed struct {
+/// Template definition header in BinXML format.
+/// Binary layout: next_offset(4) + guid(16) + data_size(4) = 24 bytes
+/// Note: @sizeOf returns 32 due to alignment padding - always use binary_size.
+pub const TemplateDefinitionHeader = struct {
     next_offset: u32,
-    guid_1: u64,
-    guid_2: u64,
+    guid: [16]u8,
     data_size: u32,
+
+    pub const binary_size: usize = 24;
+
+    /// Reads a TemplateDefinitionHeader from bytes at the given offset.
+    pub fn read(chunk: []const u8, offset: usize) TemplateDefinitionHeader {
+        return .{
+            .next_offset = std.mem.readInt(u32, chunk[offset..][0..4], .little),
+            .guid = chunk[offset + 4 ..][0..16].*,
+            .data_size = std.mem.readInt(u32, chunk[offset + 20 ..][0..4], .little),
+        };
+    }
 };
 
 pub const ValueTokenHeader = packed struct {
     token: u8,
     vtype: u8,
+
+    pub const binary_size: usize = 2;
 };
 
 pub const SubstitutionHeader = packed struct {
     token: u8,
     id: u16,
     vtype: u8,
+
+    pub const binary_size: usize = 4;
 };
 
 pub const CharRefHeader = packed struct {
     token: u8,
     value: u16,
+
+    pub const binary_size: usize = 3;
 };
 
 pub const TokenHeader = packed struct {
     token: u8,
+
+    pub const binary_size: usize = 1;
 };
 
 pub const NameOffsetHeader = packed struct {
     offset: u32,
+
+    pub const binary_size: usize = 4;
 };
 
 pub const TemplateInstanceStart = packed struct {
@@ -135,4 +166,6 @@ pub const TemplateInstanceStart = packed struct {
     version: u8,
     template_id: u32,
     def_data_off: u32,
+
+    pub const binary_size: usize = 10;
 };
