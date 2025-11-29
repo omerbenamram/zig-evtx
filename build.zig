@@ -86,6 +86,26 @@ pub fn build(b: *std.Build) void {
     const zbench_step = b.step("bench-zbench", "Run zBench microbenchmarks");
     zbench_step.dependOn(&zbench_run.step);
 
+    // Serialization benchmark executable
+    const bench_serialize_root_mod = b.createModule(.{
+        .root_source_file = b.path("src/bench_serialize.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const bench_serialize_exe = b.addExecutable(.{
+        .name = "bench_serialize",
+        .root_module = bench_serialize_root_mod,
+    });
+    bench_serialize_exe.root_module.addImport("zbench", zbench_mod);
+    bench_serialize_exe.root_module.addImport("alloc", alloc_mod);
+    if (use_c_alloc) {
+        bench_serialize_exe.linkLibC();
+    }
+    b.installArtifact(bench_serialize_exe);
+    const bench_serialize_run = b.addRunArtifact(bench_serialize_exe);
+    const bench_serialize_step = b.step("bench-serialize", "Run serialization microbenchmarks");
+    bench_serialize_step.dependOn(&bench_serialize_run.step);
+
     // Snapshot test tool executable
     const snapshot_tool_root_mod = b.createModule(.{
         .root_source_file = b.path("src/snapshot_tool.zig"),

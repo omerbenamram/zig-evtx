@@ -1,4 +1,4 @@
-.PHONY: all build run test fmt clean bench bench-zbench sample xml json jsonl todo build-all package-all snapshot
+.PHONY: all build run test fmt clean bench bench-zbench bench-serialize sample xml json jsonl todo build-all package-all snapshot
 
 all: build
 
@@ -61,6 +61,10 @@ clean:
 bench:
 	@mkdir -p out
 	$(ZIG) build bench-zbench -Dtarget=$(TARGET) -Doptimize=$(OPT) -Duse-c-alloc=$(USE_C_ALLOC_BOOL) -Dpython-exe=$(PYTHON_EXE) | tee out/bench-zbench.txt
+
+bench-serialize:
+	@mkdir -p out
+	$(ZIG) build bench-serialize -Dtarget=$(TARGET) -Doptimize=ReleaseFast -Duse-c-alloc=$(USE_C_ALLOC_BOOL) | tee out/bench-serialize.txt
 
 todo:
 	@echo "Open TODOs:" && rg -n "TODO|FIXME" -S || true
