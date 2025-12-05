@@ -75,7 +75,7 @@ pub const IR = struct {
     };
 };
 
-pub fn irNewElement(allocator: std.mem.Allocator, name: IR.Name) !*IR.Element {
+pub fn irNewElement(allocator: std.mem.Allocator, name: IR.Name) std.mem.Allocator.Error!*IR.Element {
     const el = try allocator.create(IR.Element);
     el.* = .{ .name = name, .attrs = .empty, .children = .empty };
     return el;

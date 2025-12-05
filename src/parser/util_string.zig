@@ -46,7 +46,7 @@ const std = @import("std");
 const simd = @import("util_simd.zig");
 
 /// Writer error type for output functions.
-pub const WriterError = std.Io.Writer.Error;
+pub const WriterError = @import("err.zig").WriterError;
 
 /// SIMD threshold: use SIMD for inputs >= 16 UTF-16 code units (32 bytes).
 const SIMD_THRESHOLD: usize = 16;

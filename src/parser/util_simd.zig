@@ -35,7 +35,7 @@
 const std = @import("std");
 
 /// Writer error type (same as util.zig).
-pub const WriterError = std.Io.Writer.Error;
+pub const WriterError = @import("err.zig").WriterError;
 
 // ============================================================================
 // Type Aliases for Readability

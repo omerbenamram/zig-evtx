@@ -15,7 +15,9 @@ const std = @import("std");
 const IRModule = @import("../ir.zig");
 const IR = IRModule.IR;
 const types = @import("types.zig");
-const BinXmlError = @import("../err.zig").BinXmlError;
+const err = @import("../err.zig");
+const BinXmlError = err.BinXmlError;
+const ParseError = err.ParseError;
 const Reader = @import("../reader.zig").Reader;
 const util_string = @import("../util_string.zig");
 const logger = @import("../../logger.zig");
@@ -63,7 +65,7 @@ fn cloneAndResolve(
     chunk: []const u8,
     ctx: *Context,
     allocator: std.mem.Allocator,
-) anyerror!*IR.Element {
+) ParseError!*IR.Element {
     const el = try allocator.create(IR.Element);
     el.* = .{
         .name = src.name,
@@ -246,7 +248,7 @@ pub const Context = struct {
     name_cache: std.AutoHashMap(u32, NameCacheEntry),
 
     /// Creates a new context with the given backing allocator.
-    pub fn init(allocator: std.mem.Allocator) !Context {
+    pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Context {
         return .{
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
@@ -272,7 +274,7 @@ pub const Context = struct {
         _ = self.arena.reset(.retain_capacity);
     }
 
-    pub fn getOrReadName(self: *Context, chunk: []const u8, off_u32: u32) !IR.Name {
+    pub fn getOrReadName(self: *Context, chunk: []const u8, off_u32: u32) ParseError!IR.Name {
         // Check cache first - returns pre-converted UTF-8
         if (self.name_cache.get(off_u32)) |utf8| {
             return IR.Name{ .utf8 = utf8 };

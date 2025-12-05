@@ -17,7 +17,7 @@ const ValueType = @import("binxml/types.zig").ValueType;
 const reader = @import("reader.zig");
 
 /// Writer error type for all rendering functions.
-pub const WriterError = std.Io.Writer.Error;
+pub const WriterError = @import("err.zig").WriterError;
 
 /// Key for grouping elements by name (uses pre-converted UTF-8).
 const NameKey = struct {
@@ -270,7 +270,7 @@ fn shouldRenderAsNull(element: *const IR.Element) bool {
     return true;
 }
 
-fn renderDataElementValue(element: *const IR.Element, allocator: std.mem.Allocator, writer: *std.Io.Writer) anyerror!void {
+fn renderDataElementValue(element: *const IR.Element, allocator: std.mem.Allocator, writer: *std.Io.Writer) WriterError!void {
     if (!hasNonEmptyTextContent(element.children.items) and !element.has_element_child) {
         try writer.writeAll("\"\"");
         return;
@@ -285,7 +285,7 @@ fn renderDataElementValue(element: *const IR.Element, allocator: std.mem.Allocat
 }
 
 /// Write an element's value - handles both simple values and objects
-fn writeElementValue(element: *const IR.Element, allocator: std.mem.Allocator, writer: *std.Io.Writer, child_is_container: bool) anyerror!void {
+fn writeElementValue(element: *const IR.Element, allocator: std.mem.Allocator, writer: *std.Io.Writer, child_is_container: bool) WriterError!void {
     if (shouldRenderAsNull(element)) {
         try writer.writeAll("null");
     } else if (canRenderAsSimpleValue(element)) {
@@ -298,7 +298,7 @@ fn writeElementValue(element: *const IR.Element, allocator: std.mem.Allocator, w
     }
 }
 
-fn writeElementBodyJson(element: *const IR.Element, allocator: std.mem.Allocator, writer: *std.Io.Writer, in_data_container: bool) anyerror!void {
+fn writeElementBodyJson(element: *const IR.Element, allocator: std.mem.Allocator, writer: *std.Io.Writer, in_data_container: bool) WriterError!void {
     // Count unique element names
     var name_counts: [MAX_UNIQUE_NAMES]NameCount = undefined;
     var num_unique: usize = 0;
@@ -411,6 +411,6 @@ fn writeElementBodyJson(element: *const IR.Element, allocator: std.mem.Allocator
 // Public API
 // ============================================================================
 
-pub fn renderElementJson(root: *const IR.Element, allocator: std.mem.Allocator, writer: *std.Io.Writer) anyerror!void {
+pub fn renderElementJson(root: *const IR.Element, allocator: std.mem.Allocator, writer: *std.Io.Writer) WriterError!void {
     try writeElementBodyJson(root, allocator, writer, false);
 }

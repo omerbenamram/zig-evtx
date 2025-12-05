@@ -7,7 +7,10 @@ const Context = context_mod.Context;
 const Template = context_mod.Template;
 const ElementTree = context_mod.ElementTree;
 const types = @import("types.zig");
-const BinXmlError = @import("../err.zig").BinXmlError;
+const err = @import("../err.zig");
+const BinXmlError = err.BinXmlError;
+const ParseError = err.ParseError;
+
 const logger = @import("../../logger.zig");
 const log = logger.scoped("binxml");
 const tokens = @import("tokens.zig");
@@ -64,7 +67,7 @@ pub const ParseState = struct {
 /// Parses an element and returns its IR representation.
 /// This function is the entry point for parsing a BinXML element.
 /// All allocations use the context's arena allocator.
-pub fn parseElementIR(ctx: *Context, chunk: []const u8, r: *Reader, elem_ctx: ElementContext) !*IR.Element {
+pub fn parseElementIR(ctx: *Context, chunk: []const u8, r: *Reader, elem_ctx: ElementContext) ParseError!*IR.Element {
     var ps = ParseState.init(ctx, chunk, r, elem_ctx);
     return parseElementIRImpl(&ps);
 }
@@ -83,7 +86,7 @@ const event_name_utf8: []const u8 = "Event";
 /// - `ctx`: Parser context with template cache and arena allocator
 /// - `chunk`: The full 64KB chunk data (needed for offset-based lookups)
 /// - `bin`: The specific slice containing this record's BinXML data
-pub fn parseRecord(ctx: *Context, chunk: []const u8, bin: []const u8) !ElementTree {
+pub fn parseRecord(ctx: *Context, chunk: []const u8, bin: []const u8) ParseError!ElementTree {
     const allocator = ctx.arena.allocator();
 
     // Skip fragment header if present
@@ -167,7 +170,7 @@ fn calcValuesOffset(chunk: []const u8, after_header: usize, def_data_off: u32) u
 ///
 /// Nested template instances (type 0x21 values containing templates) are
 /// handled recursively during instantiation.
-fn parseTemplateInstance(ctx: *Context, chunk: []const u8, bin: []const u8, start_offset: usize) !ElementTree {
+fn parseTemplateInstance(ctx: *Context, chunk: []const u8, bin: []const u8, start_offset: usize) ParseError!ElementTree {
     const allocator = ctx.arena.allocator();
 
     // Create a reader for the BinXML slice starting at the template instance
@@ -206,7 +209,7 @@ fn parseTemplateInstance(ctx: *Context, chunk: []const u8, bin: []const u8, star
 /// Gets or parses and caches a template definition.
 /// Returns a Template containing the parsed IR with Placeholder nodes for substitutions.
 /// Templates are cached by their GUID, which uniquely identifies them.
-fn getOrCacheTemplate(ctx: *Context, chunk: []const u8, def_data_off: u32) !Template {
+fn getOrCacheTemplate(ctx: *Context, chunk: []const u8, def_data_off: u32) ParseError!Template {
     const off: usize = @intCast(def_data_off);
     if (off + types.TemplateDefinitionHeader.binary_size > chunk.len) {
         return error.OutOfBounds;
@@ -250,7 +253,7 @@ fn getOrCacheTemplate(ctx: *Context, chunk: []const u8, def_data_off: u32) !Temp
 /// Parses the values for a template instance.
 /// Single-pass: reads descriptor table to compute payload offset, then reads values directly.
 /// This avoids allocating intermediate arrays for sizes/vtypes.
-pub fn parseTemplateInstanceValues(r: *Reader, allocator: std.mem.Allocator) ![]types.TemplateValue {
+pub fn parseTemplateInstanceValues(r: *Reader, allocator: std.mem.Allocator) ParseError![]types.TemplateValue {
     if (r.rem() < 4) return BinXmlError.UnexpectedEof;
 
     const declared_u32 = try r.readInt(u32);
@@ -305,7 +308,7 @@ pub fn parseTemplateInstanceValues(r: *Reader, allocator: std.mem.Allocator) ![]
 
 /// Parses an element in the Intermediate Representation (IR).
 /// This is the recursive core of the parser.
-fn parseElementIRImpl(ps: *ParseState) !*IR.Element {
+fn parseElementIRImpl(ps: *ParseState) ParseError!*IR.Element {
     const element_start_pos = ps.r.pos;
 
     if (log.enabled(.trace)) {
@@ -401,7 +404,7 @@ fn parseElementIRImpl(ps: *ParseState) !*IR.Element {
 }
 
 /// Parses the attribute list of an element.
-fn parseAttributeListIR(ps: *ParseState, max_end: usize) !std.ArrayList(IR.Attr) {
+fn parseAttributeListIR(ps: *ParseState, max_end: usize) ParseError!std.ArrayList(IR.Attr) {
     const header = try ps.r.readStruct(types.AttributeListHeader);
     const list_size = header.data_size;
     const list_start = ps.r.pos;
@@ -439,7 +442,7 @@ fn parseAttributeListIR(ps: *ParseState, max_end: usize) !std.ArrayList(IR.Attr)
 /// Collects a sequence of value tokens (Value, Subst, CharRef, etc.) into a list of IR Nodes.
 /// When has_dep_id is true (template definition), substitution tokens become Placeholder nodes.
 /// When has_dep_id is false, substitution tokens are an error.
-fn collectValueTokens(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize) !void {
+fn collectValueTokens(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize) ParseError!void {
     while (ps.r.rem() > 0 and ps.r.pos < end_pos) {
         const pk = ps.r.peekByte() catch break;
         if (log.enabled(.trace)) log.trace("valtok pk=0x{x} at 0x{x}", .{ pk, ps.r.pos });
@@ -496,7 +499,7 @@ pub fn parseNestedBinXmlIntoResolved(
     ctx: *Context,
     allocator: std.mem.Allocator,
     out: *std.ArrayList(IR.Node),
-) anyerror!void {
+) ParseError!void {
     if (binxml_data.len == 0) return;
 
     // Skip fragment header if present
@@ -531,7 +534,7 @@ fn parseNameToken(
     ps: *ParseState,
     out: *std.ArrayList(IR.Node),
     end_pos: usize,
-) !void {
+) ParseError!void {
     // All these tokens start with a basic TokenHeader
     _ = try ps.r.readStructBounded(types.TokenHeader, end_pos);
     const nm = try readNameIRBounded(ps, end_pos);
@@ -551,7 +554,7 @@ fn parseStringToken(
     out: *std.ArrayList(IR.Node),
     allocator: std.mem.Allocator,
     end_pos: usize,
-) !void {
+) ParseError!void {
     _ = try r.readStructBounded(types.TokenHeader, end_pos);
     const data = try r.readLenPrefixedSlice(u16, 2, end_pos);
     const payload = IR.TextPayload{ .utf16 = data, .num_chars = data.len / 2 };
@@ -563,7 +566,7 @@ fn parseStringToken(
     try out.append(allocator, node);
 }
 
-fn parseValueToken(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize) !void {
+fn parseValueToken(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize) ParseError!void {
     const h = try ps.r.readStructBounded(types.ValueTokenHeader, end_pos);
 
     if (log.enabled(.trace)) log.trace("  vtype=0x{x}", .{h.vtype});
@@ -612,7 +615,7 @@ fn parseValueToken(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize
 /// Resolves a name from a name offset.
 /// Automatically handles inline names (when offset == current chunk position)
 /// vs offset-based names (when offset points elsewhere in the chunk).
-fn resolveName(ps: *ParseState, name_offset: u32) !IR.Name {
+fn resolveName(ps: *ParseState, name_offset: u32) ParseError!IR.Name {
     const current_chunk_pos = ps.chunk_base + ps.r.pos;
 
     if (log.enabled(.trace)) {
@@ -630,7 +633,7 @@ fn resolveName(ps: *ParseState, name_offset: u32) !IR.Name {
 
 /// Reads a name that is stored inline at the current reader position.
 /// The name format is: NameHeader (8 bytes) + UTF-16 string + null terminator (2 bytes)
-fn readNameInline(ps: *ParseState) !IR.Name {
+fn readNameInline(ps: *ParseState) ParseError!IR.Name {
     const name_block_start = ps.r.pos;
     const hdr = try ps.r.readStruct(types.NameHeader);
     const num_chars = hdr.num_chars;
@@ -666,7 +669,7 @@ fn readNameInline(ps: *ParseState) !IR.Name {
 }
 
 /// Reads a name offset and resolves it, with bounds checking.
-fn readNameIRBounded(ps: *ParseState, end_pos: usize) !IR.Name {
+fn readNameIRBounded(ps: *ParseState, end_pos: usize) ParseError!IR.Name {
     if (ps.r.pos + 4 > end_pos) return BinXmlError.UnexpectedEof;
     const h = try ps.r.readStruct(types.NameOffsetHeader);
     return resolveName(ps, h.offset);
@@ -683,7 +686,7 @@ const ElementHeader = struct {
 /// Handles both formats:
 /// - Template definitions: dep_id (2 bytes) + data_size (4 bytes) + name_offset (4 bytes)
 /// - Direct elements: data_size (4 bytes) + name_offset (4 bytes)
-fn parseElementHeader(ps: *ParseState, element_start: usize) !ElementHeader {
+fn parseElementHeader(ps: *ParseState, element_start: usize) ParseError!ElementHeader {
     const pos_before = ps.r.pos;
 
     // Template definitions have a dependency ID, direct elements don't

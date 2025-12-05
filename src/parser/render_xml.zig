@@ -11,9 +11,13 @@ const IRModule = @import("ir.zig");
 const IR = IRModule.IR;
 const util = @import("util.zig");
 const vf = @import("value_format.zig");
+const err = @import("err.zig");
 
 /// Writer error type for all rendering functions.
-pub const WriterError = std.Io.Writer.Error;
+pub const WriterError = err.WriterError;
+
+/// Error type for rendering with context (parsing + writing).
+const RenderError = err.RenderError;
 
 // ============================================================================
 // Low-Level Writing Helpers
@@ -159,7 +163,7 @@ fn renderElementIRXml(element: *const IR.Element, writer: *std.Io.Writer, indent
 
 /// Render XML from BinXML with context using concrete std.Io.Writer.
 /// Note: Callers should set logger level before calling if verbose output is needed.
-pub fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, writer: *std.Io.Writer) anyerror!void {
+pub fn renderXmlWithContext(ctx: *Context, chunk: []const u8, bin: []const u8, writer: *std.Io.Writer) RenderError!void {
     const tree = try binxml.parseRecord(ctx, chunk, bin);
     try renderElementIRXml(tree.element, writer, 0);
 }

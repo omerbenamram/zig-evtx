@@ -13,7 +13,7 @@ const util = @import("util.zig");
 // debug-mode performance and reduced code bloat.
 
 /// Writer error type for concrete Io functions.
-pub const WriterError = std.Io.Writer.Error;
+pub const WriterError = @import("err.zig").WriterError;
 
 /// Format a GUID as XML to concrete std.Io.Writer.
 pub fn formatGuidXml(w: *std.Io.Writer, guid: reader.Guid) WriterError!void {
