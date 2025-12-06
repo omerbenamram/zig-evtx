@@ -4,6 +4,9 @@ const fs = std.fs;
 
 const evtx = @import("parser/evtx/mod.zig");
 
+/// Default read buffer size for file I/O
+const READ_BUFFER_SIZE: usize = 8192;
+
 pub fn main() !void {
     // Default allocator is selectable at build time (libc or GPA)
     const allocator = alloc.get();
@@ -29,7 +32,7 @@ pub fn main() !void {
             help();
         } else if (std.mem.eql(u8, arg, "-o")) {
             const mode = args_iter.next() orelse return error.InvalidArgs;
-            if (std.mem.eql(u8, mode, "xml")) output_mode = .xml else if (std.mem.eql(u8, mode, "json")) output_mode = .json else if (std.mem.eql(u8, mode, "jsonl")) output_mode = .jsonl else return error.InvalidArgs;
+            output_mode = output_mode_map.get(mode) orelse return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "-v")) {
             if (verbosity < 1) verbosity = 1;
         } else if (std.mem.eql(u8, arg, "-vv")) {
@@ -63,7 +66,7 @@ pub fn main() !void {
     var file = try fs.cwd().openFile(in_path, .{ .mode = .read_only });
     defer file.close();
 
-    var read_buf: [8192]u8 = undefined;
+    var read_buf: [READ_BUFFER_SIZE]u8 = undefined;
     var reader = file.reader(&read_buf);
 
     var parser = try evtx.EvtxParser.init(allocator, .{ .validate_checksums = validate_checksums, .verbosity = verbosity, .max_records = max_records, .skip_first = skip_first, .carve = carve, .ordered = ordered });
@@ -145,6 +148,12 @@ fn printHelpAndExit(to_stderr: bool, exit_code: u8) noreturn {
 }
 
 const OutputMode = enum { xml, json, jsonl };
+
+const output_mode_map = std.StaticStringMap(OutputMode).initComptime(.{
+    .{ "xml", .xml },
+    .{ "json", .json },
+    .{ "jsonl", .jsonl },
+});
 
 // Test imports - Zig discovers test blocks transitively from imports.
 // These bring in test-only modules not used by the main code path.

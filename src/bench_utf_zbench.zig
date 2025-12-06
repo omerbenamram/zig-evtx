@@ -35,39 +35,51 @@ fn bench_scalar(_: std.mem.Allocator) void {
     // Use a fixed buffer writer for benchmarking
     var buf: [1024 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
-    util.writeUtf16LeXmlEscaped_scalar(&writer, g_utf, g_num_chars) catch unreachable;
+    util.writeUtf16LeXmlEscaped_scalar(&writer, g_utf, g_num_chars) catch |err| {
+        std.debug.panic("Benchmark write failed: {s}", .{@errorName(err)});
+    };
 }
 
 fn bench_simd(_: std.mem.Allocator) void {
     // Use a fixed buffer writer for benchmarking
     var buf: [1024 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
-    util.writeUtf16LeXmlEscaped_simd_utf16(&writer, g_utf, g_num_chars) catch unreachable;
+    util.writeUtf16LeXmlEscaped_simd_utf16(&writer, g_utf, g_num_chars) catch |err| {
+        std.debug.panic("Benchmark write failed: {s}", .{@errorName(err)});
+    };
 }
 
 fn bench_auto(_: std.mem.Allocator) void {
     // Use a fixed buffer writer for benchmarking
     var buf: [1024 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
-    util.writeUtf16LeXmlEscaped(&writer, g_utf, g_num_chars) catch unreachable;
+    util.writeUtf16LeXmlEscaped(&writer, g_utf, g_num_chars) catch |err| {
+        std.debug.panic("Benchmark write failed: {s}", .{@errorName(err)});
+    };
 }
 
 fn bench_json_scalar(_: std.mem.Allocator) void {
     var buf: [1024 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
-    util.writeUtf16LeJsonEscaped_scalar(&writer, g_utf, g_num_chars) catch unreachable;
+    util.writeUtf16LeJsonEscaped_scalar(&writer, g_utf, g_num_chars) catch |err| {
+        std.debug.panic("Benchmark write failed: {s}", .{@errorName(err)});
+    };
 }
 
 fn bench_json_simd(_: std.mem.Allocator) void {
     var buf: [1024 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
-    util.writeUtf16LeJsonEscaped_simd(&writer, g_utf, g_num_chars) catch unreachable;
+    util.writeUtf16LeJsonEscaped_simd(&writer, g_utf, g_num_chars) catch |err| {
+        std.debug.panic("Benchmark write failed: {s}", .{@errorName(err)});
+    };
 }
 
 fn bench_json_auto(_: std.mem.Allocator) void {
     var buf: [1024 * 1024]u8 = undefined;
     var writer = std.Io.Writer.fixed(&buf);
-    util.writeUtf16LeJsonEscaped(&writer, g_utf, g_num_chars) catch unreachable;
+    util.writeUtf16LeJsonEscaped(&writer, g_utf, g_num_chars) catch |err| {
+        std.debug.panic("Benchmark write failed: {s}", .{@errorName(err)});
+    };
 }
 
 pub fn main() !void {
