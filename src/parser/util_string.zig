@@ -51,6 +51,12 @@ pub const WriterError = @import("err.zig").WriterError;
 /// SIMD threshold: use SIMD for inputs >= 16 UTF-16 code units (32 bytes).
 const SIMD_THRESHOLD: usize = 16;
 
+/// Output buffer size for scalar UTF-16 conversion
+const SCALAR_OUTPUT_BUFFER_SIZE: usize = 2048;
+
+/// Stack buffer size for name conversion
+const NAME_CONVERSION_BUFFER_SIZE: usize = 512;
+
 // ============================================================================
 // Escape Mode
 // ============================================================================
@@ -187,7 +193,7 @@ fn asciiConvertFastPath(
 ///
 /// See `asciiConvertFastPath` for details on why we don't use stdlib directly.
 fn writeUtf16LeScalar(w: *std.Io.Writer, utf16le: []const u8, num_chars: usize, comptime mode: EscapeMode) WriterError!void {
-    var out_buf: [2048]u8 = undefined;
+    var out_buf: [SCALAR_OUTPUT_BUFFER_SIZE]u8 = undefined;
 
     const max_bytes = @min(num_chars * 2, utf16le.len);
     if (max_bytes < 2) return;
@@ -306,7 +312,7 @@ pub fn convertUtf16ToUtf8(allocator: std.mem.Allocator, utf16le: []const u8, num
 
     // Use stack buffer for conversion (names are typically short)
     // Worst case: each UTF-16 code unit becomes 3 UTF-8 bytes
-    var stack_buf: [512]u8 = undefined;
+    var stack_buf: [NAME_CONVERSION_BUFFER_SIZE]u8 = undefined;
 
     // Phase 1: ASCII Fast Path (shared implementation, no escaping)
     const fast = asciiConvertFastPath(utf16le[0..max_bytes], &stack_buf, .none);

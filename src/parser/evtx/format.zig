@@ -7,6 +7,21 @@ const render_xml = @import("../render_xml.zig");
 const render_json = @import("../render_json.zig");
 const alloc_mod = @import("alloc");
 
+/// EVTX file header size in bytes
+pub const FILE_HEADER_SIZE: usize = 4096;
+
+/// EVTX chunk size in bytes (64 KB)
+pub const CHUNK_SIZE: usize = 65536;
+
+/// Chunk header size - event data starts after this
+pub const CHUNK_HEADER_SIZE: usize = 512;
+
+/// Number of common string offset slots in chunk header
+pub const COMMON_STRING_SLOTS: usize = 64;
+
+/// Number of template pointer slots in chunk header
+pub const TEMPLATE_PTR_SLOTS: usize = 32;
+
 /// Read all bytes into buffer from any reader type.
 /// Supports both std.fs.File.reader (with .interface) and RecordStream (with .readNoEof).
 fn readAll(reader: anytype, buf: []u8) !void {
@@ -47,7 +62,7 @@ pub const FileHeader = struct {
     tail: FileHeaderTail,
 
     pub fn read(reader: anytype) !FileHeader {
-        var buf: [4096]u8 = undefined;
+        var buf: [FILE_HEADER_SIZE]u8 = undefined;
         try readAll(reader, &buf);
         if (!std.mem.eql(u8, buf[0..8], "ElfFile\x00")) return error.BadSignature;
 
@@ -67,10 +82,10 @@ pub const FileHeader = struct {
 
 pub const Chunk = struct {
     header: ChunkHeader,
-    buf: [65536]u8,
+    buf: [CHUNK_SIZE]u8,
 
     pub fn read(reader: anytype) !Chunk {
-        var buf: [65536]u8 = undefined;
+        var buf: [CHUNK_SIZE]u8 = undefined;
         try readAll(reader, &buf);
         const h = try ChunkHeader.parse(&buf);
         return .{ .header = h, .buf = buf };
@@ -94,8 +109,8 @@ pub const Chunk = struct {
     }
 
     pub fn records(self: *const Chunk) RecordIterator {
-        // EVTX chunk header is 512 bytes; event data starts at 512
-        return RecordIterator{ .chunk = self, .offset = 512 };
+        // Event data starts after chunk header
+        return RecordIterator{ .chunk = self, .offset = CHUNK_HEADER_SIZE };
     }
 };
 
@@ -111,12 +126,12 @@ pub const ChunkHeader = struct {
     last_event_record_offset: u32,
     free_space_offset: u32,
     // Parsed guidance from chunk header arrays (relative offsets from chunk start)
-    common_string_offsets: [64]u32 = [_]u32{0} ** 64,
-    template_ptrs: [32]u32 = [_]u32{0} ** 32,
+    common_string_offsets: [COMMON_STRING_SLOTS]u32 = [_]u32{0} ** COMMON_STRING_SLOTS,
+    template_ptrs: [TEMPLATE_PTR_SLOTS]u32 = [_]u32{0} ** TEMPLATE_PTR_SLOTS,
     common_strings_count: usize = 0,
     template_ptrs_count: usize = 0,
 
-    pub fn parse(buf: *const [65536]u8) !ChunkHeader {
+    pub fn parse(buf: *const [CHUNK_SIZE]u8) !ChunkHeader {
         if (!std.mem.eql(u8, buf[0..8], "ElfChnk\x00")) return error.BadChunkSignature;
 
         // Read core header fields via packed struct (comptime type dispatch)
@@ -127,14 +142,14 @@ pub const ChunkHeader = struct {
             .free_space_offset = core.free_space_offset,
         };
 
-        // Common string offset array at 128: 64 u32
-        for (0..64) |i| {
+        // Common string offset array at 128: COMMON_STRING_SLOTS u32
+        for (0..COMMON_STRING_SLOTS) |i| {
             const off = std.mem.readInt(u32, buf[128 + i * 4 ..][0..4], .little);
             ch.common_string_offsets[i] = off;
             if (off != 0 and off < buf.len) ch.common_strings_count += 1;
         }
-        // TemplatePtr array at 384: 32 u32
-        for (0..32) |i| {
+        // TemplatePtr array at 384: TEMPLATE_PTR_SLOTS u32
+        for (0..TEMPLATE_PTR_SLOTS) |i| {
             const off = std.mem.readInt(u32, buf[384 + i * 4 ..][0..4], .little);
             ch.template_ptrs[i] = off;
             if (off != 0 and off < buf.len) ch.template_ptrs_count += 1;
@@ -183,5 +198,5 @@ pub const EventRecordRaw = struct {
     identifier: u64,
     written_time: u64,
     binxml: []const u8,
-    chunk_buf: *const [65536]u8,
+    chunk_buf: *const [CHUNK_SIZE]u8,
 };

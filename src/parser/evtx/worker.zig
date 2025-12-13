@@ -30,10 +30,10 @@ fn ignoreSigpipe() void {
 }
 
 /// Output slot for ordered chunk output.
-/// Each slot holds the serialized output for one chunk.
+/// Each slot holds individually serialized records from one chunk.
 const OutputSlot = struct {
-    /// Serialized output bytes (owned by allocator)
-    data: []u8 = &.{},
+    /// Individual serialized record outputs (each slice is one record)
+    records: std.ArrayList([]u8) = .empty,
     /// Set to true when the worker has finished processing this chunk
     ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 };
@@ -47,6 +47,8 @@ const SharedState = struct {
     write_mutex: *std.Thread.Mutex,
     emitted: *usize,
     skipped: *usize,
+    /// Atomic counter for records skipped (ordered mode uses this for precise record skipping)
+    records_skipped: *std.atomic.Value(usize),
     /// Output slots for ordered mode (null in unordered mode)
     output_slots: ?[]OutputSlot = null,
 };
@@ -84,11 +86,33 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
     var rec_iter = mutable_chunk.records();
     const has_limits = (opts.max_records != 0) or (opts.skip_first > 0);
 
-    // Ordered mode: always buffer to chunk_out, store in slot when done
-    if (shared.output_slots != null or !has_limits) {
-        // Buffer all records for this chunk
+    // Ordered mode: store individual records in slot for proper max_records handling
+    if (shared.output_slots) |slots| {
+        while (rec_iter.next() catch null) |rec| {
+            // For ordered mode with skip_first, use atomic counter for precise record skipping
+            if (opts.skip_first > 0) {
+                const prev = shared.records_skipped.fetchAdd(1, .monotonic);
+                if (prev < opts.skip_first) continue; // Skip this record
+            }
+
+            if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
+            const view = EventRecordRaw{ .identifier = rec.identifier, .written_time = rec.written_time, .binxml = rec.binxml, .chunk_buf = &mutable_chunk.buf };
+            const bytes = out.serializeRecord(view, &ctx) catch |e| {
+                log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
+                continue;
+            };
+            // Store a copy of the serialized record
+            const record_copy = allocator.dupe(u8, bytes) catch continue;
+            slots[chunk_index].records.append(allocator, record_copy) catch {
+                allocator.free(record_copy);
+                continue;
+            };
+        }
+        slots[chunk_index].ready.store(true, .release);
+    } else if (!has_limits) {
+        // Unordered mode without limits: buffer and write immediately
         var chunk_out: std.ArrayList(u8) = .empty;
-        defer if (shared.output_slots == null) chunk_out.deinit(alloc_mod.get());
+        defer chunk_out.deinit(alloc_mod.get());
         chunk_out.ensureTotalCapacityPrecise(alloc_mod.get(), 96 * 1024) catch {};
 
         while (rec_iter.next() catch null) |rec| {
@@ -101,16 +125,9 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
             chunk_out.appendSlice(alloc_mod.get(), bytes) catch continue;
         }
 
-        if (shared.output_slots) |slots| {
-            // Ordered mode: store in slot for later ordered drain
-            slots[chunk_index].data = chunk_out.toOwnedSlice(alloc_mod.get()) catch &.{};
-            slots[chunk_index].ready.store(true, .release);
-        } else {
-            // Unordered mode without limits: write immediately with mutex
-            shared.write_mutex.lock();
-            shared.stdout_file.writeAll(chunk_out.items) catch {};
-            shared.write_mutex.unlock();
-        }
+        shared.write_mutex.lock();
+        shared.stdout_file.writeAll(chunk_out.items) catch {};
+        shared.write_mutex.unlock();
     } else {
         // Unordered mode with limits: per-record locking for skip/max
         var selected_including_skips: usize = 0;
@@ -195,6 +212,7 @@ pub fn parseConcurrent(
     // Shared counters for skip and max limits
     var emitted_count: usize = 0;
     var skipped_count: usize = 0;
+    var records_skipped_count = std.atomic.Value(usize).init(0);
 
     // Allocate output slots for ordered mode
     const num_chunks: usize = hdr.core.num_chunks;
@@ -206,8 +224,11 @@ pub fn parseConcurrent(
         }
     }
     defer if (output_slots) |slots| {
-        for (slots) |slot| {
-            if (slot.data.len > 0) allocator.free(slot.data);
+        for (slots) |*slot| {
+            for (slot.records.items) |rec| {
+                allocator.free(rec);
+            }
+            slot.records.deinit(allocator);
         }
         allocator.free(slots);
     };
@@ -220,6 +241,7 @@ pub fn parseConcurrent(
         .write_mutex = &write_mutex,
         .emitted = &emitted_count,
         .skipped = &skipped_count,
+        .records_skipped = &records_skipped_count,
         .output_slots = output_slots,
     };
 
@@ -248,28 +270,87 @@ pub fn parseConcurrent(
     // Main thread helps process chunks while waiting (work stealing)
     pool.waitAndWork(&wg);
 
-    // Ordered mode: drain slots in order
+    // Ordered mode: drain slots in order, respecting max_records per record
     if (output_slots) |slots| {
-        var skipped: usize = 0;
-        for (slots[0..actual_chunks]) |slot| {
+        drain_loop: for (slots[0..actual_chunks]) |slot| {
             // Slot should already be ready since we waited for all workers
             if (!slot.ready.load(.acquire)) continue;
-            if (slot.data.len == 0) continue;
 
-            // Handle skip/max limits during ordered drain
-            if (opts.skip_first > 0 and skipped < opts.skip_first) {
-                // For ordered mode, we skip entire chunks (simplification)
-                // A more precise implementation would parse record boundaries
-                skipped += 1;
-                continue;
+            for (slot.records.items) |record_data| {
+                stdout_file.writeAll(record_data) catch {};
+                emitted_count += 1;
+
+                if (opts.max_records != 0 and emitted_count >= opts.max_records) break :drain_loop;
             }
-
-            stdout_file.writeAll(slot.data) catch {};
-            emitted_count += 1;
-
-            if (opts.max_records != 0 and emitted_count >= opts.max_records) break;
         }
     }
 
     if (opts.verbosity >= 1) log.info("done. emitted~={d}", .{emitted_count});
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+/// Count records in an EVTX file using single-threaded parsing.
+fn countRecordsSingleThreaded(file_path: []const u8, skip_first: usize) !usize {
+    var file = try std.fs.cwd().openFile(file_path, .{ .mode = .read_only });
+    defer file.close();
+
+    var read_buf: [8192]u8 = undefined;
+    var reader = file.reader(&read_buf);
+
+    const hdr = try FileHeader.read(&reader);
+    var count: usize = 0;
+    var skipped: usize = 0;
+
+    var chunk_index: usize = 0;
+    while (chunk_index < hdr.core.num_chunks) : (chunk_index += 1) {
+        const chunk = Chunk.read(&reader) catch |e| switch (e) {
+            error.EndOfStream, error.BadChunkSignature => break,
+            else => return e,
+        };
+
+        var rec_iter = chunk.records();
+        while (try rec_iter.next()) |_| {
+            if (skip_first > 0 and skipped < skip_first) {
+                skipped += 1;
+                continue;
+            }
+            count += 1;
+        }
+    }
+
+    return count;
+}
+
+const test_util = @import("../../test/util.zig");
+
+fn getProjectRoot() []const u8 {
+    return comptime test_util.getProjectRoot(@src().file);
+}
+
+const project_root = getProjectRoot();
+const test_evtx_path = project_root ++ "/samples/security.evtx";
+
+test "skip: single-threaded skip_first skips exact number of records" {
+    // First, count total records without skipping
+    const total = try countRecordsSingleThreaded(test_evtx_path, 0);
+    try std.testing.expect(total > 10); // Sanity check: file should have records
+
+    // Now count with skip=5
+    const skip_count: usize = 5;
+    const after_skip = try countRecordsSingleThreaded(test_evtx_path, skip_count);
+
+    // Verify exactly skip_count records were skipped
+    try std.testing.expectEqual(total - skip_count, after_skip);
+}
+
+test "skip: single-threaded skip_first larger than total returns zero" {
+    // Count total records
+    const total = try countRecordsSingleThreaded(test_evtx_path, 0);
+
+    // Skip more than total
+    const after_skip = try countRecordsSingleThreaded(test_evtx_path, total + 100);
+    try std.testing.expectEqual(@as(usize, 0), after_skip);
 }

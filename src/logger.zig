@@ -2,6 +2,9 @@ const std = @import("std");
 const builtin = @import("builtin");
 const alloc_mod = @import("alloc");
 
+/// Maximum log message size
+const MAX_LOG_MESSAGE_SIZE: usize = 4096;
+
 pub const Level = enum(u8) { err = 1, warn = 2, info = 3, debug = 4, trace = 5 };
 
 /// Mutex protecting writes to module_levels hashmap
@@ -143,7 +146,7 @@ fn writePrefix(w: anytype, lvl: Level, module: []const u8) !void {
 
 fn logInternal(module: []const u8, lvl: Level, comptime fmt: []const u8, args: anytype) void {
     if (!shouldLog(module, lvl)) return;
-    var buf: [4096]u8 = undefined;
+    var buf: [MAX_LOG_MESSAGE_SIZE]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     var writer = fbs.writer();
     writePrefix(writer, lvl, module) catch return;

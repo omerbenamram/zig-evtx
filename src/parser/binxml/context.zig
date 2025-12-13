@@ -248,12 +248,21 @@ pub const Context = struct {
     name_cache: std.AutoHashMap(u32, NameCacheEntry),
 
     /// Creates a new context with the given backing allocator.
-    pub fn init(allocator: std.mem.Allocator) std.mem.Allocator.Error!Context {
+    pub fn init(allocator: std.mem.Allocator) !Context {
+        const arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer @constCast(&arena).deinit();
+
+        const cache = std.AutoHashMap([16]u8, Template).init(allocator);
+        errdefer @constCast(&cache).deinit();
+
+        const name_cache = std.AutoHashMap(u32, NameCacheEntry).init(allocator);
+        // No errdefer needed for last item - if it fails, we return error and prior errdefers run
+
         return .{
             .allocator = allocator,
-            .arena = std.heap.ArenaAllocator.init(allocator),
-            .cache = std.AutoHashMap([16]u8, Template).init(allocator),
-            .name_cache = std.AutoHashMap(u32, NameCacheEntry).init(allocator),
+            .arena = arena,
+            .cache = cache,
+            .name_cache = name_cache,
         };
     }
 

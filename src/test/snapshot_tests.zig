@@ -258,21 +258,10 @@ pub fn runTest(
 // Comptime Test Generation - integrates with `zig test` / `make test`
 // ============================================================================
 
-/// Get project root from source file path at comptime
+const test_util = @import("util.zig");
+
 fn getProjectRoot() []const u8 {
-    const src_path = @src().file;
-    // This file is at src/test/snapshot_tests.zig (3 path components from root)
-    comptime var i = src_path.len;
-    comptime var count: usize = 0;
-    inline while (i > 0) : (i -= 1) {
-        if (src_path[i - 1] == '/') {
-            count += 1;
-            if (count == 3) {
-                return src_path[0 .. i - 1];
-            }
-        }
-    }
-    return ".";
+    return comptime test_util.getProjectRoot(@src().file);
 }
 
 const project_root = getProjectRoot();
