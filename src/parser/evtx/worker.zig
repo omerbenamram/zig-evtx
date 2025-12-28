@@ -3,7 +3,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const binxml = @import("../binxml/mod.zig");
-const alloc_mod = @import("alloc");
 const logger = @import("../../logger.zig");
 const log = logger.scoped("evtx");
 
@@ -31,9 +30,16 @@ fn ignoreSigpipe() void {
 
 /// Output slot for ordered chunk output.
 /// Each slot holds individually serialized records from one chunk.
+const RecordSpan = struct {
+    start: u32,
+    len: u32,
+};
+
 const OutputSlot = struct {
-    /// Individual serialized record outputs (each slice is one record)
-    records: std.ArrayList([]u8) = .empty,
+    /// Concatenated serialized bytes for all records in this chunk.
+    data: std.ArrayList(u8) = .empty,
+    /// Record boundaries within `data`.
+    spans: std.ArrayList(RecordSpan) = .empty,
     /// Set to true when the worker has finished processing this chunk
     ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 };
@@ -45,6 +51,10 @@ const SharedState = struct {
     out_kind: OutKind,
     stdout_file: *std.fs.File,
     write_mutex: *std.Thread.Mutex,
+    fatal_mutex: *std.Thread.Mutex,
+    fatal_error: *?anyerror,
+    cancelled: *std.atomic.Value(bool),
+    broken_pipe: *std.atomic.Value(bool),
     emitted: *usize,
     skipped: *usize,
     /// Atomic counter for records skipped (ordered mode uses this for precise record skipping)
@@ -53,15 +63,78 @@ const SharedState = struct {
     output_slots: ?[]OutputSlot = null,
 };
 
+fn setFatal(shared: *SharedState, err: anyerror) void {
+    shared.fatal_mutex.lock();
+    defer shared.fatal_mutex.unlock();
+    if (shared.fatal_error.* == null) {
+        shared.fatal_error.* = err;
+        shared.cancelled.store(true, .release);
+    }
+}
+
+fn setBrokenPipe(shared: *SharedState) void {
+    shared.broken_pipe.store(true, .release);
+    shared.cancelled.store(true, .release);
+}
+
+fn handleWriteError(shared: *SharedState, err: anyerror) void {
+    switch (err) {
+        error.BrokenPipe => setBrokenPipe(shared),
+        else => setFatal(shared, err),
+    }
+}
+
+fn nextRecord(shared: *SharedState, iter: *format.RecordIterator) ?EventRecordRaw {
+    if (shared.cancelled.load(.acquire)) return null;
+    return iter.next() catch |err| {
+        setFatal(shared, err);
+        return null;
+    };
+}
+
+fn appendToOutputSlot(shared: *SharedState, slot: *OutputSlot, bytes: []const u8) bool {
+    const allocator = shared.allocator;
+
+    const start_usize = slot.data.items.len;
+    if (start_usize > std.math.maxInt(u32) or bytes.len > std.math.maxInt(u32)) {
+        setFatal(shared, error.OutOfBounds);
+        return false;
+    }
+
+    const start: u32 = @intCast(start_usize);
+    const len: u32 = @intCast(bytes.len);
+
+    slot.data.appendSlice(allocator, bytes) catch |err| {
+        setFatal(shared, err);
+        return false;
+    };
+    slot.spans.append(allocator, .{ .start = start, .len = len }) catch |err| {
+        slot.data.shrinkRetainingCapacity(start_usize);
+        setFatal(shared, err);
+        return false;
+    };
+
+    return true;
+}
+
 /// Process a single chunk - called by thread pool workers.
 fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
+    if (shared.cancelled.load(.acquire)) return;
+
+    var ordered_slot: ?*OutputSlot = null;
+    if (shared.output_slots) |slots| ordered_slot = &slots[chunk_index];
+    defer if (ordered_slot) |slot| slot.ready.store(true, .release);
+
     const allocator = shared.allocator;
     const opts = shared.opts;
 
     // Serialize-only mode: we get bytes from serializeRecord and write them manually
-    var out = OutputWriter.initSerializeOnly(shared.out_kind);
+    var out = OutputWriter.initSerializeOnly(allocator, shared.out_kind) catch |err| {
+        setFatal(shared, err);
+        return;
+    };
     defer out.deinit();
-    var ctx = binxml.Context.init(allocator) catch return;
+    var ctx = binxml.Context.init(allocator);
     defer ctx.deinit();
 
     // Mutable copy for validation
@@ -72,23 +145,22 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
     if (opts.validate_checksums) {
         mutable_chunk.validateChecksums() catch |e| {
             log.err("chunk {d} checksum error: {s}", .{ chunk_index, @errorName(e) });
-            // In ordered mode, mark slot ready with empty data so drain doesn't hang
-            if (shared.output_slots) |slots| {
-                slots[chunk_index].ready.store(true, .release);
-            }
             return;
         };
     }
 
     ctx.resetPerChunk();
-    ctx.preCacheFromChunkHeader(&mutable_chunk.buf, &mutable_chunk.header.common_string_offsets);
+    ctx.preCacheFromChunkHeader(&mutable_chunk.buf, &mutable_chunk.header.common_string_offsets) catch |err| {
+        setFatal(shared, err);
+        return;
+    };
 
     var rec_iter = mutable_chunk.records();
     const has_limits = (opts.max_records != 0) or (opts.skip_first > 0);
 
-    // Ordered mode: store individual records in slot for proper max_records handling
-    if (shared.output_slots) |slots| {
-        while (rec_iter.next() catch null) |rec| {
+    // Ordered mode: store chunk output for ordered draining
+    if (ordered_slot) |slot| {
+        while (nextRecord(shared, &rec_iter)) |rec| {
             // For ordered mode with skip_first, use atomic counter for precise record skipping
             if (opts.skip_first > 0) {
                 const prev = shared.records_skipped.fetchAdd(1, .monotonic);
@@ -101,37 +173,41 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
                 log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
                 continue;
             };
-            // Store a copy of the serialized record
-            const record_copy = allocator.dupe(u8, bytes) catch continue;
-            slots[chunk_index].records.append(allocator, record_copy) catch {
-                allocator.free(record_copy);
-                continue;
-            };
+            if (!appendToOutputSlot(shared, slot, bytes)) return;
         }
-        slots[chunk_index].ready.store(true, .release);
     } else if (!has_limits) {
         // Unordered mode without limits: buffer and write immediately
         var chunk_out: std.ArrayList(u8) = .empty;
-        defer chunk_out.deinit(alloc_mod.get());
-        chunk_out.ensureTotalCapacityPrecise(alloc_mod.get(), 96 * 1024) catch {};
+        defer chunk_out.deinit(allocator);
+        chunk_out.ensureTotalCapacityPrecise(allocator, 96 * 1024) catch |err| {
+            setFatal(shared, err);
+            return;
+        };
 
-        while (rec_iter.next() catch null) |rec| {
+        while (nextRecord(shared, &rec_iter)) |rec| {
             if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
             const view = EventRecordRaw{ .identifier = rec.identifier, .written_time = rec.written_time, .binxml = rec.binxml, .chunk_buf = &mutable_chunk.buf };
             const bytes = out.serializeRecord(view, &ctx) catch |e| {
                 log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
                 continue;
             };
-            chunk_out.appendSlice(alloc_mod.get(), bytes) catch continue;
+            chunk_out.appendSlice(allocator, bytes) catch |err| {
+                setFatal(shared, err);
+                return;
+            };
         }
 
+        if (shared.cancelled.load(.acquire)) return;
         shared.write_mutex.lock();
-        shared.stdout_file.writeAll(chunk_out.items) catch {};
-        shared.write_mutex.unlock();
+        defer shared.write_mutex.unlock();
+        shared.stdout_file.writeAll(chunk_out.items) catch |err| {
+            handleWriteError(shared, err);
+            return;
+        };
     } else {
         // Unordered mode with limits: per-record locking for skip/max
         var selected_including_skips: usize = 0;
-        while (rec_iter.next() catch null) |rec| {
+        while (nextRecord(shared, &rec_iter)) |rec| {
             if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
 
             if (opts.skip_first > 0) {
@@ -155,7 +231,10 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) void {
             if (opts.max_records != 0 and shared.emitted.* >= opts.max_records) {
                 continue;
             }
-            shared.stdout_file.writeAll(bytes) catch continue;
+            shared.stdout_file.writeAll(bytes) catch |err| {
+                handleWriteError(shared, err);
+                return;
+            };
             if (opts.max_records != 0) {
                 shared.emitted.* += 1;
             }
@@ -209,6 +288,11 @@ pub fn parseConcurrent(
     var stdout_file = std.fs.File.stdout();
     var write_mutex: std.Thread.Mutex = .{};
 
+    var fatal_mutex: std.Thread.Mutex = .{};
+    var fatal_error: ?anyerror = null;
+    var cancelled = std.atomic.Value(bool).init(false);
+    var broken_pipe = std.atomic.Value(bool).init(false);
+
     // Shared counters for skip and max limits
     var emitted_count: usize = 0;
     var skipped_count: usize = 0;
@@ -225,10 +309,8 @@ pub fn parseConcurrent(
     }
     defer if (output_slots) |slots| {
         for (slots) |*slot| {
-            for (slot.records.items) |rec| {
-                allocator.free(rec);
-            }
-            slot.records.deinit(allocator);
+            slot.data.deinit(allocator);
+            slot.spans.deinit(allocator);
         }
         allocator.free(slots);
     };
@@ -239,6 +321,10 @@ pub fn parseConcurrent(
         .out_kind = out_kind,
         .stdout_file = &stdout_file,
         .write_mutex = &write_mutex,
+        .fatal_mutex = &fatal_mutex,
+        .fatal_error = &fatal_error,
+        .cancelled = &cancelled,
+        .broken_pipe = &broken_pipe,
         .emitted = &emitted_count,
         .skipped = &skipped_count,
         .records_skipped = &records_skipped_count,
@@ -251,6 +337,7 @@ pub fn parseConcurrent(
     var chunk_index: usize = 0;
     var actual_chunks: usize = 0;
     while (opts.carve or chunk_index < num_chunks) : (chunk_index += 1) {
+        if (cancelled.load(.acquire)) break;
         const chunk = Chunk.read(reader) catch |e| switch (e) {
             error.EndOfStream, error.BadChunkSignature => break,
             else => {
@@ -263,6 +350,7 @@ pub fn parseConcurrent(
         // Dispatch to thread pool with WaitGroup tracking
         pool.spawnWg(&wg, processChunk, .{ &shared, chunk_index, chunk });
 
+        if (cancelled.load(.acquire)) break;
         // Early stop if max_records reached (only relevant in unordered mode)
         if (!opts.ordered and opts.max_records != 0 and emitted_count >= opts.max_records) break;
     }
@@ -270,14 +358,29 @@ pub fn parseConcurrent(
     // Main thread helps process chunks while waiting (work stealing)
     pool.waitAndWork(&wg);
 
+    // Propagate fatal worker errors (allocation, reader errors, etc.).
+    if (fatal_error) |e| return e;
+    // Treat BrokenPipe as successful early termination.
+    if (broken_pipe.load(.acquire)) return;
+
     // Ordered mode: drain slots in order, respecting max_records per record
     if (output_slots) |slots| {
         drain_loop: for (slots[0..actual_chunks]) |slot| {
             // Slot should already be ready since we waited for all workers
             if (!slot.ready.load(.acquire)) continue;
 
-            for (slot.records.items) |record_data| {
-                stdout_file.writeAll(record_data) catch {};
+            for (slot.spans.items) |span| {
+                const start: usize = span.start;
+                const end: usize = start + span.len;
+                if (end > slot.data.items.len) return error.OutOfBounds;
+
+                stdout_file.writeAll(slot.data.items[start..end]) catch |err| switch (err) {
+                    error.BrokenPipe => {
+                        broken_pipe.store(true, .release);
+                        break :drain_loop;
+                    },
+                    else => return err,
+                };
                 emitted_count += 1;
 
                 if (opts.max_records != 0 and emitted_count >= opts.max_records) break :drain_loop;
@@ -285,6 +388,7 @@ pub fn parseConcurrent(
         }
     }
 
+    if (broken_pipe.load(.acquire)) return;
     if (opts.verbosity >= 1) log.info("done. emitted~={d}", .{emitted_count});
 }
 

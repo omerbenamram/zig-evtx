@@ -42,6 +42,15 @@ pub const FileTime = struct {
     raw: u64,
 };
 
+/// Windows BOOL (32-bit little-endian). Any non-zero is true.
+pub const WinBool = packed struct {
+    raw: u32,
+
+    pub inline fn toBool(self: WinBool) bool {
+        return self.raw != 0;
+    }
+};
+
 /// Windows SYSTEMTIME structure - packed for direct memory mapping
 pub const SystemTime = packed struct {
     year: u16,
@@ -86,10 +95,7 @@ pub fn readValue(comptime T: type, data: []const u8) ?T {
                 @compileError("Only packed structs supported in readValue: " ++ @typeName(T));
             }
         },
-        .bool => blk: {
-            const v = std.mem.readInt(u32, data[0..4], .little);
-            break :blk v != 0;
-        },
+        .bool => @compileError("readValue(bool, ...) is ambiguous; use WinBool for Windows BOOL or readValue(u8, ...) for 1-byte bool."),
         else => @compileError("Unsupported type in readValue: " ++ @typeName(T)),
     };
 }
@@ -214,12 +220,13 @@ pub const Reader = struct {
 
         return switch (type_info) {
             // Primitives: delegate to readValue (single source of truth)
-            .int, .float, .bool => {
+            .int, .float => {
                 if (self.pos + size > self.buf.len) return BinXmlError.UnexpectedEof;
                 const val = readValue(T, self.buf[self.pos..]) orelse return BinXmlError.UnexpectedEof;
                 self.pos += size;
                 return val;
             },
+            .bool => @compileError("Reader.readAny(bool) is ambiguous; use reader.WinBool for Windows BOOL."),
             // Enums: read underlying int, then convert
             .@"enum" => |e| {
                 const TagType = e.tag_type;
@@ -398,9 +405,9 @@ test "readValue bool interprets zero as false" {
     const true_data = [_]u8{ 0x01, 0x00, 0x00, 0x00 };
     const nonzero_data = [_]u8{ 0xFF, 0xFF, 0xFF, 0xFF };
 
-    try std.testing.expectEqual(false, readValue(bool, &false_data).?);
-    try std.testing.expectEqual(true, readValue(bool, &true_data).?);
-    try std.testing.expectEqual(true, readValue(bool, &nonzero_data).?);
+    try std.testing.expectEqual(false, readValue(WinBool, &false_data).?.toBool());
+    try std.testing.expectEqual(true, readValue(WinBool, &true_data).?.toBool());
+    try std.testing.expectEqual(true, readValue(WinBool, &nonzero_data).?.toBool());
 }
 
 test "readValue with comptime type dispatch" {
@@ -428,7 +435,7 @@ test "readValue with comptime type dispatch" {
     try std.testing.expectEqual(@as(u16, 2024), st.year);
     try std.testing.expectEqual(@as(u16, 123), st.milliseconds);
 
-    // Test bool via readValue
+    // Test WinBool via readValue
     const bool_data = [_]u8{ 0x01, 0x00, 0x00, 0x00 };
-    try std.testing.expectEqual(true, readValue(bool, &bool_data).?);
+    try std.testing.expectEqual(true, readValue(WinBool, &bool_data).?.toBool());
 }

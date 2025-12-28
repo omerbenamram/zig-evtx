@@ -19,6 +19,7 @@ const err = @import("../err.zig");
 const BinXmlError = err.BinXmlError;
 const ParseError = err.ParseError;
 const Reader = @import("../reader.zig").Reader;
+const value_reader = @import("../reader.zig");
 const util_string = @import("../util_string.zig");
 const logger = @import("../../logger.zig");
 const log = logger.scoped("binxml");
@@ -185,13 +186,13 @@ fn resolveSingleValue(
         var num_chars = val.data.len / 2;
         // Remove null terminator
         if (num_chars > 0) {
-            const last_char = std.mem.readInt(u16, val.data[val.data.len - 2 .. val.data.len][0..2], .little);
+            const last_char = value_reader.readValue(u16, val.data[val.data.len - 2 ..]) orelse unreachable;
             if (last_char == 0) num_chars -= 1;
         }
         // Trim trailing spaces (0x0020 in UTF-16LE) to match Rust evtx_dump behavior
         while (num_chars > 0) {
             const pos = (num_chars - 1) * 2;
-            const ch = std.mem.readInt(u16, val.data[pos..][0..2], .little);
+            const ch = value_reader.readValue(u16, val.data[pos..]) orelse unreachable;
             if (ch != 0x0020) break;
             num_chars -= 1;
         }
@@ -248,21 +249,12 @@ pub const Context = struct {
     name_cache: std.AutoHashMap(u32, NameCacheEntry),
 
     /// Creates a new context with the given backing allocator.
-    pub fn init(allocator: std.mem.Allocator) !Context {
-        const arena = std.heap.ArenaAllocator.init(allocator);
-        errdefer @constCast(&arena).deinit();
-
-        const cache = std.AutoHashMap([16]u8, Template).init(allocator);
-        errdefer @constCast(&cache).deinit();
-
-        const name_cache = std.AutoHashMap(u32, NameCacheEntry).init(allocator);
-        // No errdefer needed for last item - if it fails, we return error and prior errdefers run
-
+    pub fn init(allocator: std.mem.Allocator) Context {
         return .{
             .allocator = allocator,
-            .arena = arena,
-            .cache = cache,
-            .name_cache = name_cache,
+            .arena = std.heap.ArenaAllocator.init(allocator),
+            .cache = std.AutoHashMap([16]u8, Template).init(allocator),
+            .name_cache = std.AutoHashMap(u32, NameCacheEntry).init(allocator),
         };
     }
 
@@ -304,7 +296,7 @@ pub const Context = struct {
         // Adjust length for trailing nulls if necessary
         var take_chars = num_chars;
         if (byte_len >= 2) {
-            const last = std.mem.readInt(u16, chunk[str_start + byte_len - 2 .. str_start + byte_len][0..2], .little);
+            const last = value_reader.readValue(u16, chunk[str_start + byte_len - 2 ..]) orelse unreachable;
             if (last == 0 and take_chars > 0) take_chars -= 1;
         }
 
@@ -320,15 +312,15 @@ pub const Context = struct {
 
     /// Pre-populates the name cache using offsets from the chunk header.
     ///
-    /// This is a best-effort optimization that avoids repeated lookups during parsing.
-    /// Invalid offsets or malformed names are silently skipped since this is optional
-    /// pre-warming - the actual parsing will handle errors properly if encountered.
-    pub fn preCacheFromChunkHeader(self: *Context, chunk: []const u8, offsets: []const u32) void {
+    /// This avoids repeated lookups during parsing.
+    ///
+    /// Invalid offsets are skipped. Any parse/allocation error while reading a name
+    /// is treated as fatal and is returned to the caller.
+    pub fn preCacheFromChunkHeader(self: *Context, chunk: []const u8, offsets: []const u32) ParseError!void {
         for (offsets) |off| {
             // Skip null offsets and out-of-bounds
             if (off == 0 or off >= chunk.len) continue;
-            // Best-effort: errors during pre-caching are non-fatal
-            _ = self.getOrReadName(chunk, off) catch continue;
+            _ = try self.getOrReadName(chunk, off);
         }
     }
 };

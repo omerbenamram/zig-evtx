@@ -108,13 +108,13 @@ fn getRecordById(allocator: std.mem.Allocator, evtx_path: []const u8, record_id:
 
     // Create an output writer to serialize records
     var out = switch (format) {
-        .xml => evtx.OutputWriter.initSerializeOnly(.xml),
-        .json => evtx.OutputWriter.initSerializeOnly(.json_lines),
+        .xml => try evtx.OutputWriter.initSerializeOnly(allocator, .xml),
+        .json => try evtx.OutputWriter.initSerializeOnly(allocator, .json_lines),
     };
     defer out.deinit();
 
     // Create context for parsing
-    var ctx = try evtx.Context.init(allocator);
+    var ctx = evtx.Context.init(allocator);
     defer ctx.deinit();
 
     // Read chunks until EOF or we find the record
@@ -126,7 +126,7 @@ fn getRecordById(allocator: std.mem.Allocator, evtx_path: []const u8, record_id:
 
         // Reset context for each chunk and pre-cache common strings
         ctx.resetPerChunk();
-        ctx.preCacheFromChunkHeader(&chunk.buf, &chunk.header.common_string_offsets);
+        try ctx.preCacheFromChunkHeader(&chunk.buf, &chunk.header.common_string_offsets);
 
         var rec_iter = chunk.records();
         while (try rec_iter.next()) |rec| {
@@ -190,7 +190,8 @@ pub fn runTest(
     defer allocator.free(actual_raw);
 
     // Normalize actual output for comparison
-    const actual_normalized = switch (test_def.format) {
+    var actual_normalized: ?[]u8 = null;
+    actual_normalized = switch (test_def.format) {
         .xml => normalize_xml.normalize(allocator, actual_raw) catch {
             return .{ .result = .@"error", .message = "Failed to normalize actual" };
         },
@@ -198,14 +199,16 @@ pub fn runTest(
             return .{ .result = .@"error", .message = "Failed to normalize actual JSON" };
         },
     };
-    defer allocator.free(actual_normalized);
+    defer if (actual_normalized) |s| allocator.free(s);
 
-    const actual_compare = actual_normalized;
+    const actual_compare = actual_normalized.?;
 
     if (update_mode) {
         // Write actual to expected file
         const dir = std.fs.path.dirname(expected_path) orelse ".";
-        std.fs.cwd().makePath(dir) catch {};
+        std.fs.cwd().makePath(dir) catch {
+            return .{ .result = .@"error", .message = "Failed to create snapshots directory" };
+        };
 
         var out_file = std.fs.cwd().createFile(expected_path, .{}) catch {
             return .{ .result = .@"error", .message = "Failed to create expected file" };
@@ -226,7 +229,8 @@ pub fn runTest(
     defer allocator.free(expected_raw);
 
     // Normalize expected output for comparison
-    const expected_normalized = switch (test_def.format) {
+    var expected_normalized: ?[]u8 = null;
+    expected_normalized = switch (test_def.format) {
         .xml => normalize_xml.normalize(allocator, expected_raw) catch {
             return .{ .result = .@"error", .message = "Failed to normalize expected" };
         },
@@ -234,22 +238,24 @@ pub fn runTest(
             return .{ .result = .@"error", .message = "Failed to normalize expected JSON" };
         },
     };
-    defer allocator.free(expected_normalized);
+    defer if (expected_normalized) |s| allocator.free(s);
 
-    const expected_compare = expected_normalized;
+    const expected_compare = expected_normalized.?;
 
     // Compare
     if (std.mem.eql(u8, actual_compare, expected_compare)) {
         return .{ .result = .pass };
     } else {
-        // Find first difference for helpful output
-        const actual_dupe = allocator.dupe(u8, actual_compare) catch null;
-        const expected_dupe = allocator.dupe(u8, expected_compare) catch null;
+        // Return the normalized outputs to the caller (no extra allocation).
+        const actual_out = actual_normalized.?;
+        const expected_out = expected_normalized.?;
+        actual_normalized = null;
+        expected_normalized = null;
         return .{
             .result = .fail,
             .message = "Output differs from expected",
-            .actual = actual_dupe,
-            .expected = expected_dupe,
+            .actual = actual_out,
+            .expected = expected_out,
         };
     }
 }

@@ -7,10 +7,11 @@ const std = @import("std");
 const binxml = @import("../binxml/mod.zig");
 const render_xml = @import("../render_xml.zig");
 const render_json = @import("../render_json.zig");
-const alloc_mod = @import("alloc");
 const format = @import("format.zig");
+const err = @import("../err.zig");
 
 pub const EventRecordRaw = format.EventRecordRaw;
+pub const WriterError = err.WriterError;
 
 pub const JsonMode = enum { single, lines };
 
@@ -25,28 +26,28 @@ pub const OutputWriter = struct {
     /// Allocating writer for building serialized output (auto-grows, retains capacity)
     scratch: std.Io.Writer.Allocating,
 
-    pub fn initXml(dest: *std.Io.Writer) OutputWriter {
+    pub fn initXml(allocator: std.mem.Allocator, dest: *std.Io.Writer) !OutputWriter {
         return .{
             .dest = dest,
             .mode = .xml,
-            .scratch = std.Io.Writer.Allocating.initCapacity(alloc_mod.get(), 4096) catch .init(alloc_mod.get()),
+            .scratch = try std.Io.Writer.Allocating.initCapacity(allocator, 4096),
         };
     }
 
-    pub fn initJson(dest: *std.Io.Writer, json_mode: JsonMode) OutputWriter {
+    pub fn initJson(allocator: std.mem.Allocator, dest: *std.Io.Writer, json_mode: JsonMode) !OutputWriter {
         return .{
             .dest = dest,
             .mode = if (json_mode == .single) .json_single else .json_lines,
-            .scratch = std.Io.Writer.Allocating.initCapacity(alloc_mod.get(), 4096) catch .init(alloc_mod.get()),
+            .scratch = try std.Io.Writer.Allocating.initCapacity(allocator, 4096),
         };
     }
 
     /// Initialize for serialize-only mode (no destination writer needed).
-    pub fn initSerializeOnly(mode_: OutputMode) OutputWriter {
+    pub fn initSerializeOnly(allocator: std.mem.Allocator, mode_: OutputMode) !OutputWriter {
         return .{
             .dest = null,
             .mode = mode_,
-            .scratch = std.Io.Writer.Allocating.initCapacity(alloc_mod.get(), 4096) catch .init(alloc_mod.get()),
+            .scratch = try std.Io.Writer.Allocating.initCapacity(allocator, 4096),
         };
     }
 
@@ -73,7 +74,7 @@ pub const OutputWriter = struct {
         return self.scratch.written();
     }
 
-    pub fn flush(self: *OutputWriter) void {
-        if (self.dest) |dest| dest.flush() catch {};
+    pub fn flush(self: *OutputWriter) WriterError!void {
+        if (self.dest) |dest| try dest.flush();
     }
 };

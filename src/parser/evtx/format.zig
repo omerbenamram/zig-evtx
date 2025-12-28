@@ -2,10 +2,7 @@
 
 const std = @import("std");
 const crc32 = std.hash.crc;
-const binxml = @import("../binxml/mod.zig");
-const render_xml = @import("../render_xml.zig");
-const render_json = @import("../render_json.zig");
-const alloc_mod = @import("alloc");
+const value_reader = @import("../reader.zig");
 
 /// EVTX file header size in bytes
 pub const FILE_HEADER_SIZE: usize = 4096;
@@ -93,14 +90,14 @@ pub const Chunk = struct {
 
     pub fn validateChecksums(self: *const Chunk) !void {
         // Header checksum: CRC32 over bytes 0..120 and 128..512
-        const stored_hdr_crc = std.mem.readInt(u32, self.buf[124..128], .little);
+        const stored_hdr_crc = value_reader.readValue(u32, self.buf[124..]) orelse unreachable;
         var h = crc32.Crc32.init();
         h.update(self.buf[0..120]);
         h.update(self.buf[128..512]);
         if (h.final() != stored_hdr_crc) return error.BadChunkHeaderChecksum;
 
         // Events checksum: CRC32 over event records data
-        const stored_events_crc = std.mem.readInt(u32, self.buf[52..56], .little);
+        const stored_events_crc = value_reader.readValue(u32, self.buf[52..]) orelse unreachable;
         var e = crc32.Crc32.init();
         const start: usize = 512;
         const end: usize = @min(self.buf.len, self.header.free_space_offset);
@@ -144,13 +141,13 @@ pub const ChunkHeader = struct {
 
         // Common string offset array at 128: COMMON_STRING_SLOTS u32
         for (0..COMMON_STRING_SLOTS) |i| {
-            const off = std.mem.readInt(u32, buf[128 + i * 4 ..][0..4], .little);
+            const off = value_reader.readValue(u32, buf[128 + i * 4 ..]) orelse unreachable;
             ch.common_string_offsets[i] = off;
             if (off != 0 and off < buf.len) ch.common_strings_count += 1;
         }
         // TemplatePtr array at 384: TEMPLATE_PTR_SLOTS u32
         for (0..TEMPLATE_PTR_SLOTS) |i| {
-            const off = std.mem.readInt(u32, buf[384 + i * 4 ..][0..4], .little);
+            const off = value_reader.readValue(u32, buf[384 + i * 4 ..]) orelse unreachable;
             ch.template_ptrs[i] = off;
             if (off != 0 and off < buf.len) ch.template_ptrs_count += 1;
         }
@@ -184,7 +181,7 @@ pub const RecordIterator = struct {
         if (size < 32) return null;
         // If the record claims to run past the free-space boundary or chunk buffer, stop
         if (self.offset + size > self.chunk.buf.len or (self.offset + size) > self.chunk.header.free_space_offset) return null;
-        const end_copy = std.mem.readInt(u32, slice[size - 4 .. size][0..4], .little);
+        const end_copy = value_reader.readValue(u32, slice[size - 4 ..]) orelse unreachable;
         // Mismatched end size indicates a truncated tail; stop record iteration
         if (end_copy != size) return null;
         const event_data = slice[24 .. size - 4];

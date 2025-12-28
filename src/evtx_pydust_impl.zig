@@ -67,16 +67,18 @@ const IterState = struct {
 
         const is_xml = std.mem.eql(u8, fmt, "xml");
 
-        // Initialize context first (can fail)
-        const ctx = try binxml.Context.init(allocator);
+        // Initialize context first (infallible init; later operations may still fail)
+        var ctx = binxml.Context.init(allocator);
         errdefer ctx.deinit();
 
-        // Now initialize everything (OutputWriter.initSerializeOnly cannot fail)
+        // Now initialize everything (OutputWriter.initSerializeOnly may allocate)
+        var out = try OutputWriter.initSerializeOnly(allocator, if (is_xml) .xml else .json_lines);
+        errdefer out.deinit();
         self.* = .{
             .allocator = allocator,
             .opts = opts,
             .is_xml = is_xml,
-            .out = OutputWriter.initSerializeOnly(if (is_xml) .xml else .json_lines),
+            .out = out,
             .hdr = undefined,
             .ctx = ctx,
         };
@@ -108,7 +110,7 @@ const IterState = struct {
         };
         if (self.opts.validate_checksums) try self.current_chunk.validateChecksums();
         self.ctx.resetPerChunk();
-        self.ctx.preCacheFromChunkHeader(&self.current_chunk.buf, &self.current_chunk.header.common_string_offsets);
+        try self.ctx.preCacheFromChunkHeader(&self.current_chunk.buf, &self.current_chunk.header.common_string_offsets);
         if (self.opts.verbosity >= 3) logger.setModuleLevel("binxml", .trace);
         self.rec_iter = self.current_chunk.records();
         self.have_iter = true;
@@ -232,7 +234,7 @@ pub fn dumpFileBytes(path: []const u8, fmt: []const u8, opts: Options) ![]const 
     var scratch = std.Io.Writer.Allocating.initCapacity(allocator, 64 * 1024) catch std.Io.Writer.Allocating.init(allocator);
     errdefer scratch.deinit();
 
-    var parser = try EvtxParser.init(allocator, .{
+    var parser = EvtxParser.init(allocator, .{
         .validate_checksums = opts.validate_checksums,
         .verbosity = opts.verbosity,
         .max_records = opts.max_records,
@@ -242,11 +244,11 @@ pub fn dumpFileBytes(path: []const u8, fmt: []const u8, opts: Options) ![]const 
 
     var out = blk: {
         if (std.mem.eql(u8, fmt, "xml")) {
-            break :blk OutputWriter.initXml(&scratch.writer);
+            break :blk try OutputWriter.initXml(allocator, &scratch.writer);
         } else if (std.mem.eql(u8, fmt, "json")) {
-            break :blk OutputWriter.initJson(&scratch.writer, .single);
+            break :blk try OutputWriter.initJson(allocator, &scratch.writer, .single);
         } else if (std.mem.eql(u8, fmt, "jsonl") or std.mem.eql(u8, fmt, "jsonlines")) {
-            break :blk OutputWriter.initJson(&scratch.writer, .lines);
+            break :blk try OutputWriter.initJson(allocator, &scratch.writer, .lines);
         } else {
             return error.InvalidFormat;
         }
@@ -254,7 +256,7 @@ pub fn dumpFileBytes(path: []const u8, fmt: []const u8, opts: Options) ![]const 
     defer out.deinit();
 
     try parser.parse(&reader, &out);
-    out.flush();
+    try out.flush();
 
     return try allocator.dupe(u8, scratch.written());
 }
@@ -272,7 +274,7 @@ pub fn dumpFileToFile(path: []const u8, out_path: []const u8, fmt: []const u8, o
     var write_buf: [8192]u8 = undefined;
     var out_writer = outfile.writer(&write_buf);
 
-    var parser = try EvtxParser.init(allocator, .{
+    var parser = EvtxParser.init(allocator, .{
         .validate_checksums = opts.validate_checksums,
         .verbosity = opts.verbosity,
         .max_records = opts.max_records,
@@ -282,11 +284,11 @@ pub fn dumpFileToFile(path: []const u8, out_path: []const u8, fmt: []const u8, o
 
     var out = blk: {
         if (std.mem.eql(u8, fmt, "xml")) {
-            break :blk OutputWriter.initXml(&out_writer.interface);
+            break :blk try OutputWriter.initXml(allocator, &out_writer.interface);
         } else if (std.mem.eql(u8, fmt, "json")) {
-            break :blk OutputWriter.initJson(&out_writer.interface, .single);
+            break :blk try OutputWriter.initJson(allocator, &out_writer.interface, .single);
         } else if (std.mem.eql(u8, fmt, "jsonl") or std.mem.eql(u8, fmt, "jsonlines")) {
-            break :blk OutputWriter.initJson(&out_writer.interface, .lines);
+            break :blk try OutputWriter.initJson(allocator, &out_writer.interface, .lines);
         } else {
             return error.InvalidFormat;
         }
@@ -294,5 +296,5 @@ pub fn dumpFileToFile(path: []const u8, out_path: []const u8, fmt: []const u8, o
     defer out.deinit();
 
     try parser.parse(&reader, &out);
-    out.flush();
+    try out.flush();
 }

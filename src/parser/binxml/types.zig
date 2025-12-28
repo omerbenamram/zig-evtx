@@ -143,15 +143,6 @@ pub const TemplateDefinitionHeader = struct {
     data_size: u32,
 
     pub const binary_size: usize = 24;
-
-    /// Reads a TemplateDefinitionHeader from bytes at the given offset.
-    pub fn read(chunk: []const u8, offset: usize) TemplateDefinitionHeader {
-        return .{
-            .next_offset = std.mem.readInt(u32, chunk[offset..][0..4], .little),
-            .guid = chunk[offset + 4 ..][0..16].*,
-            .data_size = std.mem.readInt(u32, chunk[offset + 20 ..][0..4], .little),
-        };
-    }
 };
 
 /// Zero-bit mixin for vtype proxy methods.
@@ -176,7 +167,10 @@ pub fn VTypeMixin(comptime T: type) type {
         }
         pub fn valueType(self: *const @This()) ?ValueType {
             const parent: *const T = @fieldParentPtr("vt", self);
-            return std.meta.intToEnum(ValueType, ValueType.baseType(parent.vtype)) catch null;
+            const raw = ValueType.baseType(parent.vtype);
+            return std.meta.intToEnum(ValueType, raw) catch |err| switch (err) {
+                error.InvalidEnumTag => null,
+            };
         }
     };
 }

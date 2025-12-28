@@ -136,8 +136,8 @@ fn tryWriteAsNumber(nodes: []const IR.Node, writer: *std.Io.Writer) WriterError!
                     return true;
                 },
                 .bool => {
-                    if (reader.readValue(bool, val.bytes)) |b| {
-                        try writer.writeAll(if (b) "true" else "false");
+                    if (reader.readValue(reader.WinBool, val.bytes)) |wb| {
+                        try writer.writeAll(if (wb.toBool()) "true" else "false");
                         return true;
                     }
                     return false;

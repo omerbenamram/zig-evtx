@@ -122,13 +122,13 @@ pub fn formatUtf16StringXml(w: *std.Io.Writer, data: []const u8) WriterError!voi
     var num = data.len / 2;
     // Remove null terminator
     if (num > 0) {
-        const last = std.mem.readInt(u16, data[data.len - 2 .. data.len][0..2], .little);
+        const last = reader.readValue(u16, data[data.len - 2 ..]) orelse unreachable;
         if (last == 0) num -= 1;
     }
     // Trim trailing spaces (0x0020 in UTF-16LE)
     while (num > 0) {
         const pos = (num - 1) * 2;
-        const ch = std.mem.readInt(u16, data[pos..][0..2], .little);
+        const ch = reader.readValue(u16, data[pos..]) orelse unreachable;
         if (ch != 0x0020) break;
         num -= 1;
     }
@@ -162,7 +162,7 @@ pub fn formatValueXml(w: *std.Io.Writer, vtype: ValueType, data: []const u8) Wri
         .uint64 => try readAndFormatInt(w, u64, data),
         .real32 => if (reader.readValue(f32, data)) |f| try formatFloat32Xml(w, f),
         .real64 => if (reader.readValue(f64, data)) |f| try formatFloat64Xml(w, f),
-        .bool => if (reader.readValue(bool, data)) |b| try formatBool(w, b),
+        .bool => if (reader.readValue(reader.WinBool, data)) |b| try formatBool(w, b.toBool()),
         .binary => try formatHexBytesUpper(w, data),
         .guid => if (reader.readGuid(data)) |g| try formatGuidXml(w, g),
         .size_t => {
@@ -249,7 +249,7 @@ fn formatUtf16StringArrayXml(w: *std.Io.Writer, data: []const u8) WriterError!vo
     var start: usize = 0;
     var i: usize = 0;
     while (i + 2 <= data.len) : (i += 2) {
-        const ch = std.mem.readInt(u16, data[i..][0..2], .little);
+        const ch = reader.readValue(u16, data[i..]) orelse unreachable;
         if (ch == 0) {
             if (!first) try w.writeByte(',');
             first = false;

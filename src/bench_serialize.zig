@@ -87,7 +87,10 @@ fn beforeAll() void {
 
         // Collect records from this chunk
         var iter = stored_chunk.records();
-        while (iter.next() catch null) |rec| {
+        while (iter.next() catch |err| {
+            std.debug.print("Record iterator error: {}\n", .{err});
+            @panic("record iterator failed");
+        }) |rec| {
             // Calculate offset of binxml slice within chunk buffer
             const binxml_offset = @intFromPtr(rec.binxml.ptr) - @intFromPtr(rec.chunk_buf);
             // Create record pointing to our stored buffer
@@ -115,28 +118,40 @@ fn afterAll() void {
 // ============================================================================
 
 fn bench_serialize_xml(_: std.mem.Allocator) void {
-    var ctx = binxml.Context.init(g_alloc) catch @panic("ctx init");
+    var ctx = binxml.Context.init(g_alloc);
     defer ctx.deinit();
 
-    var writer = OutputWriter.initSerializeOnly(.xml);
+    var writer = OutputWriter.initSerializeOnly(g_alloc, .xml) catch |err| {
+        std.debug.print("OutputWriter.initSerializeOnly(xml) failed: {s}\n", .{@errorName(err)});
+        @panic("initSerializeOnly failed");
+    };
     defer writer.deinit();
 
     for (g_records.items) |rec| {
         ctx.resetPerChunk();
-        _ = writer.serializeRecord(rec, &ctx) catch continue;
+        _ = writer.serializeRecord(rec, &ctx) catch |err| {
+            std.debug.print("serializeRecord(xml) failed: {s}\n", .{@errorName(err)});
+            @panic("serializeRecord failed");
+        };
     }
 }
 
 fn bench_serialize_json(_: std.mem.Allocator) void {
-    var ctx = binxml.Context.init(g_alloc) catch @panic("ctx init");
+    var ctx = binxml.Context.init(g_alloc);
     defer ctx.deinit();
 
-    var writer = OutputWriter.initSerializeOnly(.json_lines);
+    var writer = OutputWriter.initSerializeOnly(g_alloc, .json_lines) catch |err| {
+        std.debug.print("OutputWriter.initSerializeOnly(json) failed: {s}\n", .{@errorName(err)});
+        @panic("initSerializeOnly failed");
+    };
     defer writer.deinit();
 
     for (g_records.items) |rec| {
         ctx.resetPerChunk();
-        _ = writer.serializeRecord(rec, &ctx) catch continue;
+        _ = writer.serializeRecord(rec, &ctx) catch |err| {
+            std.debug.print("serializeRecord(json) failed: {s}\n", .{@errorName(err)});
+            @panic("serializeRecord failed");
+        };
     }
 }
 

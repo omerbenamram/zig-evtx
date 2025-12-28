@@ -221,7 +221,7 @@ fn writeUtf16LeScalar(w: *std.Io.Writer, utf16le: []const u8, num_chars: usize, 
 
         // Encode codepoint to UTF-8
         var utf8_buf: [4]u8 = undefined;
-        const utf8_len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch continue;
+        const utf8_len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch unreachable;
 
         // Apply escape mode to each UTF-8 byte
         for (utf8_buf[0..utf8_len]) |c| {
@@ -328,7 +328,7 @@ pub fn convertUtf16ToUtf8(allocator: std.mem.Allocator, utf16le: []const u8, num
 
         while (it.nextCodepoint()) |codepoint| {
             if (std.unicode.isSurrogateCodepoint(codepoint)) continue;
-            const len = std.unicode.utf8Encode(codepoint, stack_buf[out_len..][0..4]) catch continue;
+            const len = std.unicode.utf8Encode(codepoint, stack_buf[out_len..][0..4]) catch unreachable;
             out_len += len;
         }
     }
@@ -386,7 +386,7 @@ pub fn writeAnsiCp1252Escaped(w: *std.Io.Writer, bytes: []const u8) WriterError!
     var utf8_buf: [4]u8 = undefined;
     for (bytes) |b| {
         const codepoint = cp1252ToCodepoint(b);
-        const len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch continue;
+        const len = std.unicode.utf8Encode(codepoint, &utf8_buf) catch unreachable;
 
         // Apply XML escaping to each UTF-8 byte
         for (utf8_buf[0..len]) |c| {

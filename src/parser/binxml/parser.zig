@@ -1,5 +1,6 @@
 const std = @import("std");
 const Reader = @import("../reader.zig").Reader;
+const value_reader = @import("../reader.zig");
 const IRModule = @import("../ir.zig");
 const IR = IRModule.IR;
 const context_mod = @import("context.zig");
@@ -145,15 +146,16 @@ fn calcValuesOffset(chunk: []const u8, after_header: usize, def_data_off: u32) u
     // Definition is inline - skip past it (and any chained definitions)
     var offset = after_header;
     while (offset + types.TemplateDefinitionHeader.binary_size <= chunk.len) {
-        const hdr = types.TemplateDefinitionHeader.read(chunk, offset);
-        const data_end = offset + types.TemplateDefinitionHeader.binary_size + hdr.data_size;
+        const next_off = value_reader.readValue(u32, chunk[offset..]) orelse unreachable;
+        const data_size = value_reader.readValue(u32, chunk[offset + 20 ..]) orelse unreachable;
+        const data_end = offset + types.TemplateDefinitionHeader.binary_size + data_size;
 
         if (data_end > chunk.len) break;
         offset = data_end;
 
         // next_offset == 0 means no more chained definitions
         // next_offset pointing elsewhere means we're done with inline defs
-        if (hdr.next_offset == 0 or hdr.next_offset != offset) break;
+        if (next_off == 0 or next_off != offset) break;
     }
 
     return offset;
@@ -215,7 +217,14 @@ fn getOrCacheTemplate(ctx: *Context, chunk: []const u8, def_data_off: u32) Parse
         return error.OutOfBounds;
     }
 
-    const def_header = types.TemplateDefinitionHeader.read(chunk, off);
+    const next_offset = value_reader.readValue(u32, chunk[off..]) orelse return BinXmlError.UnexpectedEof;
+    const guid = chunk[off + 4 ..][0..16].*;
+    const data_size = value_reader.readValue(u32, chunk[off + 20 ..]) orelse return BinXmlError.UnexpectedEof;
+    const def_header = types.TemplateDefinitionHeader{
+        .next_offset = next_offset,
+        .guid = guid,
+        .data_size = data_size,
+    };
 
     // Cache by GUID - the unique identifier for template definitions
     if (ctx.cache.get(def_header.guid)) |cached| {
@@ -281,7 +290,7 @@ pub fn parseTemplateInstanceValues(r: *Reader, allocator: std.mem.Allocator) Par
     for (0..declared) |i| {
         // Read descriptor from table (4 bytes each)
         const desc_offset = desc_table_start + i * @sizeOf(types.ValueDescriptor);
-        const size = std.mem.readInt(u16, r.buf[desc_offset..][0..2], .little);
+        const size = value_reader.readValue(u16, r.buf[desc_offset..]) orelse return BinXmlError.UnexpectedEof;
         const vtype = r.buf[desc_offset + 2];
         // Note: desc_offset + 3 is reserved/unused byte - we skip it entirely
 

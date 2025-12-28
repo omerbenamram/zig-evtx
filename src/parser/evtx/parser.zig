@@ -38,7 +38,7 @@ pub const EvtxParser = struct {
 
     pub const OutKind = output.OutputMode;
 
-    pub fn init(allocator: std.mem.Allocator, opts: ParserOptions) !EvtxParser {
+    pub fn init(allocator: std.mem.Allocator, opts: ParserOptions) EvtxParser {
         return .{ .allocator = allocator, .opts = opts };
     }
 
@@ -68,7 +68,7 @@ pub const EvtxParser = struct {
         var emitted: usize = 0;
         var skipped: usize = 0;
         var failed: usize = 0;
-        var ctx = try binxml.Context.init(self.allocator);
+        var ctx = binxml.Context.init(self.allocator);
         defer ctx.deinit();
         // We need a mutable output to retain and reuse scratch capacity across records
         var out_mut = out;
@@ -83,7 +83,7 @@ pub const EvtxParser = struct {
             if (self.opts.validate_checksums) try chunk.validateChecksums();
             ctx.resetPerChunk();
             // Pre-cache common strings from chunk header for faster lookups
-            ctx.preCacheFromChunkHeader(&chunk.buf, &chunk.header.common_string_offsets);
+            try ctx.preCacheFromChunkHeader(&chunk.buf, &chunk.header.common_string_offsets);
             // Only enable deepest renderer-specific traces at -vvv
             if (self.opts.verbosity >= 3) logger.setModuleLevel("binxml", .trace);
             var rec_iter = chunk.records();

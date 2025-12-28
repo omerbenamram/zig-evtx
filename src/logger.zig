@@ -149,10 +149,22 @@ fn logInternal(module: []const u8, lvl: Level, comptime fmt: []const u8, args: a
     var buf: [MAX_LOG_MESSAGE_SIZE]u8 = undefined;
     var fbs = std.io.fixedBufferStream(&buf);
     var writer = fbs.writer();
-    writePrefix(writer, lvl, module) catch return;
-    writer.print(fmt, args) catch return;
-    writer.writeByte('\n') catch {};
-    std.fs.File.stderr().writeAll(fbs.getWritten()) catch {};
+    writePrefix(writer, lvl, module) catch |e| switch (e) {
+        error.NoSpaceLeft => {},
+        else => return,
+    };
+    writer.print(fmt, args) catch |e| switch (e) {
+        error.NoSpaceLeft => {},
+        else => return,
+    };
+    writer.writeByte('\n') catch |e| switch (e) {
+        error.NoSpaceLeft => {},
+        else => return,
+    };
+    std.fs.File.stderr().writeAll(fbs.getWritten()) catch |e| switch (e) {
+        error.BrokenPipe => return,
+        else => unreachable,
+    };
 }
 
 pub const Logger = struct {
