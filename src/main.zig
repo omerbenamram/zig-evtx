@@ -4,13 +4,14 @@ const alloc = @import("alloc");
 const fs = std.fs;
 
 const evtx = @import("parser/evtx/mod.zig");
+const runtime = @import("runtime.zig");
 
 /// Default read buffer size for file I/O
 const READ_BUFFER_SIZE: usize = 8192;
 
 pub fn main(init: std.process.Init) !void {
     // Avoid SIGPIPE termination when stdout is closed (e.g. piped to head).
-    ignoreSigpipe();
+    runtime.ignoreSigpipe();
 
     const allocator = init.gpa;
     const io = init.io;
@@ -104,18 +105,6 @@ pub fn main(init: std.process.Init) !void {
         };
         var stdout_file = std.Io.File.stdout();
         try parser.parseConcurrent(.{ .io = io, .stdout_file = &stdout_file }, &reader, out_kind, num_threads);
-    }
-}
-
-/// Ignore SIGPIPE to prevent crashes when stdout is closed (e.g. piped to head).
-fn ignoreSigpipe() void {
-    if (comptime builtin.os.tag != .windows) {
-        const act = std.posix.Sigaction{
-            .handler = .{ .handler = std.posix.SIG.IGN },
-            .mask = std.mem.zeroes(std.posix.sigset_t),
-            .flags = 0,
-        };
-        std.posix.sigaction(std.posix.SIG.PIPE, &act, null);
     }
 }
 

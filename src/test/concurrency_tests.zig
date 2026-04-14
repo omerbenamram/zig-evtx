@@ -41,7 +41,7 @@ fn openSample(io: std.Io) !std.Io.File {
     return std.Io.Dir.cwd().openFile(io, sample_path, .{ .mode = .read_only });
 }
 
-fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions, mode: evtx.OutputMode) !ParsedOutput {
+fn withSampleReader(allocator: std.mem.Allocator, func: anytype) @typeInfo(@TypeOf(func)).@"fn".return_type.? {
     var io_impl = std.Io.Threaded.init(allocator, .{});
     defer io_impl.deinit();
     const io = io_impl.io();
@@ -51,79 +51,80 @@ fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions,
 
     var read_buf: [8192]u8 = undefined;
     var reader = file.reader(io, &read_buf);
+    return func(&reader);
+}
 
-    const hdr = try evtx.worker.FileHeader.read(&reader);
-    var collector = LogicalRecordCollector{ .allocator = allocator };
-    errdefer collector.deinit();
-    var skipped: usize = 0;
+fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions, mode: evtx.OutputMode) !ParsedOutput {
+    const Runner = struct {
+        fn run(reader: anytype) !ParsedOutput {
+            const hdr = try evtx.worker.FileHeader.read(reader);
+            var collector = LogicalRecordCollector{ .allocator = allocator };
+            errdefer collector.deinit();
+            var skipped: usize = 0;
 
-    var chunk_index: usize = 0;
-    while (chunk_index < hdr.core.num_chunks) : (chunk_index += 1) {
-        const chunk = evtx.worker.Chunk.read(&reader) catch |err| switch (err) {
-            error.EndOfStream, error.BadChunkSignature => break,
-            else => return err,
-        };
+            var chunk_index: usize = 0;
+            while (chunk_index < hdr.core.num_chunks) : (chunk_index += 1) {
+                const chunk = evtx.worker.Chunk.read(reader) catch |err| switch (err) {
+                    error.EndOfStream, error.BadChunkSignature => break,
+                    else => return err,
+                };
 
-        var out = try evtx.OutputWriter.initSerializeOnly(allocator, mode);
-        defer out.deinit();
-        var ctx = evtx.Context.init(allocator);
-        defer ctx.deinit();
+                var out = try evtx.OutputWriter.initSerializeOnly(allocator, mode);
+                defer out.deinit();
+                var ctx = evtx.Context.init(allocator);
+                defer ctx.deinit();
 
-        var mutable_chunk = chunk;
-        ctx.resetPerChunk();
-        try ctx.preCacheFromChunkHeader(&mutable_chunk.buf, &mutable_chunk.header.common_string_offsets);
+                var mutable_chunk = chunk;
+                ctx.resetPerChunk();
+                try ctx.preCacheFromChunkHeader(&mutable_chunk.buf, &mutable_chunk.header.common_string_offsets);
 
-        var rec_iter = mutable_chunk.records();
-        while (try rec_iter.next()) |rec| {
-            if (opts.skip_first > 0 and skipped < opts.skip_first) {
-                skipped += 1;
-                continue;
+                var rec_iter = mutable_chunk.records();
+                while (try rec_iter.next()) |rec| {
+                    if (opts.skip_first > 0 and skipped < opts.skip_first) {
+                        skipped += 1;
+                        continue;
+                    }
+                    const emitted_count = collector.records.items.len;
+                    if (opts.max_records != 0 and emitted_count >= opts.max_records) return collector.takeOutput();
+
+                    const view = evtx.worker.EventRecordRaw{
+                        .identifier = rec.identifier,
+                        .written_time = rec.written_time,
+                        .binxml = rec.binxml,
+                        .chunk_buf = &mutable_chunk.buf,
+                    };
+                    const bytes = out.serializeRecord(view, &ctx) catch continue;
+                    try collector.append(rec.identifier, bytes);
+                }
             }
-            const emitted_count = collector.records.items.len;
-            if (opts.max_records != 0 and emitted_count >= opts.max_records) return collector.takeOutput();
 
-            const view = evtx.worker.EventRecordRaw{
-                .identifier = rec.identifier,
-                .written_time = rec.written_time,
-                .binxml = rec.binxml,
-                .chunk_buf = &mutable_chunk.buf,
-            };
-            const bytes = out.serializeRecord(view, &ctx) catch continue;
-            try collector.append(rec.identifier, bytes);
+            return collector.takeOutput();
         }
-    }
+    };
 
-    return collector.takeOutput();
+    return withSampleReader(allocator, Runner.run);
 }
 
 fn collectConcurrentOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions, num_threads: usize) !evtx.worker.CollectedOutput {
-    var io_impl = std.Io.Threaded.init(allocator, .{});
-    defer io_impl.deinit();
-    const io = io_impl.io();
+    const Runner = struct {
+        fn run(reader: anytype) !evtx.worker.CollectedOutput {
+            var parser = evtx.EvtxParser.init(allocator, opts);
+            return try parser.collectConcurrent(reader, .xml, num_threads);
+        }
+    };
 
-    var file = try openSample(io);
-    defer file.close(io);
-
-    var read_buf: [8192]u8 = undefined;
-    var reader = file.reader(io, &read_buf);
-
-    var parser = evtx.EvtxParser.init(allocator, opts);
-    return try parser.collectConcurrent(&reader, .xml, num_threads);
+    return withSampleReader(allocator, Runner.run);
 }
 
 fn collectConcurrentOutputWithFailure(allocator: std.mem.Allocator, opts: evtx.ParserOptions, num_threads: usize, fail_after_records: usize, fail_error: anyerror) !evtx.worker.CollectedOutput {
-    var io_impl = std.Io.Threaded.init(allocator, .{});
-    defer io_impl.deinit();
-    const io = io_impl.io();
+    const Runner = struct {
+        fn run(reader: anytype) !evtx.worker.CollectedOutput {
+            var parser = evtx.EvtxParser.init(allocator, opts);
+            return try parser.collectConcurrentWithFailure(reader, .xml, num_threads, fail_after_records, fail_error);
+        }
+    };
 
-    var file = try openSample(io);
-    defer file.close(io);
-
-    var read_buf: [8192]u8 = undefined;
-    var reader = file.reader(io, &read_buf);
-
-    var parser = evtx.EvtxParser.init(allocator, opts);
-    return try parser.collectConcurrentWithFailure(&reader, .xml, num_threads, fail_after_records, fail_error);
+    return withSampleReader(allocator, Runner.run);
 }
 
 fn sortCollectedById(records: []evtx.worker.EmittedRecord) void {

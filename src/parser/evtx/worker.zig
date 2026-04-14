@@ -1,10 +1,10 @@
 //! Concurrent EVTX parsing with explicit std.Thread workers.
 
 const std = @import("std");
-const builtin = @import("builtin");
 const binxml = @import("../binxml/mod.zig");
 const logger = @import("../../logger.zig");
 const log = logger.scoped("evtx");
+const runtime = @import("../../runtime.zig");
 
 const format = @import("format.zig");
 const output = @import("output.zig");
@@ -90,17 +90,6 @@ const ConcurrentSink = union(enum) {
     collect: *CollectState,
 };
 
-fn ignoreSigpipe() void {
-    if (comptime builtin.os.tag != .windows) {
-        const act = std.posix.Sigaction{
-            .handler = .{ .handler = std.posix.SIG.IGN },
-            .mask = std.mem.zeroes(std.posix.sigset_t),
-            .flags = 0,
-        };
-        std.posix.sigaction(std.posix.SIG.PIPE, &act, null);
-    }
-}
-
 const RecordSpan = struct {
     identifier: u64,
     start: u32,
@@ -145,7 +134,7 @@ const WorkerTask = struct {
 
 fn sharedIo(shared: *SharedState) std.Io {
     return switch (shared.sink) {
-        .stdout => |runtime| runtime.io,
+        .stdout => |io_runtime| io_runtime.io,
         .collect => std.Options.debug_threaded_io.?.io(),
     };
 }
@@ -166,9 +155,9 @@ fn writeAll(shared: *SharedState, record: PendingRecord) !void {
     defer shared.write_mutex.unlock(io);
 
     switch (shared.sink) {
-        .stdout => |runtime| {
+        .stdout => |io_runtime| {
             var write_buf: [4096]u8 = undefined;
-            var writer = runtime.stdout_file.writer(runtime.io, &write_buf);
+            var writer = io_runtime.stdout_file.writer(io_runtime.io, &write_buf);
             try writer.interface.writeAll(record.bytes);
             try writer.interface.flush();
             shared.allocator.free(record.bytes);
@@ -458,28 +447,8 @@ fn parseConcurrentWithSink(
     out_kind: OutKind,
     num_threads: usize,
 ) !void {
-    ignoreSigpipe();
-
-    switch (opts.verbosity) {
-        0 => {},
-        1 => {
-            logger.setModuleLevel("evtx", .info);
-            logger.setModuleLevel("binxml", .warn);
-            log.info("reading file header...", .{});
-        },
-        2 => {
-            logger.setModuleLevel("evtx", .debug);
-            logger.setModuleLevel("binxml", .debug);
-            log.info("reading file header...", .{});
-        },
-        else => {
-            logger.setModuleLevel("evtx", .trace);
-            logger.setModuleLevel("binxml", .trace);
-            log.info("reading file header...", .{});
-        },
-    }
-
-    if (opts.verbosity >= 3) logger.setModuleLevel("binxml", .trace);
+    runtime.ignoreSigpipe();
+    runtime.configureVerbosity(opts.verbosity);
 
     const hdr: FileHeader = try FileHeader.read(reader);
     const num_chunks: usize = hdr.core.num_chunks;

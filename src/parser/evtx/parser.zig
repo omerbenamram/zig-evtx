@@ -4,6 +4,7 @@ const std = @import("std");
 const binxml = @import("../binxml/mod.zig");
 const logger = @import("../../logger.zig");
 const log = logger.scoped("evtx");
+const runtime = @import("../../runtime.zig");
 
 const format = @import("format.zig");
 const worker = @import("worker.zig");
@@ -43,25 +44,7 @@ pub const EvtxParser = struct {
     }
 
     pub fn parse(self: *EvtxParser, reader: anytype, out: anytype) !void {
-        // Configure logging levels per verbosity
-        switch (self.opts.verbosity) {
-            0 => {},
-            1 => {
-                logger.setModuleLevel("evtx", .info);
-                logger.setModuleLevel("binxml", .warn);
-                log.info("reading file header...", .{});
-            },
-            2 => {
-                logger.setModuleLevel("evtx", .debug);
-                logger.setModuleLevel("binxml", .debug);
-                log.info("reading file header...", .{});
-            },
-            else => {
-                logger.setModuleLevel("evtx", .trace);
-                logger.setModuleLevel("binxml", .trace);
-                log.info("reading file header...", .{});
-            },
-        }
+        runtime.configureVerbosity(self.opts.verbosity);
         const hdr: FileHeader = try FileHeader.read(reader);
 
         var chunk_index: usize = 0;
@@ -84,8 +67,6 @@ pub const EvtxParser = struct {
             ctx.resetPerChunk();
             // Pre-cache common strings from chunk header for faster lookups
             try ctx.preCacheFromChunkHeader(&chunk.buf, &chunk.header.common_string_offsets);
-            // Only enable deepest renderer-specific traces at -vvv
-            if (self.opts.verbosity >= 3) logger.setModuleLevel("binxml", .trace);
             var rec_iter = chunk.records();
             var selected_including_skips: usize = 0;
             while (try rec_iter.next()) |rec| {
