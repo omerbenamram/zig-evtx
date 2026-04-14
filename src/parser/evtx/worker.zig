@@ -100,6 +100,11 @@ const OutputSlot = struct {
     ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 };
 
+const JoinedTask = struct {
+    chunk_index: usize,
+    err: ?anyerror,
+};
+
 const SharedState = struct {
     allocator: std.mem.Allocator,
     sink: ConcurrentSink,
@@ -123,10 +128,6 @@ const WorkerTask = struct {
     chunk_index: usize,
     chunk: Chunk,
     err: ?anyerror = null,
-};
-
-const ActiveWorker = struct {
-    task: *WorkerTask,
 };
 
 fn sharedIo(shared: *SharedState) std.Io {
@@ -332,29 +333,29 @@ fn serializeChunkRecords(shared: *SharedState, chunk_index: usize, chunk: *Chunk
     }
 
     while (nextRecord(shared, &rec_iter)) |rec| {
-            if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
-            if (trySkipRecord(shared, &shared.skipped)) continue;
-            if (!reserveSelectedRecord(shared)) return;
-            if (!reserveEmitSlot(shared)) return;
+        if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
+        if (trySkipRecord(shared, &shared.skipped)) continue;
+        if (!reserveSelectedRecord(shared)) return;
+        if (!reserveEmitSlot(shared)) return;
 
-            const view = EventRecordRaw{ .identifier = rec.identifier, .written_time = rec.written_time, .binxml = rec.binxml, .chunk_buf = &chunk.buf };
-            const bytes = out.serializeRecord(view, ctx) catch |e| {
-                _ = shared.failed.fetchAdd(1, .acq_rel);
-                releaseEmitSlot(shared);
-                log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
-                continue;
-            };
-            const pending = makePendingRecord(shared, rec.identifier, bytes) catch |err| {
-                releaseEmitSlot(shared);
-                return err;
-            };
+        const view = EventRecordRaw{ .identifier = rec.identifier, .written_time = rec.written_time, .binxml = rec.binxml, .chunk_buf = &chunk.buf };
+        const bytes = out.serializeRecord(view, ctx) catch |e| {
+            _ = shared.failed.fetchAdd(1, .acq_rel);
+            releaseEmitSlot(shared);
+            log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
+            continue;
+        };
+        const pending = makePendingRecord(shared, rec.identifier, bytes) catch |err| {
+            releaseEmitSlot(shared);
+            return err;
+        };
 
-            writeAll(shared, pending) catch |err| {
-                releaseEmitSlot(shared);
-                handleWriteError(shared, err);
-                return err;
-            };
-        }
+        writeAll(shared, pending) catch |err| {
+            releaseEmitSlot(shared);
+            handleWriteError(shared, err);
+            return err;
+        };
+    }
 }
 
 fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) !void {
@@ -400,10 +401,13 @@ fn workerMain(shared: *SharedState, task: *WorkerTask) void {
     };
 }
 
-fn joinWorker(allocator: std.mem.Allocator, finished: *WorkerTask) !void {
+fn joinWorker(allocator: std.mem.Allocator, finished: *WorkerTask) JoinedTask {
     defer allocator.destroy(finished);
     finished.thread.join();
-    if (finished.err) |err| return err;
+    return .{
+        .chunk_index = finished.chunk_index,
+        .err = finished.err,
+    };
 }
 
 fn drainOrderedOutput(shared: *SharedState, actual_chunks: usize) !void {
@@ -491,7 +495,7 @@ fn parseConcurrentWithSink(
         .output_slots = output_slots,
     };
 
-    var active = std.ArrayList(ActiveWorker).empty;
+    var active = std.ArrayList(*WorkerTask).empty;
     defer active.deinit(allocator);
     const worker_limit = @max(@as(usize, 1), num_threads);
 
@@ -517,18 +521,26 @@ fn parseConcurrentWithSink(
         };
         task.thread = try std.Thread.spawn(.{}, workerMain, .{ &shared, task });
         errdefer task.thread.join();
-        try active.append(allocator, .{ .task = task });
+        try active.append(allocator, task);
 
         if (active.items.len >= worker_limit) {
-            try joinWorker(allocator, active.orderedRemove(0).task);
+            const joined = joinWorker(allocator, active.orderedRemove(0));
+            if (joined.err) |err| {
+                log.err("worker for chunk {d} failed: {s}", .{ joined.chunk_index, @errorName(err) });
+                return err;
+            }
         }
 
         if (shared.cancelled.load(.acquire)) break;
         if (!opts.ordered and opts.max_records != 0 and shared.emitted.load(.acquire) >= opts.max_records) break;
     }
 
-    while (active.pop()) |entry| {
-        try joinWorker(allocator, entry.task);
+    while (active.pop()) |task| {
+        const joined = joinWorker(allocator, task);
+        if (joined.err) |err| {
+            log.err("worker for chunk {d} failed: {s}", .{ joined.chunk_index, @errorName(err) });
+            return err;
+        }
     }
 
     if (shared.fatal_error) |e| return e;

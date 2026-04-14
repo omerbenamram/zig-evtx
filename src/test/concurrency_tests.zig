@@ -10,17 +10,6 @@ const ParsedRecord = struct {
     bytes: []u8,
 };
 
-const SkipCounter = struct {
-    value: usize = 0,
-
-    fn shouldSkip(self: *SkipCounter, limit: usize) bool {
-        if (limit == 0) return false;
-        const current = self.value;
-        self.value += 1;
-        return current < limit;
-    }
-};
-
 const LogicalRecordCollector = struct {
     allocator: std.mem.Allocator,
     records: std.ArrayList(ParsedRecord) = .empty,
@@ -74,7 +63,7 @@ fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions,
     const hdr = try evtx.worker.FileHeader.read(&reader);
     var collector = LogicalRecordCollector{ .allocator = allocator };
     errdefer collector.deinit();
-    var skipped = SkipCounter{};
+    var skipped: usize = 0;
 
     var chunk_index: usize = 0;
     while (chunk_index < hdr.core.num_chunks) : (chunk_index += 1) {
@@ -94,7 +83,10 @@ fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions,
 
         var rec_iter = mutable_chunk.records();
         while (try rec_iter.next()) |rec| {
-            if (skipped.shouldSkip(opts.skip_first)) continue;
+            if (opts.skip_first > 0 and skipped < opts.skip_first) {
+                skipped += 1;
+                continue;
+            }
             const emitted_count = collector.records.items.len;
             if (opts.max_records != 0 and emitted_count >= opts.max_records) return collector.takeOutput();
 
