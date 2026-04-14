@@ -8,7 +8,23 @@ const MAX_LOG_MESSAGE_SIZE: usize = 4096;
 pub const Level = enum(u8) { err = 1, warn = 2, info = 3, debug = 4, trace = 5 };
 
 /// Mutex protecting writes to module_levels hashmap
-var logger_mutex: std.Thread.Mutex = .{};
+var logger_mutex: std.Io.Mutex = .init;
+
+fn lockLogger() void {
+    logger_mutex.lockUncancelable(std.Options.debug_threaded_io.?.io());
+}
+
+fn unlockLogger() void {
+    logger_mutex.unlock(std.Options.debug_threaded_io.?.io());
+}
+
+fn getEnvVarOwned(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {
+    const key_z = allocator.dupeZ(u8, key) catch return null;
+    defer allocator.free(key_z);
+
+    const value_z = std.c.getenv(key_z.ptr) orelse return null;
+    return allocator.dupe(u8, std.mem.sliceTo(value_z, 0)) catch null;
+}
 
 fn parseLevel(s: []const u8) ?Level {
     if (std.ascii.eqlIgnoreCase(s, "error") or std.mem.eql(u8, s, "1")) return .err;
@@ -34,13 +50,13 @@ fn loadGlobalLevelLocked() void {
     const key_list = [_][]const u8{ "EVTX_LOG_LEVEL", "EVTX_LOG" };
     var i: usize = 0;
     while (i < key_list.len) : (i += 1) {
-        if (std.process.getEnvVarOwned(allocator, key_list[i])) |val| {
+        if (getEnvVarOwned(allocator, key_list[i])) |val| {
             defer allocator.free(val);
             if (parseLevel(std.mem.trim(u8, val, " \t\r\n"))) |lvl| {
                 global_level_atomic.store(@intFromEnum(lvl), .release);
                 return;
             }
-        } else |_| {}
+        }
     }
 }
 
@@ -64,8 +80,8 @@ fn cacheModuleLevelLocked(module: []const u8, lvl: Level) void {
 }
 
 pub fn clearModuleLevelCache() void {
-    logger_mutex.lock();
-    defer logger_mutex.unlock();
+    lockLogger();
+    defer unlockLogger();
     if (!module_levels_inited) return;
     module_levels.clearRetainingCapacity();
 }
@@ -96,8 +112,8 @@ fn envKeyForModule(buf: []u8, module: []const u8) []const u8 {
 }
 
 fn getModuleLevel(module: []const u8) Level {
-    logger_mutex.lock();
-    defer logger_mutex.unlock();
+    lockLogger();
+    defer unlockLogger();
 
     loadGlobalLevelLocked();
     var map = ensureMapLocked();
@@ -108,13 +124,13 @@ fn getModuleLevel(module: []const u8) Level {
     var key_buf: [128]u8 = undefined;
     const key = envKeyForModule(&key_buf, module);
     if (key.len > 0) {
-        if (std.process.getEnvVarOwned(alloc_mod.get(), key)) |val| {
+        if (getEnvVarOwned(alloc_mod.get(), key)) |val| {
             defer alloc_mod.get().free(val);
             if (parseLevel(std.mem.trim(u8, val, " \t\r\n"))) |lvl| {
                 cacheModuleLevelLocked(module, lvl);
                 return lvl;
             }
-        } else |_| {}
+        }
     }
 
     const global = @as(Level, @enumFromInt(global_level_atomic.load(.acquire)));
@@ -147,24 +163,19 @@ fn writePrefix(w: anytype, lvl: Level, module: []const u8) !void {
 fn logInternal(module: []const u8, lvl: Level, comptime fmt: []const u8, args: anytype) void {
     if (!shouldLog(module, lvl)) return;
     var buf: [MAX_LOG_MESSAGE_SIZE]u8 = undefined;
-    var fbs = std.io.fixedBufferStream(&buf);
-    var writer = fbs.writer();
-    writePrefix(writer, lvl, module) catch |e| switch (e) {
-        error.NoSpaceLeft => {},
-        else => return,
-    };
-    writer.print(fmt, args) catch |e| switch (e) {
-        error.NoSpaceLeft => {},
-        else => return,
-    };
-    writer.writeByte('\n') catch |e| switch (e) {
-        error.NoSpaceLeft => {},
-        else => return,
-    };
-    std.fs.File.stderr().writeAll(fbs.getWritten()) catch |e| switch (e) {
-        error.BrokenPipe => return,
-        else => unreachable,
-    };
+    var pos: usize = 0;
+
+    const prefix = std.fmt.bufPrint(buf[pos..], "[{s}] {s}: ", .{ levelTag(lvl), module }) catch return;
+    pos += prefix.len;
+
+    const msg = std.fmt.bufPrint(buf[pos..], fmt, args) catch return;
+    pos += msg.len;
+
+    if (pos >= buf.len) return;
+    buf[pos] = '\n';
+    pos += 1;
+
+    std.debug.print("{s}", .{buf[0..pos]});
 }
 
 pub const Logger = struct {
@@ -197,8 +208,8 @@ pub fn scoped(module: []const u8) Logger {
 }
 
 pub fn setGlobalLevel(lvl: Level) void {
-    logger_mutex.lock();
-    defer logger_mutex.unlock();
+    lockLogger();
+    defer unlockLogger();
     global_level_atomic.store(@intFromEnum(lvl), .release);
     global_level_loaded = true;
     if (module_levels_inited) {
@@ -207,8 +218,8 @@ pub fn setGlobalLevel(lvl: Level) void {
 }
 
 pub fn setModuleLevel(module: []const u8, lvl: Level) void {
-    logger_mutex.lock();
-    defer logger_mutex.unlock();
+    lockLogger();
+    defer unlockLogger();
     loadGlobalLevelLocked();
     cacheModuleLevelLocked(module, lvl);
 }

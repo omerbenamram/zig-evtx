@@ -211,14 +211,28 @@ pub fn formatValueXmlFromRaw(w: *std.Io.Writer, raw_type: u8, data: []const u8) 
                 if (!first) try w.writeByte(',');
                 first = false;
                 const elem_data = data[offset .. offset + elem_size];
-                const vtype = std.meta.intToEnum(ValueType, base) catch return;
+                const vtype = blk: {
+                    inline for (std.meta.fields(ValueType)) |field| {
+                        if (base == field.value) {
+                            break :blk @as(ValueType, @enumFromInt(field.value));
+                        }
+                    }
+                    return;
+                };
                 try formatValueXml(w, vtype, elem_data);
             }
             return;
         }
     }
 
-    const vtype = std.meta.intToEnum(ValueType, base) catch return;
+    const vtype = blk: {
+        inline for (std.meta.fields(ValueType)) |field| {
+            if (base == field.value) {
+                break :blk @as(ValueType, @enumFromInt(field.value));
+            }
+        }
+        return;
+    };
     try formatValueXml(w, vtype, data);
 }
 

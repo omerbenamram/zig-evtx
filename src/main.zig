@@ -8,15 +8,14 @@ const evtx = @import("parser/evtx/mod.zig");
 /// Default read buffer size for file I/O
 const READ_BUFFER_SIZE: usize = 8192;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     // Avoid SIGPIPE termination when stdout is closed (e.g. piped to head).
     ignoreSigpipe();
 
-    // Default allocator is selectable at build time (libc or GPA)
-    const allocator = alloc.get();
+    const allocator = init.gpa;
+    const io = init.io;
 
-    var args_iter = try std.process.argsWithAllocator(allocator);
-    defer args_iter.deinit();
+    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
 
     // Program name
     _ = args_iter.next();
@@ -33,7 +32,7 @@ pub fn main() !void {
 
     while (args_iter.next()) |arg| {
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
-            help();
+            help(io);
         } else if (std.mem.eql(u8, arg, "-o")) {
             const mode = args_iter.next() orelse return error.InvalidArgs;
             output_mode = output_mode_map.get(mode) orelse return error.InvalidArgs;
@@ -65,13 +64,13 @@ pub fn main() !void {
         }
     }
 
-    const in_path = input_path orelse return usage();
+    const in_path = input_path orelse return usage(io, 2);
 
-    var file = try fs.cwd().openFile(in_path, .{ .mode = .read_only });
-    defer file.close();
+    var file = try std.Io.Dir.cwd().openFile(io, in_path, .{ .mode = .read_only });
+    defer file.close(io);
 
     var read_buf: [READ_BUFFER_SIZE]u8 = undefined;
-    var reader = file.reader(&read_buf);
+    var reader = file.reader(io, &read_buf);
 
     var parser = evtx.EvtxParser.init(allocator, .{ .validate_checksums = validate_checksums, .verbosity = verbosity, .max_records = max_records, .skip_first = skip_first, .carve = carve, .ordered = ordered });
 
@@ -81,21 +80,21 @@ pub fn main() !void {
 
     if (num_threads <= 1) {
         var write_buf: [8192]u8 = undefined;
-        var stdout_file = std.fs.File.stdout();
-        var stdout_writer = stdout_file.writer(&write_buf);
+        const stdout_file = std.Io.File.stdout();
+        var stdout_writer = stdout_file.writer(io, &write_buf);
         var output = switch (output_mode) {
-            .xml => try evtx.OutputWriter.initXml(allocator, &stdout_writer.interface),
-            .json => try evtx.OutputWriter.initJson(allocator, &stdout_writer.interface, .single),
-            .jsonl => try evtx.OutputWriter.initJson(allocator, &stdout_writer.interface, .lines),
+            .xml => try evtx.OutputWriter.initXml(allocator, &stdout_writer),
+            .json => try evtx.OutputWriter.initJson(allocator, &stdout_writer, .single),
+            .jsonl => try evtx.OutputWriter.initJson(allocator, &stdout_writer, .lines),
         };
         defer output.deinit();
-        parser.parse(&reader, &output) catch |e| switch (e) {
-            error.WriteFailed => if (isPipeOrSocket(stdout_file)) return else return e,
-            else => return e,
+        parser.parse(&reader, &output) catch |e| {
+            if (e == error.WriteFailed and isPipeOrSocket(stdout_file)) return;
+            return e;
         };
-        output.flush() catch |e| switch (e) {
-            error.WriteFailed => if (isPipeOrSocket(stdout_file)) return else return e,
-            else => return e,
+        output.flush() catch |e| {
+            if (e == error.WriteFailed and isPipeOrSocket(stdout_file)) return;
+            return e;
         };
     } else {
         const out_kind: evtx.EvtxParser.OutKind = switch (output_mode) {
@@ -103,7 +102,8 @@ pub fn main() !void {
             .json => .json_single,
             .jsonl => .json_lines,
         };
-        try parser.parseConcurrent(&reader, out_kind, num_threads);
+        var stdout_file = std.Io.File.stdout();
+        try parser.parseConcurrent(.{ .io = io, .stdout_file = &stdout_file }, &reader, out_kind, num_threads);
     }
 }
 
@@ -119,22 +119,25 @@ fn ignoreSigpipe() void {
     }
 }
 
-fn isPipeOrSocket(file: std.fs.File) bool {
+fn isPipeOrSocket(file: std.Io.File) bool {
     if (comptime builtin.os.tag == .windows) return false;
-    const st = std.posix.fstat(file.handle) catch return false;
-    const kind = st.mode & std.posix.S.IFMT;
-    return kind == std.posix.S.IFIFO or kind == std.posix.S.IFSOCK;
+
+    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
+    defer threaded.deinit();
+
+    const st = file.stat(threaded.io()) catch return false;
+    return st.kind == .named_pipe or st.kind == .unix_domain_socket;
 }
 
-fn usage() noreturn {
-    printHelpAndExit(true, 2);
+fn usage(io: std.Io, exit_code: u8) noreturn {
+    printHelpAndExit(io, true, exit_code);
 }
 
-fn help() noreturn {
-    printHelpAndExit(false, 0);
+fn help(io: std.Io) noreturn {
+    printHelpAndExit(io, false, 0);
 }
 
-fn printHelpAndExit(to_stderr: bool, exit_code: u8) noreturn {
+fn printHelpAndExit(io: std.Io, to_stderr: bool, exit_code: u8) noreturn {
     const msg =
         \\evtx_dump_zig - fast Windows EVTX event log dumper
         \\
@@ -164,27 +167,27 @@ fn printHelpAndExit(to_stderr: bool, exit_code: u8) noreturn {
     var code: u8 = exit_code;
     var write_buf: [512]u8 = undefined;
     if (to_stderr) {
-        var stderr_file = std.fs.File.stderr();
-        var w = stderr_file.writer(&write_buf);
-        w.interface.writeAll(msg) catch |e| switch (e) {
+        const stderr_file = std.Io.File.stderr();
+        var w = stderr_file.writer(io, &write_buf);
+        w.writeAll(msg) catch |e| switch (e) {
             error.WriteFailed => {
                 if (code == 0) code = 1;
             },
         };
-        w.interface.flush() catch |e| switch (e) {
+        w.flush() catch |e| switch (e) {
             error.WriteFailed => {
                 if (code == 0) code = 1;
             },
         };
     } else {
-        var stdout_file = std.fs.File.stdout();
-        var w = stdout_file.writer(&write_buf);
-        w.interface.writeAll(msg) catch |e| switch (e) {
+        const stdout_file = std.Io.File.stdout();
+        var w = stdout_file.writer(io, &write_buf);
+        w.writeAll(msg) catch |e| switch (e) {
             error.WriteFailed => {
                 if (code == 0) code = 1;
             },
         };
-        w.interface.flush() catch |e| switch (e) {
+        w.flush() catch |e| switch (e) {
             error.WriteFailed => {
                 if (code == 0) code = 1;
             },
@@ -205,5 +208,6 @@ const output_mode_map = std.StaticStringMap(OutputMode).initComptime(.{
 // These bring in test-only modules not used by the main code path.
 test {
     _ = @import("test/snapshot_tests.zig");
+    _ = @import("test/concurrency_tests.zig");
     // util_string.zig and util_simd.zig tests are discovered via parser imports
 }

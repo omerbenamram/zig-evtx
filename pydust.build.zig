@@ -150,11 +150,11 @@ pub const PydustStep = struct {
                 });
                 testdebug_module.addIncludePath(b.path(self.python_include_dir));
                 testdebug.root_module.addImport("pydust", testdebug_module);
-                testdebug.linkLibC();
-                testdebug.linkSystemLibrary(libpython);
-                testdebug.addLibraryPath(b.path(self.python_library_dir));
+                testdebug.root_module.link_libc = true;
+                testdebug.root_module.linkSystemLibrary(libpython, .{});
+                testdebug.root_module.addLibraryPath(b.path(self.python_library_dir));
                 // Needed to support miniconda statically linking libpython on macos
-                testdebug.addRPath(b.path(self.python_library_dir));
+                testdebug.root_module.addRPath(b.path(self.python_library_dir));
 
                 const debugBin = b.addInstallBinFile(testdebug.getEmittedBin(), "debug.bin");
                 b.getInstallStep().dependOn(&debugBin.step);
@@ -202,7 +202,7 @@ pub const PydustStep = struct {
         });
         lib_module.addIncludePath(b.path(self.python_include_dir));
         lib.root_module.addImport("pydust", lib_module);
-        lib.linkLibC();
+        lib.root_module.link_libc = true;
         lib.linker_allow_shlib_undefined = true;
 
         // Install the shared library within the source tree
@@ -215,7 +215,7 @@ pub const PydustStep = struct {
         b.getInstallStep().dependOn(&install.step);
 
         // Invoke stub generator on the emitted binary
-        const workingDir = std.fs.cwd().realpathAlloc(self.allocator, ".") catch @panic("OOM");
+        const workingDir = self.owner.build_root.path orelse ".";
         const genArgs: []const []const u8 = if (self.check_stubs)
             &.{ self.python_exe, "-m", "pydust.generate_stubs", options.name, workingDir, "--check" }
         else
@@ -243,11 +243,11 @@ pub const PydustStep = struct {
         });
         libtest_module.addIncludePath(b.path(self.python_include_dir));
         libtest.root_module.addImport("pydust", libtest_module);
-        libtest.linkLibC();
-        libtest.linkSystemLibrary(self.libpython);
-        libtest.addLibraryPath(b.path(self.python_library_dir));
+        libtest.root_module.link_libc = true;
+        libtest.root_module.linkSystemLibrary(self.libpython, .{});
+        libtest.root_module.addLibraryPath(b.path(self.python_library_dir));
         // Needed to support miniconda statically linking libpython on macos
-        libtest.addRPath(b.path(self.python_library_dir));
+        libtest.root_module.addRPath(b.path(self.python_library_dir));
 
         // Install the test binary
         const install_libtest = b.addInstallBinFile(
@@ -337,26 +337,41 @@ fn getLibpython(allocator: std.mem.Allocator, python_exe: []const u8) ![]const u
 }
 
 fn getPythonOutput(allocator: std.mem.Allocator, python_exe: []const u8, code: []const u8) ![]const u8 {
-    const result = try runProcess(.{
-        .allocator = allocator,
+    var io_impl = std.Io.Threaded.init(allocator, .{});
+    defer io_impl.deinit();
+    const result = try std.process.run(allocator, io_impl.io(), .{
         .argv = &.{ python_exe, "-c", code },
     });
-    if (result.term.Exited != 0) {
-        std.debug.print("Failed to execute {s}:\n{s}\n", .{ code, result.stderr });
-        std.process.exit(1);
+    switch (result.term) {
+        .exited => |codepoint| if (codepoint != 0) {
+            std.debug.print("Failed to execute {s}:\n{s}\n", .{ code, result.stderr });
+            std.process.exit(1);
+        },
+        else => {
+            std.debug.print("Failed to execute {s}:\n{s}\n", .{ code, result.stderr });
+            std.process.exit(1);
+        },
     }
     allocator.free(result.stderr);
     return result.stdout;
 }
 
 fn getStdOutput(allocator: std.mem.Allocator, argv: []const []const u8) ![]const u8 {
-    const result = try runProcess(.{ .allocator = allocator, .argv = argv });
-    if (result.term.Exited != 0) {
-        std.debug.print("Failed to execute {any}:\n{s}\n", .{ argv, result.stderr });
-        std.process.exit(1);
+    var io_impl = std.Io.Threaded.init(allocator, .{});
+    defer io_impl.deinit();
+    const result = try std.process.run(allocator, io_impl.io(), .{ .argv = argv });
+    switch (result.term) {
+        .exited => |codepoint| if (codepoint != 0) {
+            std.debug.print("Failed to execute {any}:\n{s}\n", .{ argv, result.stderr });
+            std.process.exit(1);
+        },
+        else => {
+            std.debug.print("Failed to execute {any}:\n{s}\n", .{ argv, result.stderr });
+            std.process.exit(1);
+        },
     }
     allocator.free(result.stderr);
     return result.stdout;
 }
 
-const runProcess = if (builtin.zig_version.minor >= 12) std.process.Child.run else std.process.Child.exec;
+

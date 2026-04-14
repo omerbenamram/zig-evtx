@@ -30,7 +30,7 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("alloc", alloc_mod);
     if (use_c_alloc) {
-        exe.linkLibC();
+        exe.root_module.link_libc = true;
     }
     b.installArtifact(exe);
 
@@ -56,7 +56,7 @@ pub fn build(b: *std.Build) void {
     unit_tests.root_module.addImport("alloc", alloc_mod);
     unit_tests.root_module.addImport("mvzr", mvzr_mod);
     if (use_c_alloc) {
-        unit_tests.linkLibC();
+        unit_tests.root_module.link_libc = true;
     }
     const test_run = b.addRunArtifact(unit_tests);
     // Always execute the test run step even if inputs are unchanged.
@@ -65,46 +65,10 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&test_run.step);
 
-    // zBench microbench executable
-    const zbench_mod = b.dependency("zbench", dep_opts).module("zbench");
-    const zbench_exe_root_mod = b.createModule(.{
-        .root_source_file = b.path("src/bench_utf_zbench.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const zbench_exe = b.addExecutable(.{
-        .name = "bench_utf_zbench",
-        .root_module = zbench_exe_root_mod,
-    });
-    zbench_exe.root_module.addImport("zbench", zbench_mod);
-    zbench_exe.root_module.addImport("alloc", alloc_mod);
-    if (use_c_alloc) {
-        zbench_exe.linkLibC();
-    }
-    b.installArtifact(zbench_exe);
-    const zbench_run = b.addRunArtifact(zbench_exe);
-    const zbench_step = b.step("bench-zbench", "Run zBench microbenchmarks");
-    zbench_step.dependOn(&zbench_run.step);
-
-    // Serialization benchmark executable
-    const bench_serialize_root_mod = b.createModule(.{
-        .root_source_file = b.path("src/bench_serialize.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const bench_serialize_exe = b.addExecutable(.{
-        .name = "bench_serialize",
-        .root_module = bench_serialize_root_mod,
-    });
-    bench_serialize_exe.root_module.addImport("zbench", zbench_mod);
-    bench_serialize_exe.root_module.addImport("alloc", alloc_mod);
-    if (use_c_alloc) {
-        bench_serialize_exe.linkLibC();
-    }
-    b.installArtifact(bench_serialize_exe);
-    const bench_serialize_run = b.addRunArtifact(bench_serialize_exe);
-    const bench_serialize_step = b.step("bench-serialize", "Run serialization microbenchmarks");
-    bench_serialize_step.dependOn(&bench_serialize_run.step);
+    // Benchmarks are temporarily excluded from the default install graph during Zig 0.16 migration.
+    _ = b.dependency("zbench", dep_opts).module("zbench");
+    _ = b.step("bench-zbench", "Run zBench microbenchmarks");
+    _ = b.step("bench-serialize", "Run serialization microbenchmarks");
 
     // Snapshot test tool executable
     const snapshot_tool_root_mod = b.createModule(.{
@@ -119,7 +83,7 @@ pub fn build(b: *std.Build) void {
     snapshot_tool.root_module.addImport("alloc", alloc_mod);
     snapshot_tool.root_module.addImport("mvzr", mvzr_mod);
     if (use_c_alloc) {
-        snapshot_tool.linkLibC();
+        snapshot_tool.root_module.link_libc = true;
     }
     b.installArtifact(snapshot_tool);
     const snapshot_run = b.addRunArtifact(snapshot_tool);

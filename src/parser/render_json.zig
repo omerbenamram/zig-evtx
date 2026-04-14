@@ -128,7 +128,14 @@ fn tryWriteAsNumber(nodes: []const IR.Node, writer: *std.Io.Writer) WriterError!
     switch (nodes[0]) {
         .Value => |val| {
             const base = ValueType.baseType(val.vtype);
-            const vtype = std.meta.intToEnum(ValueType, base) catch return false;
+            const vtype = blk: {
+                inline for (std.meta.fields(ValueType)) |field| {
+                    if (base == field.value) {
+                        break :blk @as(ValueType, @enumFromInt(field.value));
+                    }
+                }
+                return false;
+            };
 
             switch (vtype) {
                 .int8, .uint8, .int16, .uint16, .int32, .uint32, .int64, .uint64 => {
@@ -166,7 +173,14 @@ fn renderJsonTextContent(nodes: []const IR.Node, writer: *std.Io.Writer) WriterE
 
 fn formatValueJson(w: *std.Io.Writer, raw_type: u8, data: []const u8) WriterError!void {
     const base = ValueType.baseType(raw_type);
-    const vtype = std.meta.intToEnum(ValueType, base) catch return;
+    const vtype = blk: {
+        inline for (std.meta.fields(ValueType)) |field| {
+            if (base == field.value) {
+                break :blk @as(ValueType, @enumFromInt(field.value));
+            }
+        }
+        return;
+    };
 
     if (vtype == .guid) {
         if (reader.readGuid(data)) |guid| {

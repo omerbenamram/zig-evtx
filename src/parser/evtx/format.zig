@@ -19,20 +19,19 @@ pub const COMMON_STRING_SLOTS: usize = 64;
 /// Number of template pointer slots in chunk header
 pub const TEMPLATE_PTR_SLOTS: usize = 32;
 
-/// Read all bytes into buffer from any reader type.
-/// Supports both std.fs.File.reader (with .interface) and RecordStream (with .readNoEof).
+/// Read all bytes into buffer from any reader type that can fill a slice.
 fn readAll(reader: anytype, buf: []u8) !void {
-    const Reader = @TypeOf(reader);
-    const ReaderType = switch (@typeInfo(Reader)) {
+    const ReaderType = switch (@typeInfo(@TypeOf(reader))) {
         .pointer => |ptr| ptr.child,
-        else => Reader,
+        else => @TypeOf(reader),
     };
-    if (@hasField(ReaderType, "interface")) {
-        try reader.interface.readSliceAll(buf);
+
+    if (@hasDecl(ReaderType, "readSliceAll")) {
+        try reader.readSliceAll(buf);
     } else if (@hasDecl(ReaderType, "readNoEof")) {
         try reader.readNoEof(buf);
     } else {
-        @compileError("Reader must have .interface.readSliceAll or .readNoEof method");
+        @compileError("Reader must provide readSliceAll or readNoEof");
     }
 }
 

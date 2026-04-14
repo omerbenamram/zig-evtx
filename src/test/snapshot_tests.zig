@@ -8,6 +8,9 @@ const normalize_xml = @import("normalize_xml.zig");
 const evtx = @import("../parser/evtx/mod.zig");
 const alloc_mod = @import("alloc");
 
+const READ_BUFFER_SIZE: usize = 8192;
+const MAX_EXPECTED_FILE_SIZE: usize = 1024 * 1024;
+
 pub const OutputFormat = enum { xml, json };
 
 pub const SnapshotTest = struct {
@@ -93,14 +96,12 @@ pub const TestOutput = struct {
 };
 
 /// Get record output by EventRecordID from an EVTX file.
-fn getRecordById(allocator: std.mem.Allocator, evtx_path: []const u8, record_id: u64, format: OutputFormat) ![]u8 {
-    var file = std.fs.cwd().openFile(evtx_path, .{ .mode = .read_only }) catch |err| {
-        return err;
-    };
-    defer file.close();
+fn getRecordById(io: std.Io, allocator: std.mem.Allocator, evtx_path: []const u8, record_id: u64, format: OutputFormat) ![]u8 {
+    var file = try std.Io.Dir.cwd().openFile(io, evtx_path, .{ .mode = .read_only });
+    defer file.close(io);
 
-    var read_buf: [8192]u8 = undefined;
-    var reader = file.reader(&read_buf);
+    var read_buf: [READ_BUFFER_SIZE]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
 
     // Read file header
     const hdr = try evtx.FileHeader.read(&reader);
@@ -135,7 +136,7 @@ fn getRecordById(allocator: std.mem.Allocator, evtx_path: []const u8, record_id:
                 const bytes = try out.serializeRecord(rec, &ctx);
                 // Copy because the output buffer is reused
                 // Trim trailing newline for JSON comparison
-                const trimmed = std.mem.trimRight(u8, bytes, "\n");
+                const trimmed = std.mem.trim(u8, bytes, "\n");
                 return try allocator.dupe(u8, trimmed);
             }
         }
@@ -158,6 +159,45 @@ fn normalizeJson(allocator: std.mem.Allocator, json_str: []const u8) ![]u8 {
     };
 }
 
+fn pathExists(io: std.Io, path: []const u8) bool {
+    std.Io.Dir.cwd().access(io, path, .{}) catch return false;
+    return true;
+}
+
+fn makePath(io: std.Io, path: []const u8) !void {
+    try std.Io.Dir.cwd().createDirPath(io, path);
+}
+
+fn writeFile(io: std.Io, path: []const u8, contents: []const u8) !void {
+    var out_file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer out_file.close(io);
+
+    var write_buf: [READ_BUFFER_SIZE]u8 = undefined;
+    var writer = out_file.writer(io, &write_buf);
+    try writer.writeAll(contents);
+    try writer.flush();
+}
+
+fn readFileAlloc(io: std.Io, allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
+    var file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    const stat = try file.stat(io);
+    if (stat.size > max_bytes) return error.FileTooBig;
+
+    const file_size: usize = @intCast(stat.size);
+    const contents = try allocator.alloc(u8, file_size);
+    errdefer allocator.free(contents);
+
+    if (file_size == 0) return contents;
+
+    var read_buf: [READ_BUFFER_SIZE]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+    try reader.readSliceAll(contents);
+
+    return contents;
+}
+
 /// Run a single snapshot test.
 pub fn runTest(
     allocator: std.mem.Allocator,
@@ -166,6 +206,10 @@ pub fn runTest(
     snapshots_dir: []const u8,
     update_mode: bool,
 ) TestOutput {
+    var io_impl = std.Io.Threaded.init(allocator, .{});
+    defer io_impl.deinit();
+    const io = io_impl.io();
+
     // Build paths
     const evtx_path = std.fs.path.join(allocator, &.{ samples_dir, test_def.evtx_file }) catch {
         return .{ .result = .@"error", .message = "Failed to build evtx path" };
@@ -178,12 +222,12 @@ pub fn runTest(
     defer allocator.free(expected_path);
 
     // Check if evtx file exists
-    std.fs.cwd().access(evtx_path, .{}) catch {
+    if (!pathExists(io, evtx_path)) {
         return .{ .result = .skip, .message = "EVTX file not found" };
-    };
+    }
 
     // Get actual output
-    const actual_raw = getRecordById(allocator, evtx_path, test_def.record_id, test_def.format) catch |err| {
+    const actual_raw = getRecordById(io, allocator, evtx_path, test_def.record_id, test_def.format) catch |err| {
         const msg = std.fmt.allocPrint(allocator, "Failed to get record: {s}", .{@errorName(err)}) catch "Parse error";
         return .{ .result = .@"error", .message = msg };
     };
@@ -206,16 +250,11 @@ pub fn runTest(
     if (update_mode) {
         // Write actual to expected file
         const dir = std.fs.path.dirname(expected_path) orelse ".";
-        std.fs.cwd().makePath(dir) catch {
+        makePath(io, dir) catch {
             return .{ .result = .@"error", .message = "Failed to create snapshots directory" };
         };
 
-        var out_file = std.fs.cwd().createFile(expected_path, .{}) catch {
-            return .{ .result = .@"error", .message = "Failed to create expected file" };
-        };
-        defer out_file.close();
-
-        out_file.writeAll(actual_raw) catch {
+        writeFile(io, expected_path, actual_raw) catch {
             return .{ .result = .@"error", .message = "Failed to write expected file" };
         };
 
@@ -223,7 +262,7 @@ pub fn runTest(
     }
 
     // Load expected
-    const expected_raw = std.fs.cwd().readFileAlloc(allocator, expected_path, 1024 * 1024) catch {
+    const expected_raw = readFileAlloc(io, allocator, expected_path, MAX_EXPECTED_FILE_SIZE) catch {
         return .{ .result = .fail, .message = "Expected file not found. Run with --update to create it." };
     };
     defer allocator.free(expected_raw);
@@ -234,7 +273,7 @@ pub fn runTest(
         .xml => normalize_xml.normalize(allocator, expected_raw) catch {
             return .{ .result = .@"error", .message = "Failed to normalize expected" };
         },
-        .json => normalizeJson(allocator, std.mem.trimRight(u8, expected_raw, "\n\r \t")) catch {
+        .json => normalizeJson(allocator, std.mem.trim(u8, expected_raw, "\n\r \t")) catch {
             return .{ .result = .@"error", .message = "Failed to normalize expected JSON" };
         },
     };

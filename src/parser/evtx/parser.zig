@@ -105,7 +105,7 @@ pub const EvtxParser = struct {
                     }
                     continue; // keep going to inspect later records and compare outputs
                 };
-                if (out_mut.dest) |dest| try dest.writeAll(bytes);
+                try out_mut.writeSerialized(bytes);
                 emitted += 1;
                 if (self.opts.max_records != 0) {
                     if (self.opts.skip_first > 0) {
@@ -119,8 +119,16 @@ pub const EvtxParser = struct {
         if (self.opts.verbosity >= 1) log.info("done. emitted={d} failed={d}", .{ emitted, failed });
     }
 
-    /// Concurrent parsing entry point: read chunks sequentially, parse in a thread pool, and stream outputs to stdout.
-    pub fn parseConcurrent(self: *EvtxParser, reader: anytype, out_kind: OutKind, num_threads: usize) !void {
-        try worker.parseConcurrent(self.allocator, reader, self.opts, out_kind, num_threads);
+    /// Concurrent parsing entry point: read chunks sequentially, parse in a thread pool, and stream outputs to the provided sink.
+    pub fn parseConcurrent(self: *EvtxParser, io_runtime: worker.IoRuntime, reader: anytype, out_kind: OutKind, num_threads: usize) !void {
+        try worker.parseConcurrent(self.allocator, io_runtime, reader, self.opts, out_kind, num_threads);
+    }
+
+    pub fn collectConcurrent(self: *EvtxParser, reader: anytype, out_kind: OutKind, num_threads: usize) !worker.CollectedOutput {
+        return try worker.collectConcurrentOutput(self.allocator, reader, self.opts, out_kind, num_threads);
+    }
+
+    pub fn collectConcurrentWithFailure(self: *EvtxParser, reader: anytype, out_kind: OutKind, num_threads: usize, fail_after_records: usize, fail_error: anyerror) !worker.CollectedOutput {
+        return try worker.collectConcurrentOutputWithFailure(self.allocator, reader, self.opts, out_kind, num_threads, fail_after_records, fail_error);
     }
 };
