@@ -5,11 +5,27 @@
 
 ## Features
 
-- **Cross-platform**: Builds on Linux, macOS, and Windows via Zig 0.15
+- **Cross-platform**: Builds on Linux, macOS, and Windows
 - **Multiple outputs**: XML, JSON, and JSON Lines (jsonl)
 - **Concurrent parsing**: Multi-threaded mode for throughput; single-threaded for stable order
 - **Python bindings**: Lightweight module via `ziggy-pydust` for streaming results
 - **Type-safe template caching**: Templates are parsed once, cached with placeholder markers, and instantiated efficiently
+
+## std.Io architecture direction
+
+The repo is aligning around the Zig 0.16 `std.Io` ownership model.
+
+- Entry points such as the CLI and snapshot tool own `std.Io` initialization,
+  stdout and file-handle setup, and process-facing failure policy.
+- Parser and renderer code stay backend-agnostic and consume injected reader or
+  writer capability.
+- Concurrent execution keeps cancellation, ordered drain, unordered emission,
+  and broken-pipe handling at the parser or runtime-shell boundary.
+- `OutputWriter` keeps scratch buffering local instead of spreading buffering
+  setup across the whole codebase.
+
+See `docs/architecture.md` for the runtime-shell vs pure-core boundary,
+ cancellation ownership, backend strategy, and migration anti-patterns.
 
 ## Quick start
 

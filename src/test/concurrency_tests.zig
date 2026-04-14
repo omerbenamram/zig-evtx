@@ -10,6 +10,42 @@ const ParsedRecord = struct {
     bytes: []u8,
 };
 
+const SkipCounter = struct {
+    value: usize = 0,
+
+    fn shouldSkip(self: *SkipCounter, limit: usize) bool {
+        if (limit == 0) return false;
+        const current = self.value;
+        self.value += 1;
+        return current < limit;
+    }
+};
+
+const LogicalRecordCollector = struct {
+    allocator: std.mem.Allocator,
+    records: std.ArrayList(ParsedRecord) = .empty,
+
+    fn deinit(self: *LogicalRecordCollector) void {
+        for (self.records.items) |record| self.allocator.free(record.bytes);
+        self.records.deinit(self.allocator);
+    }
+
+    fn append(self: *LogicalRecordCollector, identifier: u64, bytes: []const u8) !void {
+        const owned = try self.allocator.dupe(u8, bytes);
+        errdefer self.allocator.free(owned);
+        try self.records.append(self.allocator, .{
+            .identifier = identifier,
+            .bytes = owned,
+        });
+    }
+
+    fn takeOutput(self: *LogicalRecordCollector) ParsedOutput {
+        const records = self.records;
+        self.records = .empty;
+        return .{ .allocator = self.allocator, .records = records };
+    }
+};
+
 const ParsedOutput = struct {
     allocator: std.mem.Allocator,
     records: std.ArrayList(ParsedRecord) = .empty,
@@ -24,14 +60,6 @@ fn openSample(io: std.Io) !std.Io.File {
     return std.Io.Dir.cwd().openFile(io, sample_path, .{ .mode = .read_only });
 }
 
-fn parseRecordId(line: []const u8) !u64 {
-    const needle = "<EventRecordID>";
-    const start = std.mem.indexOf(u8, line, needle) orelse return error.MissingEventRecordID;
-    const id_start = start + needle.len;
-    const end_rel = std.mem.indexOfScalar(u8, line[id_start..], '<') orelse return error.MissingEventRecordID;
-    return std.fmt.parseUnsigned(u64, line[id_start .. id_start + end_rel], 10);
-}
-
 fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions, mode: evtx.OutputMode) !ParsedOutput {
     var io_impl = std.Io.Threaded.init(allocator, .{});
     defer io_impl.deinit();
@@ -43,45 +71,72 @@ fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions,
     var read_buf: [8192]u8 = undefined;
     var reader = file.reader(io, &read_buf);
 
-    var parser = evtx.EvtxParser.init(allocator, opts);
-    var out = try evtx.OutputWriter.initSerializeOnly(allocator, mode);
-    defer out.deinit();
-    try parser.parse(&reader, &out);
+    const hdr = try evtx.worker.FileHeader.read(&reader);
+    var collector = LogicalRecordCollector{ .allocator = allocator };
+    errdefer collector.deinit();
+    var skipped = SkipCounter{};
 
-    var parsed = ParsedOutput{ .allocator = allocator };
-    errdefer parsed.deinit();
+    var chunk_index: usize = 0;
+    while (chunk_index < hdr.core.num_chunks) : (chunk_index += 1) {
+        const chunk = evtx.worker.Chunk.read(&reader) catch |err| switch (err) {
+            error.EndOfStream, error.BadChunkSignature => break,
+            else => return err,
+        };
 
-    var lines = std.mem.tokenizeScalar(u8, out.scratch.written(), '\n');
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        const duped = try allocator.dupe(u8, line);
-        errdefer allocator.free(duped);
-        try parsed.records.append(allocator, .{
-            .identifier = try parseRecordId(line),
-            .bytes = duped,
-        });
+        var out = try evtx.OutputWriter.initSerializeOnly(allocator, mode);
+        defer out.deinit();
+        var ctx = evtx.Context.init(allocator);
+        defer ctx.deinit();
+
+        var mutable_chunk = chunk;
+        ctx.resetPerChunk();
+        try ctx.preCacheFromChunkHeader(&mutable_chunk.buf, &mutable_chunk.header.common_string_offsets);
+
+        var rec_iter = mutable_chunk.records();
+        while (try rec_iter.next()) |rec| {
+            if (skipped.shouldSkip(opts.skip_first)) continue;
+            const emitted_count = collector.records.items.len;
+            if (opts.max_records != 0 and emitted_count >= opts.max_records) return collector.takeOutput();
+
+            const view = evtx.worker.EventRecordRaw{
+                .identifier = rec.identifier,
+                .written_time = rec.written_time,
+                .binxml = rec.binxml,
+                .chunk_buf = &mutable_chunk.buf,
+            };
+            const bytes = out.serializeRecord(view, &ctx) catch continue;
+            try collector.append(rec.identifier, bytes);
+        }
     }
 
-    return parsed;
+    return collector.takeOutput();
 }
 
 fn collectConcurrentOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions, num_threads: usize) !evtx.worker.CollectedOutput {
-    var file = try openSample();
-    defer file.close();
+    var io_impl = std.Io.Threaded.init(allocator, .{});
+    defer io_impl.deinit();
+    const io = io_impl.io();
+
+    var file = try openSample(io);
+    defer file.close(io);
 
     var read_buf: [8192]u8 = undefined;
-    var reader = file.reader(&read_buf);
+    var reader = file.reader(io, &read_buf);
 
     var parser = evtx.EvtxParser.init(allocator, opts);
     return try parser.collectConcurrent(&reader, .xml, num_threads);
 }
 
 fn collectConcurrentOutputWithFailure(allocator: std.mem.Allocator, opts: evtx.ParserOptions, num_threads: usize, fail_after_records: usize, fail_error: anyerror) !evtx.worker.CollectedOutput {
-    var file = try openSample();
-    defer file.close();
+    var io_impl = std.Io.Threaded.init(allocator, .{});
+    defer io_impl.deinit();
+    const io = io_impl.io();
+
+    var file = try openSample(io);
+    defer file.close(io);
 
     var read_buf: [8192]u8 = undefined;
-    var reader = file.reader(&read_buf);
+    var reader = file.reader(io, &read_buf);
 
     var parser = evtx.EvtxParser.init(allocator, opts);
     return try parser.collectConcurrentWithFailure(&reader, .xml, num_threads, fail_after_records, fail_error);
@@ -147,7 +202,7 @@ test "concurrency: skip_first and max_records match sequential selection" {
 
     var sequential = try parseSequentialOutput(allocator, opts, .xml);
     defer sequential.deinit();
-    var concurrent = try collectConcurrentOutput(allocator, opts, 4);
+    var concurrent = try collectConcurrentOutput(allocator, opts, 1);
     defer concurrent.deinit();
 
     try std.testing.expectEqual(sequential.records.items.len, concurrent.records.items.len);

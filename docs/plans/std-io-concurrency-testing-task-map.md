@@ -10,6 +10,30 @@ Resume the 5-step std.Io concurrency/testing plan after stabilization with task 
 - Snapshot coverage is still record-level and sequential in `src/test/snapshot_tests.zig`. It does not yet model execution mode, thread count, or unordered normalization.
 - Remaining 0.15-style seams still exist outside the core 5-step seam, especially `src/evtx_pydust_impl.zig`, `src/bench_serialize.zig`, `src/bench_utf_zbench.zig`, and `src/parser/value_format.zig`.
 
+## Architectural guardrail for delegated work
+
+Use this boundary while stabilization is in flight:
+
+- runtime shell: `main.zig`, `snapshot_tool.zig`, benchmarks, bindings
+  - owns `std.Io` initialization, concrete stdout or file setup, thread policy,
+    and process-facing broken-pipe behavior
+- orchestration: `parser.zig`, `output.zig`, `worker.zig`
+  - owns execution mode, ordered vs unordered emission, and cancellation
+    propagation
+- pure core: BinXML parse, template instantiate, XML and JSON render
+  - owns deterministic parse and serialization only
+
+Rules:
+
+- Do not add new global or hidden std.Io runtime lookup below the entrypoint
+  boundary.
+- Do not move shell-level broken-pipe handling into renderers or template code.
+- Keep `max_records` and write-stop behavior owned by orchestration.
+- Keep scratch buffering local to serializer helpers rather than reintroducing
+  generic buffering wrappers.
+- Avoid doc or code edits to `worker.zig` and `concurrency_tests.zig` in slices
+  that only need architectural clarification.
+
 ## Recommended first implementation step once stabilization is green
 Implement Step 2 first.
 
