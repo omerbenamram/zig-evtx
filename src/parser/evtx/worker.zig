@@ -27,6 +27,19 @@ pub const EmittedRecord = struct {
     bytes: []u8,
 };
 
+pub fn deinitEmittedRecords(allocator: std.mem.Allocator, records: []const EmittedRecord) void {
+    for (records) |record| allocator.free(record.bytes);
+}
+
+pub fn duplicateEmittedRecord(allocator: std.mem.Allocator, identifier: u64, bytes: []const u8) !EmittedRecord {
+    const owned = try allocator.dupe(u8, bytes);
+    errdefer allocator.free(owned);
+    return .{
+        .identifier = identifier,
+        .bytes = owned,
+    };
+}
+
 const PendingRecord = struct {
     identifier: u64,
     bytes: []u8,
@@ -37,7 +50,7 @@ pub const CollectedOutput = struct {
     records: std.ArrayList(EmittedRecord) = .empty,
 
     pub fn deinit(self: *CollectedOutput) void {
-        for (self.records.items) |record| self.allocator.free(record.bytes);
+        deinitEmittedRecords(self.allocator, self.records.items);
         self.records.deinit(self.allocator);
     }
 };
@@ -49,7 +62,7 @@ const CollectState = struct {
     fail_error: anyerror = error.Unexpected,
 
     fn deinit(self: *CollectState) void {
-        for (self.records.items) |record| self.allocator.free(record.bytes);
+        deinitEmittedRecords(self.allocator, self.records.items);
         self.records.deinit(self.allocator);
     }
 
@@ -275,12 +288,8 @@ fn scheduleOrderedRecord(shared: *SharedState, slot: *OutputSlot, identifier: u6
 }
 
 fn makePendingRecord(shared: *SharedState, identifier: u64, bytes: []const u8) !PendingRecord {
-    const owned = try shared.allocator.dupe(u8, bytes);
-    errdefer shared.allocator.free(owned);
-    return .{
-        .identifier = identifier,
-        .bytes = owned,
-    };
+    const record = try duplicateEmittedRecord(shared.allocator, identifier, bytes);
+    return .{ .identifier = record.identifier, .bytes = record.bytes };
 }
 
 fn trySkipRecord(shared: *SharedState, skip_counter: *std.atomic.Value(usize)) bool {

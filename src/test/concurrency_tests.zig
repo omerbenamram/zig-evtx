@@ -5,27 +5,19 @@ const test_util = @import("util.zig");
 const project_root = test_util.getProjectRoot("src/test/concurrency_tests.zig");
 const sample_path = project_root ++ "/samples/security.evtx";
 
-const ParsedRecord = struct {
-    identifier: u64,
-    bytes: []u8,
-};
+const ParsedRecord = evtx.worker.EmittedRecord;
 
 const LogicalRecordCollector = struct {
     allocator: std.mem.Allocator,
     records: std.ArrayList(ParsedRecord) = .empty,
 
     fn deinit(self: *LogicalRecordCollector) void {
-        for (self.records.items) |record| self.allocator.free(record.bytes);
+        evtx.worker.deinitEmittedRecords(self.allocator, self.records.items);
         self.records.deinit(self.allocator);
     }
 
     fn append(self: *LogicalRecordCollector, identifier: u64, bytes: []const u8) !void {
-        const owned = try self.allocator.dupe(u8, bytes);
-        errdefer self.allocator.free(owned);
-        try self.records.append(self.allocator, .{
-            .identifier = identifier,
-            .bytes = owned,
-        });
+        try self.records.append(self.allocator, try evtx.worker.duplicateEmittedRecord(self.allocator, identifier, bytes));
     }
 
     fn takeOutput(self: *LogicalRecordCollector) ParsedOutput {
@@ -40,7 +32,7 @@ const ParsedOutput = struct {
     records: std.ArrayList(ParsedRecord) = .empty,
 
     fn deinit(self: *ParsedOutput) void {
-        for (self.records.items) |*record| self.allocator.free(record.bytes);
+        evtx.worker.deinitEmittedRecords(self.allocator, self.records.items);
         self.records.deinit(self.allocator);
     }
 };
