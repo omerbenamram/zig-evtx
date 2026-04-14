@@ -21,17 +21,20 @@ pub const TEMPLATE_PTR_SLOTS: usize = 32;
 
 /// Read all bytes into buffer from any reader type that can fill a slice.
 fn readAll(reader: anytype, buf: []u8) !void {
-    const ReaderType = switch (@typeInfo(@TypeOf(reader))) {
-        .pointer => |ptr| ptr.child,
-        else => @TypeOf(reader),
-    };
-
-    if (@hasDecl(ReaderType, "readSliceAll")) {
-        try reader.readSliceAll(buf);
-    } else if (@hasDecl(ReaderType, "readNoEof")) {
-        try reader.readNoEof(buf);
-    } else {
-        @compileError("Reader must provide readSliceAll or readNoEof");
+    switch (@typeInfo(@TypeOf(reader))) {
+        .pointer => |ptr| {
+            const ReaderType = ptr.child;
+            if (@hasField(ReaderType, "interface")) {
+                try reader.interface.readSliceAll(buf);
+            } else if (@hasDecl(ReaderType, "readSliceAll")) {
+                try reader.readSliceAll(buf);
+            } else if (@hasDecl(ReaderType, "readNoEof")) {
+                try reader.readNoEof(buf);
+            } else {
+                @compileError("Reader must provide interface, readSliceAll, or readNoEof");
+            }
+        },
+        else => @compileError("Reader must be passed by pointer"),
     }
 }
 

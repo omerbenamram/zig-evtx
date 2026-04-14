@@ -169,28 +169,20 @@ fn printHelpAndExit(io: std.Io, to_stderr: bool, exit_code: u8) noreturn {
     if (to_stderr) {
         const stderr_file = std.Io.File.stderr();
         var w = stderr_file.writer(io, &write_buf);
-        w.writeAll(msg) catch |e| switch (e) {
-            error.WriteFailed => {
-                if (code == 0) code = 1;
-            },
+        w.interface.writeAll(msg) catch {
+            if (code == 0) code = 1;
         };
-        w.flush() catch |e| switch (e) {
-            error.WriteFailed => {
-                if (code == 0) code = 1;
-            },
+        w.flush() catch {
+            if (code == 0) code = 1;
         };
     } else {
         const stdout_file = std.Io.File.stdout();
         var w = stdout_file.writer(io, &write_buf);
-        w.writeAll(msg) catch |e| switch (e) {
-            error.WriteFailed => {
-                if (code == 0) code = 1;
-            },
+        w.interface.writeAll(msg) catch {
+            if (code == 0) code = 1;
         };
-        w.flush() catch |e| switch (e) {
-            error.WriteFailed => {
-                if (code == 0) code = 1;
-            },
+        w.flush() catch {
+            if (code == 0) code = 1;
         };
     }
     std.process.exit(code);

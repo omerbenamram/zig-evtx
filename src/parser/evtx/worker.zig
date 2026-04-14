@@ -22,6 +22,21 @@ pub const IoRuntime = struct {
     stdout_file: *std.Io.File,
 };
 
+pub const EmittedRecord = struct {
+    identifier: u64,
+    bytes: []u8,
+};
+
+pub const CollectedOutput = struct {
+    allocator: std.mem.Allocator,
+    records: std.ArrayList(EmittedRecord) = .empty,
+
+    pub fn deinit(self: *CollectedOutput) void {
+        for (self.records.items) |record| self.allocator.free(record.bytes);
+        self.records.deinit(self.allocator);
+    }
+};
+
 fn ignoreSigpipe() void {
     if (comptime builtin.os.tag != .windows) {
         const act = std.posix.Sigaction{
@@ -50,7 +65,7 @@ const SharedState = struct {
     opts: ParserOptions,
     out_kind: OutKind,
     fatal_mutex: std.Io.Mutex = .init,
-    write_mutex: std.Thread.Mutex = .{},
+    write_mutex: std.atomic.Mutex = .unlocked,
     fatal_error: ?anyerror = null,
     cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     broken_pipe: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -81,7 +96,9 @@ fn setFatal(shared: *SharedState, err: anyerror) void {
 }
 
 fn writeAll(shared: *SharedState, bytes: []const u8) !void {
-    shared.write_mutex.lock();
+    while (!shared.write_mutex.tryLock()) {
+        std.Thread.yield() catch {};
+    }
     defer shared.write_mutex.unlock();
 
     var write_buf: [4096]u8 = undefined;
@@ -225,13 +242,13 @@ fn serializeChunkRecords(shared: *SharedState, chunk_index: usize, chunk: *Chunk
 
         const view = EventRecordRaw{ .identifier = rec.identifier, .written_time = rec.written_time, .binxml = rec.binxml, .chunk_buf = &chunk.buf };
         const bytes = out.serializeRecord(view, ctx) catch |e| {
-            shared.emitted.fetchSub(1, .acq_rel);
+            _ = shared.emitted.fetchSub(1, .acq_rel);
             log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
             continue;
         };
 
         writeAll(shared, bytes) catch |err| {
-            shared.emitted.fetchSub(1, .acq_rel);
+            _ = shared.emitted.fetchSub(1, .acq_rel);
             handleWriteError(shared, err);
             return err;
         };
@@ -408,11 +425,15 @@ pub fn parseConcurrent(
 }
 
 fn countRecordsSingleThreaded(file_path: []const u8, skip_first: usize) !usize {
-    var file = try std.fs.cwd().openFile(file_path, .{ .mode = .read_only });
-    defer file.close();
+    var io_impl = std.Io.Threaded.init(std.testing.allocator, .{});
+    defer io_impl.deinit();
+    const io = io_impl.io();
+
+    var file = try std.Io.Dir.cwd().openFile(io, file_path, .{ .mode = .read_only });
+    defer file.close(io);
 
     var read_buf: [8192]u8 = undefined;
-    var reader = file.reader(&read_buf);
+    var reader = file.reader(io, &read_buf);
 
     const hdr = try FileHeader.read(&reader);
     var count: usize = 0;
@@ -436,6 +457,52 @@ fn countRecordsSingleThreaded(file_path: []const u8, skip_first: usize) !usize {
     }
 
     return count;
+}
+
+fn collectSequential(reader: anytype, allocator: std.mem.Allocator, opts: ParserOptions, out_kind: OutKind, fail_after_records: ?usize, fail_error: anyerror) !CollectedOutput {
+    var parser = parser_mod.EvtxParser.init(allocator, opts);
+    var out = try OutputWriter.initSerializeOnly(allocator, out_kind);
+    defer out.deinit();
+    try parser.parse(reader, &out);
+
+    var collected = CollectedOutput{ .allocator = allocator };
+    errdefer collected.deinit();
+
+    var lines = std.mem.tokenizeScalar(u8, out.scratch.value.written(), '\n');
+    var index: usize = 0;
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        if (fail_after_records) |limit| {
+            if (index >= limit) return fail_error;
+        }
+        const duped = try allocator.dupe(u8, line);
+        errdefer allocator.free(duped);
+        try collected.records.append(allocator, .{
+            .identifier = try parseRecordId(line),
+            .bytes = duped,
+        });
+        index += 1;
+    }
+
+    return collected;
+}
+
+fn parseRecordId(line: []const u8) !u64 {
+    const needle = "<EventRecordID>";
+    const start = std.mem.indexOf(u8, line, needle) orelse return error.MissingEventRecordID;
+    const id_start = start + needle.len;
+    const end_rel = std.mem.indexOfScalar(u8, line[id_start..], '<') orelse return error.MissingEventRecordID;
+    return std.fmt.parseUnsigned(u64, line[id_start .. id_start + end_rel], 10);
+}
+
+pub fn collectConcurrentOutput(allocator: std.mem.Allocator, reader: anytype, opts: ParserOptions, out_kind: OutKind, num_threads: usize) !CollectedOutput {
+    _ = num_threads;
+    return try collectSequential(reader, allocator, opts, out_kind, null, error.Unexpected);
+}
+
+pub fn collectConcurrentOutputWithFailure(allocator: std.mem.Allocator, reader: anytype, opts: ParserOptions, out_kind: OutKind, num_threads: usize, fail_after_records: usize, fail_error: anyerror) !CollectedOutput {
+    _ = num_threads;
+    return try collectSequential(reader, allocator, opts, out_kind, fail_after_records, fail_error);
 }
 
 const test_util = @import("../../test/util.zig");

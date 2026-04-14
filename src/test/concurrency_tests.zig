@@ -20,8 +20,8 @@ const ParsedOutput = struct {
     }
 };
 
-fn openSample() !std.fs.File {
-    return std.fs.cwd().openFile(sample_path, .{ .mode = .read_only });
+fn openSample(io: std.Io) !std.Io.File {
+    return std.Io.Dir.cwd().openFile(io, sample_path, .{ .mode = .read_only });
 }
 
 fn parseRecordId(line: []const u8) !u64 {
@@ -33,11 +33,15 @@ fn parseRecordId(line: []const u8) !u64 {
 }
 
 fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions, mode: evtx.OutputMode) !ParsedOutput {
-    var file = try openSample();
-    defer file.close();
+    var io_impl = std.Io.Threaded.init(allocator, .{});
+    defer io_impl.deinit();
+    const io = io_impl.io();
+
+    var file = try openSample(io);
+    defer file.close(io);
 
     var read_buf: [8192]u8 = undefined;
-    var reader = file.reader(&read_buf);
+    var reader = file.reader(io, &read_buf);
 
     var parser = evtx.EvtxParser.init(allocator, opts);
     var out = try evtx.OutputWriter.initSerializeOnly(allocator, mode);

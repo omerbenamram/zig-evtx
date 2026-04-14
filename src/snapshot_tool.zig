@@ -48,7 +48,7 @@ pub fn main(init: std.process.Init) void {
         var write_buf: [512]u8 = undefined;
         const stderr_file = std.Io.File.stderr();
         var stderr = stderr_file.writer(init.io, &write_buf);
-        _ = stderr.print("snapshot_test: {s}\n", .{@errorName(err)}) catch {};
+        _ = stderr.interface.print("snapshot_test: {s}\n", .{@errorName(err)}) catch {};
         stderr.flush() catch {};
         std.process.exit(1);
     };
@@ -96,13 +96,13 @@ fn run(init: std.process.Init) !u8 {
             var write_buf: [512]u8 = undefined;
             const stderr_file = std.Io.File.stderr();
             var stderr = stderr_file.writer(io, &write_buf);
-            try stderr.print("Unknown test: {s}\n", .{filter});
-            try stderr.writeAll("Available tests: ");
+            try stderr.interface.print("Unknown test: {s}\n", .{filter});
+            try stderr.interface.writeAll("Available tests: ");
             for (snapshot_tests.tests, 0..) |t, i| {
-                if (i > 0) try stderr.writeAll(", ");
-                try stderr.writeAll(t.name);
+                if (i > 0) try stderr.interface.writeAll(", ");
+                try stderr.interface.writeAll(t.name);
             }
-            try stderr.writeAll("\n");
+            try stderr.interface.writeAll("\n");
             try stderr.flush();
             return error.UnknownTest;
         }
@@ -112,7 +112,7 @@ fn run(init: std.process.Init) !u8 {
     var write_buf: [4096]u8 = undefined;
     const stdout_file = std.Io.File.stdout();
     var stdout = stdout_file.writer(io, &write_buf);
-    const w = &stdout;
+    const w = &stdout.interface;
 
     try w.writeAll("Running snapshot tests...\n\n");
 
@@ -212,7 +212,7 @@ fn printHelp(io: std.Io) !void {
     var write_buf: [1024]u8 = undefined;
     const stdout_file = std.Io.File.stdout();
     var stdout = stdout_file.writer(io, &write_buf);
-    try stdout.writeAll(
+    try stdout.interface.writeAll(
         \\snapshot_test - Snapshot-based regression tests for EVTX parser
         \\
         \\Usage:

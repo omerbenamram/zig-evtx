@@ -29,15 +29,26 @@ pub fn IoWriter(comptime Writer: type) type {
         }
 
         pub fn writeAll(self: *Self, bytes: []const u8) WriterError!void {
-            try self.value.writeAll(bytes);
+            try self.writer().writeAll(bytes);
         }
 
         pub fn writeByte(self: *Self, byte: u8) WriterError!void {
-            try self.value.writeByte(byte);
+            try self.writer().writeByte(byte);
         }
 
         pub fn flush(self: *Self) WriterError!void {
+            if (@hasField(Writer, "writer")) return;
             try self.value.flush();
+        }
+
+        pub fn writer(self: *Self) *std.Io.Writer {
+            if (@hasField(Writer, "writer")) {
+                return &self.value.writer;
+            }
+            if (@hasField(Writer, "interface")) {
+                return &self.value.interface;
+            }
+            @compileError("Writer must provide writer or interface field");
         }
     };
 }
@@ -86,12 +97,12 @@ pub const OutputWriter = struct {
         const Adapter = struct {
             fn writeAll(ctx: *anyopaque, bytes: []const u8) WriterError!void {
                 const typed: *dest_info = @ptrCast(@alignCast(ctx));
-                try typed.writeAll(bytes);
+                try typed.interface.writeAll(bytes);
             }
 
             fn flush(ctx: *anyopaque) WriterError!void {
                 const typed: *dest_info = @ptrCast(@alignCast(ctx));
-                try typed.flush();
+                typed.flush() catch return error.WriteFailed;
             }
         };
 
@@ -112,14 +123,14 @@ pub const OutputWriter = struct {
         self.scratch.value.clearRetainingCapacity();
         switch (self.mode) {
             .xml => {
-                try render_xml.renderXmlWithContext(ctx, record.chunk_buf, record.binxml, &self.scratch);
+                try render_xml.renderXmlWithContext(ctx, record.chunk_buf, record.binxml, self.scratch.writer());
                 try self.scratch.writeByte('\n');
             },
             .json_single, .json_lines => {
                 // Rust-compatible format: {"Event": ...}
                 const tree = try binxml.parseRecord(ctx, record.chunk_buf, record.binxml);
                 try self.scratch.writeAll("{\"Event\":");
-                try render_json.renderElementJson(tree.element, ctx.arena.allocator(), &self.scratch);
+                try render_json.renderElementJson(tree.element, ctx.arena.allocator(), self.scratch.writer());
                 try self.scratch.writeAll("}\n");
             },
         }

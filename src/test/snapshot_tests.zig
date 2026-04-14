@@ -174,7 +174,7 @@ fn writeFile(io: std.Io, path: []const u8, contents: []const u8) !void {
 
     var write_buf: [READ_BUFFER_SIZE]u8 = undefined;
     var writer = out_file.writer(io, &write_buf);
-    try writer.writeAll(contents);
+    try writer.interface.writeAll(contents);
     try writer.flush();
 }
 
@@ -193,7 +193,7 @@ fn readFileAlloc(io: std.Io, allocator: std.mem.Allocator, path: []const u8, max
 
     var read_buf: [READ_BUFFER_SIZE]u8 = undefined;
     var reader = file.reader(io, &read_buf);
-    try reader.readSliceAll(contents);
+    try reader.interface.readSliceAll(contents);
 
     return contents;
 }
