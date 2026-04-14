@@ -41,7 +41,7 @@ fn openSample(io: std.Io) !std.Io.File {
     return std.Io.Dir.cwd().openFile(io, sample_path, .{ .mode = .read_only });
 }
 
-fn withSampleReader(allocator: std.mem.Allocator, func: anytype) @typeInfo(@TypeOf(func)).@"fn".return_type.? {
+fn withSampleReader(allocator: std.mem.Allocator, comptime ReturnType: type, reader_fn: anytype, context: anytype) anyerror!ReturnType {
     var io_impl = std.Io.Threaded.init(allocator, .{});
     defer io_impl.deinit();
     const io = io_impl.io();
@@ -51,14 +51,20 @@ fn withSampleReader(allocator: std.mem.Allocator, func: anytype) @typeInfo(@Type
 
     var read_buf: [8192]u8 = undefined;
     var reader = file.reader(io, &read_buf);
-    return func(&reader);
+    return try @call(.auto, reader_fn, .{ context, &reader });
 }
 
 fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions, mode: evtx.OutputMode) !ParsedOutput {
+    const Context = struct {
+        allocator: std.mem.Allocator,
+        opts: evtx.ParserOptions,
+        mode: evtx.OutputMode,
+    };
+
     const Runner = struct {
-        fn run(reader: anytype) !ParsedOutput {
+        fn run(ctx_data: Context, reader: anytype) !ParsedOutput {
             const hdr = try evtx.worker.FileHeader.read(reader);
-            var collector = LogicalRecordCollector{ .allocator = allocator };
+            var collector = LogicalRecordCollector{ .allocator = ctx_data.allocator };
             errdefer collector.deinit();
             var skipped: usize = 0;
 
@@ -69,9 +75,9 @@ fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions,
                     else => return err,
                 };
 
-                var out = try evtx.OutputWriter.initSerializeOnly(allocator, mode);
+                var out = try evtx.OutputWriter.initSerializeOnly(ctx_data.allocator, ctx_data.mode);
                 defer out.deinit();
-                var ctx = evtx.Context.init(allocator);
+                var ctx = evtx.Context.init(ctx_data.allocator);
                 defer ctx.deinit();
 
                 var mutable_chunk = chunk;
@@ -80,12 +86,12 @@ fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions,
 
                 var rec_iter = mutable_chunk.records();
                 while (try rec_iter.next()) |rec| {
-                    if (opts.skip_first > 0 and skipped < opts.skip_first) {
+                    if (ctx_data.opts.skip_first > 0 and skipped < ctx_data.opts.skip_first) {
                         skipped += 1;
                         continue;
                     }
                     const emitted_count = collector.records.items.len;
-                    if (opts.max_records != 0 and emitted_count >= opts.max_records) return collector.takeOutput();
+                    if (ctx_data.opts.max_records != 0 and emitted_count >= ctx_data.opts.max_records) return collector.takeOutput();
 
                     const view = evtx.worker.EventRecordRaw{
                         .identifier = rec.identifier,
@@ -102,29 +108,43 @@ fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions,
         }
     };
 
-    return withSampleReader(allocator, Runner.run);
+    return withSampleReader(allocator, ParsedOutput, Runner.run, Context{ .allocator = allocator, .opts = opts, .mode = mode });
 }
 
 fn collectConcurrentOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions, num_threads: usize) !evtx.worker.CollectedOutput {
+    const Context = struct {
+        allocator: std.mem.Allocator,
+        opts: evtx.ParserOptions,
+        num_threads: usize,
+    };
+
     const Runner = struct {
-        fn run(reader: anytype) !evtx.worker.CollectedOutput {
-            var parser = evtx.EvtxParser.init(allocator, opts);
-            return try parser.collectConcurrent(reader, .xml, num_threads);
+        fn run(ctx_data: Context, reader: anytype) !evtx.worker.CollectedOutput {
+            var parser = evtx.EvtxParser.init(ctx_data.allocator, ctx_data.opts);
+            return try parser.collectConcurrent(reader, .xml, ctx_data.num_threads);
         }
     };
 
-    return withSampleReader(allocator, Runner.run);
+    return withSampleReader(allocator, evtx.worker.CollectedOutput, Runner.run, Context{ .allocator = allocator, .opts = opts, .num_threads = num_threads });
 }
 
 fn collectConcurrentOutputWithFailure(allocator: std.mem.Allocator, opts: evtx.ParserOptions, num_threads: usize, fail_after_records: usize, fail_error: anyerror) !evtx.worker.CollectedOutput {
+    const Context = struct {
+        allocator: std.mem.Allocator,
+        opts: evtx.ParserOptions,
+        num_threads: usize,
+        fail_after_records: usize,
+        fail_error: anyerror,
+    };
+
     const Runner = struct {
-        fn run(reader: anytype) !evtx.worker.CollectedOutput {
-            var parser = evtx.EvtxParser.init(allocator, opts);
-            return try parser.collectConcurrentWithFailure(reader, .xml, num_threads, fail_after_records, fail_error);
+        fn run(ctx_data: Context, reader: anytype) !evtx.worker.CollectedOutput {
+            var parser = evtx.EvtxParser.init(ctx_data.allocator, ctx_data.opts);
+            return try parser.collectConcurrentWithFailure(reader, .xml, ctx_data.num_threads, ctx_data.fail_after_records, ctx_data.fail_error);
         }
     };
 
-    return withSampleReader(allocator, Runner.run);
+    return withSampleReader(allocator, evtx.worker.CollectedOutput, Runner.run, Context{ .allocator = allocator, .opts = opts, .num_threads = num_threads, .fail_after_records = fail_after_records, .fail_error = fail_error });
 }
 
 fn sortCollectedById(records: []evtx.worker.EmittedRecord) void {
