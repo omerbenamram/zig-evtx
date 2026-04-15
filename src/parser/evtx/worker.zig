@@ -306,6 +306,31 @@ fn joinRemainingWorkers(shared: *SharedState, active: *std.ArrayList(*WorkerTask
     }
 }
 
+fn cancelAndJoinActiveWorkers(shared: *SharedState, active: *std.ArrayList(*WorkerTask), first_err: *?anyerror) void {
+    shared.cancelled.store(true, .release);
+    joinRemainingWorkers(shared, active, first_err);
+}
+
+fn startWorkerTask(shared: *SharedState, active: *std.ArrayList(*WorkerTask), chunk_index: usize, chunk: Chunk) !void {
+    const allocator = shared.allocator;
+
+    const task = try allocator.create(WorkerTask);
+    errdefer allocator.destroy(task);
+    task.* = .{
+        .thread = undefined,
+        .chunk_index = chunk_index,
+        .chunk = chunk,
+    };
+
+    task.thread = try std.Thread.spawn(.{}, workerMain, .{ shared, task });
+    errdefer {
+        shared.cancelled.store(true, .release);
+        task.thread.join();
+    }
+
+    try active.append(allocator, task);
+}
+
 fn serializeChunkRecords(shared: *SharedState, chunk_index: usize, chunk: *Chunk, out: *OutputWriter, ctx: *binxml.Context) !void {
     const opts = shared.opts;
     var rec_iter = chunk.records();
@@ -498,6 +523,7 @@ fn parseConcurrentWithSink(
     defer active.deinit(allocator);
     const worker_limit = @max(@as(usize, 1), num_threads);
     var worker_error: ?anyerror = null;
+    errdefer cancelAndJoinActiveWorkers(&shared, &active, &worker_error);
 
     var chunk_index: usize = 0;
     var actual_chunks: usize = 0;
@@ -512,16 +538,7 @@ fn parseConcurrentWithSink(
         };
         actual_chunks += 1;
 
-        const task = try allocator.create(WorkerTask);
-        errdefer allocator.destroy(task);
-        task.* = .{
-            .thread = undefined,
-            .chunk_index = chunk_index,
-            .chunk = chunk,
-        };
-        task.thread = try std.Thread.spawn(.{}, workerMain, .{ &shared, task });
-        errdefer task.thread.join();
-        try active.append(allocator, task);
+        try startWorkerTask(&shared, &active, chunk_index, chunk);
 
         if (active.items.len >= worker_limit) {
             const joined = joinWorker(allocator, active.orderedRemove(0));
@@ -644,6 +661,107 @@ fn releaseBlockingWorker(state: *JoinWorkersTestState) void {
     state.release_blocker.store(true, .release);
 }
 
+const StartupCleanupWorkerState = struct {
+    entered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+};
+
+const StartupFailureMode = enum {
+    create,
+    spawn,
+    append,
+};
+
+fn cancelAwareWorkerTask(task: *WorkerTask, state: *StartupCleanupWorkerState, cancelled: *std.atomic.Value(bool)) void {
+    state.entered.store(true, .release);
+    while (!cancelled.load(.acquire)) {
+        std.Thread.yield() catch unreachable;
+    }
+    state.exited.store(true, .release);
+    task.err = null;
+}
+
+fn spawnCancelAwareWorker(shared: *SharedState, chunk_index: usize, state: *StartupCleanupWorkerState) !*WorkerTask {
+    const task = try shared.allocator.create(WorkerTask);
+    errdefer shared.allocator.destroy(task);
+
+    task.* = .{
+        .thread = undefined,
+        .chunk_index = chunk_index,
+        .chunk = undefined,
+    };
+    task.thread = try std.Thread.spawn(.{}, cancelAwareWorkerTask, .{ task, state, &shared.cancelled });
+    return task;
+}
+
+fn simulateStartupFailure(shared: *SharedState, active: *std.ArrayList(*WorkerTask), mode: StartupFailureMode, startup_state: *StartupCleanupWorkerState) !void {
+    var worker_error: ?anyerror = null;
+    errdefer cancelAndJoinActiveWorkers(shared, active, &worker_error);
+
+    switch (mode) {
+        .create => return error.TestStartupCreateFailure,
+        .spawn => {
+            const task = try shared.allocator.create(WorkerTask);
+            errdefer shared.allocator.destroy(task);
+            task.* = .{
+                .thread = undefined,
+                .chunk_index = 1,
+                .chunk = undefined,
+            };
+            return error.TestStartupSpawnFailure;
+        },
+        .append => {
+            const task = try spawnCancelAwareWorker(shared, 1, startup_state);
+            errdefer shared.allocator.destroy(task);
+            errdefer {
+                shared.cancelled.store(true, .release);
+                task.thread.join();
+            }
+            return error.TestStartupAppendFailure;
+        },
+    }
+}
+
+fn expectStartupFailureCleanup(mode: StartupFailureMode, expected_err: anyerror) !void {
+    const allocator = std.testing.allocator;
+
+    var collector = CollectState{ .allocator = allocator };
+    defer collector.deinit();
+
+    var shared = SharedState{
+        .allocator = allocator,
+        .sink = .{ .collect = &collector },
+        .opts = .{},
+        .out_kind = .xml,
+    };
+
+    var active = std.ArrayList(*WorkerTask).empty;
+    defer active.deinit(allocator);
+
+    var active_state = StartupCleanupWorkerState{};
+    const active_task = try spawnCancelAwareWorker(&shared, 0, &active_state);
+    try active.append(allocator, active_task);
+
+    var startup_state = StartupCleanupWorkerState{};
+    try std.testing.expectError(expected_err, simulateStartupFailure(&shared, &active, mode, &startup_state));
+
+    try std.testing.expect(shared.cancelled.load(.acquire));
+    try std.testing.expect(active_state.entered.load(.acquire));
+    try std.testing.expect(active_state.exited.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), active.items.len);
+
+    switch (mode) {
+        .create, .spawn => {
+            try std.testing.expect(!startup_state.entered.load(.acquire));
+            try std.testing.expect(!startup_state.exited.load(.acquire));
+        },
+        .append => {
+            try std.testing.expect(startup_state.entered.load(.acquire));
+            try std.testing.expect(startup_state.exited.load(.acquire));
+        },
+    }
+}
+
 test "skip: single-threaded skip_first skips exact number of records" {
     const total = try countRecordsSingleThreaded(test_evtx_path, 0);
     try std.testing.expect(total > 10);
@@ -691,6 +809,18 @@ test "ordered worker cleanup joins remaining active workers after first worker e
     try std.testing.expect(state.releaser_started.load(.acquire));
     try std.testing.expect(state.blocker_exited.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), active.items.len);
+}
+
+test "startup failure cleanup joins active workers when task allocation fails" {
+    try expectStartupFailureCleanup(.create, error.TestStartupCreateFailure);
+}
+
+test "startup failure cleanup joins active workers when thread spawn fails" {
+    try expectStartupFailureCleanup(.spawn, error.TestStartupSpawnFailure);
+}
+
+test "startup failure cleanup joins active workers when active append fails" {
+    try expectStartupFailureCleanup(.append, error.TestStartupAppendFailure);
 }
 
 test "ordered output slot is marked ready when chunk processing returns early" {
