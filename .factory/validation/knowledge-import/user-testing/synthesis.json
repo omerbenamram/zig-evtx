@@ -1,0 +1,25 @@
+{
+  "milestone": "knowledge-import",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-KNOWLEDGE-001",
+    "VAL-KNOWLEDGE-002"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added Flow Validator Guidance for the knowledge-import read-only artifact validation surface and isolation boundaries.",
+      "source": "flow-report"
+    }
+  ],
+  "previousRound": null
+}

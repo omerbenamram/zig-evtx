@@ -43,3 +43,10 @@ Validation surface findings and runtime testing guidance.
 
 - Default PATH `zig` may still point at 0.15.x in some shells; always prefer the explicit Zig 0.16 path.
 - Python validation is optional unless touched by mission work.
+
+## Flow Validator Guidance: knowledge-import
+
+- Scope is repo-local artifact validation only: inspect `.factory/skills/`, `.factory/library/`, `README.md`, and mission contract/state files as needed.
+- Do not modify implementation code, docs, or build files while validating these assertions.
+- Write only to the assigned flow report path under `.factory/validation/<milestone>/user-testing/flows/` and the assigned evidence directory under the mission folder.
+- This surface is safe to run concurrently because assertions are satisfied by read-only inspection of version-controlled artifacts; avoid overlapping writes to the same report or evidence paths.
