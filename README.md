@@ -31,13 +31,20 @@ See `docs/architecture.md` for the runtime-shell vs pure-core boundary,
 
 Prerequisites:
 
-- Zig 0.14.1
+- Zig 0.16.0
 - Python available on PATH (used by the build to vendor pydust)
 
 Build the CLI and Python extension:
 
 ```bash
 make build OPT=ReleaseFast
+```
+
+If you keep multiple Zig versions installed, point `make` at your Zig 0.16
+binary explicitly:
+
+```bash
+make build OPT=ReleaseFast ZIG=/path/to/zig-0.16
 ```
 
 Run on a sample file (see `samples/`):
