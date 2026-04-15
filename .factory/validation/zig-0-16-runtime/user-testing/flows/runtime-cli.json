@@ -1,0 +1,130 @@
+{
+  "surface": "zig-0-16-runtime CLI",
+  "assertions": [
+    {
+      "id": "VAL-ZIG16-001",
+      "status": "pass",
+      "summary": "Repository metadata and user-facing setup guidance consistently declare Zig 0.16.0 as the supported baseline.",
+      "evidence": [
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/metadata-baseline.txt: build.zig.zon sets .minimum_zig_version = \"0.16.0\".",
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/metadata-baseline.txt: README prerequisites say \"Zig 0.16.0\" and recommend pointing make/build commands at an explicit Zig 0.16 binary."
+      ]
+    },
+    {
+      "id": "VAL-ZIG16-002",
+      "status": "pass",
+      "summary": "Default release build succeeded with the explicit Zig 0.16.0 binary and produced the expected CLI artifacts.",
+      "evidence": [
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/build-release.txt: /home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig build -Dtarget=native -Doptimize=ReleaseFast -Duse-c-alloc=false -Dwith-python=false exited 0 with no stderr.",
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/artifacts.txt: /home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig and /home/omerba/zig-evtx/zig-out/bin/snapshot_test exist after the build."
+      ]
+    },
+    {
+      "id": "VAL-ZIG16-003",
+      "status": "pass",
+      "summary": "The Zig 0.16.0 test graph completed successfully.",
+      "evidence": [
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/build-test.txt: /home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig build test -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false exited 0 with no stderr."
+      ]
+    },
+    {
+      "id": "VAL-ZIG16-004",
+      "status": "pass",
+      "summary": "The snapshot tool built and the representative trailing_spaces snapshot test passed on Zig 0.16.0.",
+      "evidence": [
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/snapshot-trailing-spaces.txt: snapshot command exited 0 and reported \"Results: 1 passed, 0 failed\" for the trailing_spaces test."
+      ]
+    },
+    {
+      "id": "VAL-ZIG16-005",
+      "status": "pass",
+      "summary": "CLI smoke runs emitted one representative record successfully in XML, JSON, and JSONL modes.",
+      "evidence": [
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/cli-xml.txt: exit 0; stdout begins with <Event xmlns=\"http://schemas.microsoft.com/win/2004/08/events/event\"> for samples/system.evtx record 1.",
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/cli-json.txt: exit 0; stdout begins with {\"Event\":{\"#attributes\":{\"xmlns\":\"http://schemas.microsoft.com/win/2004/08/events/event\"}",
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/cli-jsonl.txt: exit 0; stdout emitted a single JSON object line for EventRecordID 1."
+      ]
+    },
+    {
+      "id": "VAL-ZIG16-006",
+      "status": "pass",
+      "summary": "Help text is usable and invalid flags fail cleanly with an explicit error and usage output instead of crashing or hanging.",
+      "evidence": [
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/help.txt: /home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig --help exited 0 and printed Usage/Options/Examples.",
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/invalid-arg.txt: /home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig --definitely-invalid exited 2 and stderr started with \"error: invalid arguments\" followed by usage text."
+      ]
+    },
+    {
+      "id": "VAL-ZIG16-007",
+      "status": "pass",
+      "summary": "When piped to an early-closing consumer, the CLI exited cleanly without surfacing an unexpected broken-pipe error.",
+      "evidence": [
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/closed-pipe.txt: producer command /home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -t 1 -n 50 -o jsonl samples/system.evtx exited 0 while head -n 1 exited 0; producer stderr was empty."
+      ]
+    },
+    {
+      "id": "VAL-CROSS-001",
+      "status": "pass",
+      "summary": "The repo-local Zig 0.16 guidance matches the executable validation path: metadata/readme declare 0.16.0, build succeeds, tests pass, and CLI smoke commands run on Zig 0.16.0.",
+      "evidence": [
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/metadata-baseline.txt: README and build.zig.zon both point users to Zig 0.16.0.",
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/build-release.txt: release build exited 0.",
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/build-test.txt: test graph exited 0.",
+        "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/zig-0-16-runtime/runtime-cli/cli-xml.txt: XML smoke command exited 0 and emitted record output."
+      ]
+    }
+  ],
+  "toolsUsed": [
+    "Read",
+    "Execute"
+  ],
+  "frictions": [],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig build -Dtarget=native -Doptimize=ReleaseFast -Duse-c-alloc=false -Dwith-python=false",
+      "exitCode": 0,
+      "observation": "Release build completed successfully; artifacts recorded in artifacts.txt include zig-out/bin/evtx_dump_zig and zig-out/bin/snapshot_test."
+    },
+    {
+      "command": "/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig build test -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false",
+      "exitCode": 0,
+      "observation": "Test entrypoint completed successfully with no stderr."
+    },
+    {
+      "command": "/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig build snapshot -Dtarget=native -Doptimize=ReleaseFast -Duse-c-alloc=false -- --test trailing_spaces",
+      "exitCode": 0,
+      "observation": "Snapshot runner reported \"Results: 1 passed, 0 failed\" for trailing_spaces."
+    },
+    {
+      "command": "/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig build run -- -t 1 -n 1 -o xml samples/system.evtx",
+      "exitCode": 0,
+      "observation": "Emitted one XML Event record starting with <Event xmlns=\"http://schemas.microsoft.com/win/2004/08/events/event\">."
+    },
+    {
+      "command": "/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig build run -- -t 1 -n 1 -o json samples/system.evtx",
+      "exitCode": 0,
+      "observation": "Emitted one JSON Event object for EventRecordID 1."
+    },
+    {
+      "command": "/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig build run -- -t 1 -n 1 -o jsonl samples/system.evtx",
+      "exitCode": 0,
+      "observation": "Emitted one JSONL line containing the first event record."
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig --help",
+      "exitCode": 0,
+      "observation": "Printed help with Usage, Options, and Examples sections."
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig --definitely-invalid",
+      "exitCode": 2,
+      "observation": "Exited cleanly with invalid-arguments usage text on stderr."
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -t 1 -n 50 -o jsonl samples/system.evtx | head -n 1",
+      "exitCode": 0,
+      "observation": "Producer exited 0 after downstream pipe closure; head exited 0 and producer stderr was empty."
+    }
+  ]
+}
