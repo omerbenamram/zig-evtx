@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 const alloc = @import("alloc");
 const fs = std.fs;
 
@@ -58,7 +57,7 @@ const CliAction = union(enum) {
 
 pub fn main(init: std.process.Init) void {
     const exit_code = run(init) catch |err| switch (err) {
-        error.BrokenPipe, error.WriteFailed => 0,
+        error.BrokenPipe => 0,
         else => reportError(init.io, err),
     };
     std.process.exit(exit_code);
@@ -89,7 +88,10 @@ fn run(init: std.process.Init) !u8 {
 
     switch (action) {
         .help => {
-            try printHelp(io, false);
+            printHelp(io, false) catch |err| {
+                if (runtime.shouldTreatOutputFileErrorAsCleanExit(std.Io.File.stdout(), err)) return 0;
+                return err;
+            };
             return 0;
         },
         .run => |opts| try runCli(allocator, io, opts),
@@ -129,11 +131,11 @@ fn runCli(allocator: std.mem.Allocator, io: std.Io, opts: CliOptions) !void {
         };
         defer output.deinit();
         parser.parse(&reader, &output) catch |e| {
-            if (e == error.WriteFailed and isPipeOrSocket(stdout_file)) return;
+            if (runtime.shouldTreatOutputFileErrorAsCleanExit(stdout_file, e)) return;
             return e;
         };
         output.flush() catch |e| {
-            if (e == error.WriteFailed and isPipeOrSocket(stdout_file)) return;
+            if (runtime.shouldTreatOutputFileErrorAsCleanExit(stdout_file, e)) return;
             return e;
         };
     } else {
@@ -143,7 +145,10 @@ fn runCli(allocator: std.mem.Allocator, io: std.Io, opts: CliOptions) !void {
             .jsonl => .json_lines,
         };
         var stdout_file = std.Io.File.stdout();
-        try parser.parseConcurrent(.{ .io = io, .stdout_file = &stdout_file }, &reader, out_kind, num_threads);
+        parser.parseConcurrent(.{ .io = io, .stdout_file = &stdout_file }, &reader, out_kind, num_threads) catch |err| {
+            if (runtime.shouldTreatOutputFileErrorAsCleanExit(stdout_file, err)) return;
+            return err;
+        };
     }
 }
 
@@ -201,16 +206,6 @@ fn parseCliArgs(args: []const []const u8) error{InvalidArgs}!CliAction {
 
     opts.input_path = input_path orelse return error.InvalidArgs;
     return .{ .run = opts };
-}
-
-fn isPipeOrSocket(file: std.Io.File) bool {
-    if (comptime builtin.os.tag == .windows) return false;
-
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-
-    const st = file.stat(threaded.io()) catch return false;
-    return st.kind == .named_pipe or st.kind == .unix_domain_socket;
 }
 
 fn reportError(io: std.Io, err: anyerror) u8 {
