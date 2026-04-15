@@ -37,6 +37,42 @@ const ParsedOutput = struct {
     }
 };
 
+const SequentialParserCollector = struct {
+    allocator: std.mem.Allocator,
+    collector: LogicalRecordCollector,
+    out: evtx.OutputWriter,
+    pending_identifier: ?u64 = null,
+
+    fn init(allocator: std.mem.Allocator, mode: evtx.OutputMode) !SequentialParserCollector {
+        return .{
+            .allocator = allocator,
+            .collector = .{ .allocator = allocator },
+            .out = try evtx.OutputWriter.initSerializeOnly(allocator, mode),
+        };
+    }
+
+    fn deinit(self: *SequentialParserCollector) void {
+        self.out.deinit();
+        self.collector.deinit();
+    }
+
+    pub fn serializeRecord(self: *SequentialParserCollector, record: evtx.EventRecordRaw, ctx: *evtx.Context) ![]const u8 {
+        self.pending_identifier = record.identifier;
+        return self.out.serializeRecord(record, ctx);
+    }
+
+    pub fn writeSerialized(self: *SequentialParserCollector, bytes: []const u8) !void {
+        const identifier = self.pending_identifier orelse unreachable;
+        try self.collector.append(identifier, bytes);
+    }
+
+    fn takeOutput(self: *SequentialParserCollector) ParsedOutput {
+        self.out.deinit();
+        self.out = undefined;
+        return self.collector.takeOutput();
+    }
+};
+
 fn openSample(io: std.Io) !std.Io.File {
     return std.Io.Dir.cwd().openFile(io, sample_path, .{ .mode = .read_only });
 }
@@ -104,6 +140,26 @@ fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions,
                 }
             }
 
+            return collector.takeOutput();
+        }
+    };
+
+    return withSampleReader(allocator, ParsedOutput, Runner.run, Context{ .allocator = allocator, .opts = opts, .mode = mode });
+}
+
+fn parseSequentialParserOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions, mode: evtx.OutputMode) !ParsedOutput {
+    const Context = struct {
+        allocator: std.mem.Allocator,
+        opts: evtx.ParserOptions,
+        mode: evtx.OutputMode,
+    };
+
+    const Runner = struct {
+        fn run(ctx_data: Context, reader: anytype) !ParsedOutput {
+            var parser = evtx.EvtxParser.init(ctx_data.allocator, ctx_data.opts);
+            var collector = try SequentialParserCollector.init(ctx_data.allocator, ctx_data.mode);
+            errdefer collector.deinit();
+            try parser.parse(reader, &collector);
             return collector.takeOutput();
         }
     };
@@ -257,6 +313,57 @@ test "concurrency: unordered skip_first and max_records stay exact across chunk 
     sortCollectedById(concurrent.records.items);
 
     try expectMatchingRecordSet(sequential.records.items, concurrent.records.items);
+}
+
+test "concurrency: sequential skip_first and max_records stay exact across chunk boundaries" {
+    const allocator = std.testing.allocator;
+    const opts: evtx.ParserOptions = .{
+        .skip_first = 85,
+        .max_records = 12,
+        .ordered = true,
+    };
+
+    var expected = try parseSequentialOutput(allocator, opts, .xml);
+    defer expected.deinit();
+    var actual = try parseSequentialParserOutput(allocator, opts, .xml);
+    defer actual.deinit();
+
+    try std.testing.expectEqual(expected.records.items.len, actual.records.items.len);
+    for (expected.records.items, actual.records.items) |want, got| {
+        try std.testing.expectEqual(want.identifier, got.identifier);
+        try std.testing.expectEqualStrings(want.bytes, got.bytes);
+    }
+}
+
+test "concurrency: sequential ordered and unordered agree on cross-chunk subset" {
+    const allocator = std.testing.allocator;
+    const opts: evtx.ParserOptions = .{
+        .skip_first = 85,
+        .max_records = 12,
+        .ordered = true,
+    };
+
+    var sequential = try parseSequentialParserOutput(allocator, opts, .xml);
+    defer sequential.deinit();
+    var ordered = try collectConcurrentOutput(allocator, opts, 4);
+    defer ordered.deinit();
+
+    try std.testing.expectEqual(sequential.records.items.len, ordered.records.items.len);
+    for (sequential.records.items, ordered.records.items) |seq, conc| {
+        try std.testing.expectEqual(seq.identifier, conc.identifier);
+        try std.testing.expectEqualStrings(seq.bytes, conc.bytes);
+    }
+
+    var unordered = try collectConcurrentOutput(allocator, .{
+        .skip_first = opts.skip_first,
+        .max_records = opts.max_records,
+        .ordered = false,
+    }, 4);
+    defer unordered.deinit();
+
+    sortParsedById(sequential.records.items);
+    sortCollectedById(unordered.records.items);
+    try expectMatchingRecordSet(sequential.records.items, unordered.records.items);
 }
 
 test "concurrency: cancellation after max_records stops further emission" {

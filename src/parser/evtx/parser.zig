@@ -50,6 +50,7 @@ pub const EvtxParser = struct {
         var chunk_index: usize = 0;
         var emitted: usize = 0;
         var skipped: usize = 0;
+        var selected_including_skips: usize = 0;
         var failed: usize = 0;
         var ctx = binxml.Context.init(self.allocator);
         defer ctx.deinit();
@@ -68,7 +69,6 @@ pub const EvtxParser = struct {
             // Pre-cache common strings from chunk header for faster lookups
             try ctx.preCacheFromChunkHeader(&chunk.buf, &chunk.header.common_string_offsets);
             var rec_iter = chunk.records();
-            var selected_including_skips: usize = 0;
             while (try rec_iter.next()) |rec| {
                 if (self.opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
                 // Skip initial records if requested
