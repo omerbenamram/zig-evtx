@@ -22,7 +22,8 @@ None
 3. Migrate from repo entrypoints downward. Prefer explicit `std.Io` and process-boundary ownership over leaf helpers rediscovering runtime state.
 4. Preserve deterministic parsing and no-heuristics rules from `CLAUDE.md`.
 5. After each cluster of edits, run the narrowest relevant validation command first, then the repo-level hard gate from `.factory/services.yaml`.
-6. If the change also affects Python/build integration, run the Python path too and report it explicitly.
+6. For knowledge-import-only or docs-only features, if an unrelated repo hard-gate failure is already tracked by another pending runtime/build feature, report it clearly but do not treat that unrelated blocker as a failure of the knowledge-import feature itself.
+7. If the change also affects Python/build integration, run the Python path too and report it explicitly.
 
 ## zig-evtx repository notes
 

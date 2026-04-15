@@ -1,6 +1,6 @@
 {
   "milestone": "knowledge-import",
-  "round": 1,
+  "round": 2,
   "status": "fail",
   "validatorsRun": {
     "test": {
@@ -44,5 +44,5 @@
     }
   ],
   "rejectedObservations": [],
-  "previousRound": null
+  "previousRound": ".factory/validation/knowledge-import/scrutiny/synthesis.json"
 }

@@ -1,0 +1,28 @@
+{
+  "featureId": "import-hermes-zig-0-16-skill-and-memos",
+  "reviewedAt": "2026-04-15T20:17:56Z",
+  "commitId": "ecca9a28ed66399e6c8969bac91bac2572c37ca1",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The imported skill and memo surfaces correctly preserve Hermes-derived Zig 0.16 guidance inside the repo and reference zig-evtx plus the explicit mission toolchain path, but the feature's own verification step to read build.zig.zon and confirm Zig 0.16 alignment is not met because build.zig.zon still declares minimum_zig_version 0.15.2.",
+    "issues": [
+      {
+        "file": "build.zig.zon",
+        "line": 31,
+        "severity": "blocking",
+        "description": "The knowledge-import acceptance criteria explicitly include reading build.zig.zon for Zig 0.16 alignment after importing context, but build.zig.zon still declares `.minimum_zig_version = \"0.15.2\"`. This leaves the imported Zig 0.16 guidance misaligned with repo-facing toolchain metadata, so the feature does not fully satisfy its expected behavior as reviewed from the committed diff."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The zig-abstract-io-migration skill still instructs workers to run the repo-level hard gate after each edit cluster even for knowledge-import-only work, but this feature correctly treated pre-existing Zig 0.16 runtime/build failures as out of scope. The skill should distinguish documentation/knowledge-import tasks from runtime-migration tasks so workers do not appear to deviate when baseline blockers are unrelated.",
+      "evidence": "Transcript handoff skillFeedback.followedProcedure=false with deviations for the hard-gate step, while the feature description explicitly says unrelated Zig 0.16 runtime/build blockers should be surfaced but left for the baseline runtime feature."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Reviewed commit ecca9a28ed66399e6c8969bac91bac2572c37ca1 and the worker transcript skeleton. The repo-local skill and memos were imported as required, but the feature still fails review because build.zig.zon remains on Zig 0.15.2, so the requested post-import Zig 0.16 alignment check is not satisfied."
+}
