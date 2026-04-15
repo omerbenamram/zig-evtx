@@ -227,6 +227,17 @@ pub fn initEnvironment(env: *const std.process.Environ.Map) void {
     }
 }
 
+pub fn clearEnvironmentForTests() void {
+    lockLogger();
+    defer unlockLogger();
+    environ_map = null;
+    global_level_atomic.store(@intFromEnum(Level.warn), .release);
+    global_level_loaded = true;
+    if (module_levels_inited) {
+        module_levels.clearRetainingCapacity();
+    }
+}
+
 pub fn setModuleLevel(module: []const u8, lvl: Level) void {
     lockLogger();
     defer unlockLogger();

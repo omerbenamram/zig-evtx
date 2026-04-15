@@ -168,9 +168,13 @@ fn writeAll(shared: *SharedState, record: PendingRecord) !void {
     }
 }
 
+fn writeOwnedRecord(shared: *SharedState, record: PendingRecord) !void {
+    errdefer shared.allocator.free(record.bytes);
+    try writeAll(shared, record);
+}
+
 fn writeAllCatchPipe(shared: *SharedState, record: PendingRecord) void {
-    writeAll(shared, record) catch |err| {
-        shared.allocator.free(record.bytes);
+    writeOwnedRecord(shared, record) catch |err| {
         handleWriteError(shared, err);
     };
 }
@@ -287,18 +291,29 @@ fn trySkipRecord(shared: *SharedState, skip_counter: *std.atomic.Value(usize)) b
     return prev < shared.opts.skip_first;
 }
 
+fn noteJoinedTaskError(shared: *SharedState, joined: JoinedTask, first_err: *?anyerror) void {
+    if (joined.err) |err| {
+        log.err("worker for chunk {d} failed: {s}", .{ joined.chunk_index, @errorName(err) });
+        shared.cancelled.store(true, .release);
+        if (first_err.* == null) first_err.* = err;
+    }
+}
+
+fn joinRemainingWorkers(shared: *SharedState, active: *std.ArrayList(*WorkerTask), first_err: *?anyerror) void {
+    while (active.pop()) |task| {
+        const joined = joinWorker(shared.allocator, task);
+        noteJoinedTaskError(shared, joined, first_err);
+    }
+}
+
 fn serializeChunkRecords(shared: *SharedState, chunk_index: usize, chunk: *Chunk, out: *OutputWriter, ctx: *binxml.Context) !void {
     const opts = shared.opts;
     var rec_iter = chunk.records();
 
     if (shared.output_slots) |slots| {
         const slot = &slots[chunk_index];
-        defer slot.ready.store(true, .release);
 
         while (nextRecord(shared, &rec_iter)) |rec| {
-            if (trySkipRecord(shared, &shared.records_skipped)) continue;
-            if (!reserveSelectedRecord(shared)) return;
-
             if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
             const view = EventRecordRaw{ .identifier = rec.identifier, .written_time = rec.written_time, .binxml = rec.binxml, .chunk_buf = &chunk.buf };
             const bytes = out.serializeRecord(view, ctx) catch |e| {
@@ -322,7 +337,7 @@ fn serializeChunkRecords(shared: *SharedState, chunk_index: usize, chunk: *Chunk
                 continue;
             };
             const pending = try makePendingRecord(shared, rec.identifier, bytes);
-            writeAll(shared, pending) catch |err| {
+            writeOwnedRecord(shared, pending) catch |err| {
                 handleWriteError(shared, err);
                 return err;
             };
@@ -348,7 +363,7 @@ fn serializeChunkRecords(shared: *SharedState, chunk_index: usize, chunk: *Chunk
             return err;
         };
 
-        writeAll(shared, pending) catch |err| {
+        writeOwnedRecord(shared, pending) catch |err| {
             releaseEmitSlot(shared);
             handleWriteError(shared, err);
             return err;
@@ -357,6 +372,11 @@ fn serializeChunkRecords(shared: *SharedState, chunk_index: usize, chunk: *Chunk
 }
 
 fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) !void {
+    if (shared.output_slots) |slots| {
+        const slot = &slots[chunk_index];
+        defer slot.ready.store(true, .release);
+    }
+
     if (shared.cancelled.load(.acquire)) return;
 
     const allocator = shared.allocator;
@@ -413,11 +433,16 @@ fn drainOrderedOutput(shared: *SharedState, actual_chunks: usize) !void {
     std.debug.assert(actual_chunks <= slots.len);
 
     var drained_chunks: usize = 0;
+    var skipped: usize = 0;
     drain_loop: for (slots[0..actual_chunks], 0..) |*slot, chunk_index| {
         if (!slot.ready.load(.acquire)) break :drain_loop;
 
         assertReadyToDrain(slot, chunk_index);
         for (slot.spans.items) |span| {
+            if (shared.opts.skip_first > 0 and skipped < shared.opts.skip_first) {
+                skipped += 1;
+                continue;
+            }
             if (!reserveEmitSlot(shared)) break :drain_loop;
 
             const start: usize = span.start;
@@ -431,11 +456,7 @@ fn drainOrderedOutput(shared: *SharedState, actual_chunks: usize) !void {
     }
 
     if (drained_chunks < actual_chunks) {
-        const selected = shared.records_selected.load(.acquire);
-        const emitted = shared.emitted.load(.acquire);
-        const failed = shared.failed.load(.acquire);
         std.debug.assert(shared.cancelled.load(.acquire));
-        std.debug.assert(selected >= emitted + failed);
     }
 }
 
@@ -476,6 +497,7 @@ fn parseConcurrentWithSink(
     var active = std.ArrayList(*WorkerTask).empty;
     defer active.deinit(allocator);
     const worker_limit = @max(@as(usize, 1), num_threads);
+    var worker_error: ?anyerror = null;
 
     var chunk_index: usize = 0;
     var actual_chunks: usize = 0;
@@ -503,26 +525,19 @@ fn parseConcurrentWithSink(
 
         if (active.items.len >= worker_limit) {
             const joined = joinWorker(allocator, active.orderedRemove(0));
-            if (joined.err) |err| {
-                log.err("worker for chunk {d} failed: {s}", .{ joined.chunk_index, @errorName(err) });
-                return err;
-            }
+            noteJoinedTaskError(&shared, joined, &worker_error);
+            if (worker_error != null) break;
         }
 
         if (shared.cancelled.load(.acquire)) break;
         if (!opts.ordered and opts.max_records != 0 and shared.emitted.load(.acquire) >= opts.max_records) break;
     }
 
-    while (active.pop()) |task| {
-        const joined = joinWorker(allocator, task);
-        if (joined.err) |err| {
-            log.err("worker for chunk {d} failed: {s}", .{ joined.chunk_index, @errorName(err) });
-            return err;
-        }
-    }
+    joinRemainingWorkers(&shared, &active, &worker_error);
 
-    if (shared.fatal_error) |e| return e;
     if (shared.broken_pipe.load(.acquire)) return;
+    if (worker_error) |err| return err;
+    if (shared.fatal_error) |e| return e;
 
     try drainOrderedOutput(&shared, actual_chunks);
 
@@ -601,7 +616,108 @@ fn getProjectRoot() []const u8 {
 const project_root = getProjectRoot();
 const test_evtx_path = project_root ++ "/samples/security.evtx";
 
+const JoinWorkersTestState = struct {
+    blocker_entered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    release_blocker: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    blocker_exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    releaser_started: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+};
+
+fn failingWorkerTask(task: *WorkerTask) void {
+    task.err = error.TestWorkerFailure;
+}
+
+fn blockingWorkerTask(task: *WorkerTask, state: *JoinWorkersTestState) void {
+    state.blocker_entered.store(true, .release);
+    while (!state.release_blocker.load(.acquire)) {
+        std.Thread.yield() catch unreachable;
+    }
+    state.blocker_exited.store(true, .release);
+    task.err = null;
+}
+
+fn releaseBlockingWorker(state: *JoinWorkersTestState) void {
+    state.releaser_started.store(true, .release);
+    while (!state.blocker_entered.load(.acquire)) {
+        std.Thread.yield() catch unreachable;
+    }
+    state.release_blocker.store(true, .release);
+}
+
 test "skip: single-threaded skip_first skips exact number of records" {
     const total = try countRecordsSingleThreaded(test_evtx_path, 0);
     try std.testing.expect(total > 10);
+}
+
+test "ordered worker cleanup joins remaining active workers after first worker error" {
+    const allocator = std.testing.allocator;
+
+    var collector = CollectState{ .allocator = allocator };
+    defer collector.deinit();
+
+    var shared = SharedState{
+        .allocator = allocator,
+        .sink = .{ .collect = &collector },
+        .opts = .{},
+        .out_kind = .xml,
+    };
+
+    var active = std.ArrayList(*WorkerTask).empty;
+    defer active.deinit(allocator);
+
+    const failing_task = try allocator.create(WorkerTask);
+    errdefer allocator.destroy(failing_task);
+    failing_task.* = .{ .thread = undefined, .chunk_index = 0, .chunk = undefined };
+    failing_task.thread = try std.Thread.spawn(.{}, failingWorkerTask, .{failing_task});
+    try active.append(allocator, failing_task);
+
+    var state = JoinWorkersTestState{};
+    const blocking_task = try allocator.create(WorkerTask);
+    errdefer allocator.destroy(blocking_task);
+    blocking_task.* = .{ .thread = undefined, .chunk_index = 1, .chunk = undefined };
+    blocking_task.thread = try std.Thread.spawn(.{}, blockingWorkerTask, .{ blocking_task, &state });
+    try active.append(allocator, blocking_task);
+
+    var releaser = try std.Thread.spawn(.{}, releaseBlockingWorker, .{&state});
+    defer releaser.join();
+
+    const joined = joinWorker(allocator, active.orderedRemove(0));
+    var first_err: ?anyerror = null;
+    noteJoinedTaskError(&shared, joined, &first_err);
+    joinRemainingWorkers(&shared, &active, &first_err);
+
+    try std.testing.expect(first_err != null);
+    try std.testing.expect(first_err.? == error.TestWorkerFailure);
+    try std.testing.expect(state.releaser_started.load(.acquire));
+    try std.testing.expect(state.blocker_exited.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 0), active.items.len);
+}
+
+test "ordered output slot is marked ready when chunk processing returns early" {
+    const allocator = std.testing.allocator;
+
+    var collector = CollectState{ .allocator = allocator };
+    defer collector.deinit();
+
+    var slots = try allocator.alloc(OutputSlot, 1);
+    defer {
+        for (slots) |*slot| {
+            slot.data.deinit(allocator);
+            slot.spans.deinit(allocator);
+        }
+        allocator.free(slots);
+    }
+    for (slots) |*slot| slot.* = .{};
+
+    var shared = SharedState{
+        .allocator = allocator,
+        .sink = .{ .collect = &collector },
+        .opts = .{ .ordered = true },
+        .out_kind = .xml,
+        .output_slots = slots,
+    };
+    shared.cancelled.store(true, .release);
+
+    try processChunk(&shared, 0, undefined);
+    try std.testing.expect(slots[0].ready.load(.acquire));
 }

@@ -36,13 +36,13 @@ pub fn shouldTreatOutputFileErrorAsCleanExit(file: std.Io.File, err: anyerror) b
 }
 
 pub fn configureVerbosity(verbosity: u8) void {
+    if (verbosity == 0) return;
+
     const levels = levelsForVerbosity(verbosity);
     logger.setModuleLevel("evtx", levels.evtx);
     logger.setModuleLevel("binxml", levels.binxml);
 
-    if (verbosity >= 1) {
-        log.info("reading file header...", .{});
-    }
+    log.info("reading file header...", .{});
 }
 
 fn levelsForVerbosity(verbosity: u8) struct { evtx: logger.Level, binxml: logger.Level } {
@@ -60,4 +60,17 @@ test "output error clean-exit semantics distinguish broken pipes from generic wr
     try std.testing.expect(shouldTreatOutputErrorAsCleanExit(error.WriteFailed, .unix_domain_socket));
     try std.testing.expect(!shouldTreatOutputErrorAsCleanExit(error.WriteFailed, .file));
     try std.testing.expect(!shouldTreatOutputErrorAsCleanExit(error.AccessDenied, .named_pipe));
+}
+
+test "configureVerbosity zero preserves environment-derived module levels" {
+    var env = std.process.Environ.Map.init(std.testing.allocator);
+    defer env.deinit();
+    defer logger.clearEnvironmentForTests();
+
+    try env.put("EVTX_LOG_EVTX", "debug");
+    logger.initEnvironment(&env);
+
+    try std.testing.expect(logger.scoped("evtx").enabled(.debug));
+    configureVerbosity(0);
+    try std.testing.expect(logger.scoped("evtx").enabled(.debug));
 }

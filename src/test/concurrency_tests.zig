@@ -207,7 +207,7 @@ test "concurrency: skip_first and max_records match sequential selection" {
 
     var sequential = try parseSequentialOutput(allocator, opts, .xml);
     defer sequential.deinit();
-    var concurrent = try collectConcurrentOutput(allocator, opts, 1);
+    var concurrent = try collectConcurrentOutput(allocator, opts, 4);
     defer concurrent.deinit();
 
     try std.testing.expectEqual(sequential.records.items.len, concurrent.records.items.len);
@@ -235,4 +235,10 @@ test "concurrency: broken pipe and write failures stop cleanly" {
     try std.testing.expectEqual(@as(usize, 2), broken_pipe_output.records.items.len);
 
     try std.testing.expectError(error.TestSinkWriteFailed, collectConcurrentOutputWithFailure(allocator, .{ .ordered = true }, 4, 2, error.TestSinkWriteFailed));
+
+    var unordered_broken_pipe_output = try collectConcurrentOutputWithFailure(allocator, .{ .ordered = false }, 4, 2, error.BrokenPipe);
+    defer unordered_broken_pipe_output.deinit();
+    try std.testing.expectEqual(@as(usize, 2), unordered_broken_pipe_output.records.items.len);
+
+    try std.testing.expectError(error.TestSinkWriteFailed, collectConcurrentOutputWithFailure(allocator, .{ .ordered = false }, 4, 2, error.TestSinkWriteFailed));
 }
