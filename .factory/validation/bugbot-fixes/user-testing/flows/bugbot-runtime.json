@@ -1,0 +1,199 @@
+{
+  "surface": "bugbot CLI/runtime",
+  "milestone": "bugbot-fixes",
+  "testedAt": "2026-04-15T21:48:11.065640+00:00",
+  "isolation": {
+    "repoRoot": "/home/omerba/zig-evtx",
+    "missionDir": "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa",
+    "zigBinary": "/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig",
+    "sharedRepoCheckout": true,
+    "sharedZigCacheAndOutput": true,
+    "writeBoundary": {
+      "reportPath": "/home/omerba/zig-evtx/.factory/validation/bugbot-fixes/user-testing/flows/bugbot-runtime.json",
+      "evidenceDir": "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/bugbot-fixes/bugbot-runtime"
+    }
+  },
+  "toolsUsed": [
+    "Read",
+    "Grep",
+    "LS",
+    "Execute"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-BUGBOT-001",
+      "status": "pass",
+      "summary": "Ordered concurrent JSONL output matched the sequential baseline exactly for a 100-record sample from samples/security.evtx.",
+      "evidence": [
+        "bugbot-fixes/bugbot-runtime/ordered-sequential.stdout.txt",
+        "bugbot-fixes/bugbot-runtime/ordered-concurrent.stdout.txt",
+        "bugbot-fixes/bugbot-runtime/ordered-diff.txt"
+      ]
+    },
+    {
+      "id": "VAL-BUGBOT-002",
+      "status": "pass",
+      "summary": "Unordered concurrent JSONL preserved the full logical record set for samples/security.evtx: 2261 records in both runs with identical sorted line and EventRecordID multisets.",
+      "evidence": [
+        "bugbot-fixes/bugbot-runtime/unordered-full-sequential.stdout.txt",
+        "bugbot-fixes/bugbot-runtime/unordered-full-concurrent.stdout.txt",
+        "bugbot-fixes/bugbot-runtime/unordered-full-comparison.json"
+      ]
+    },
+    {
+      "id": "VAL-BUGBOT-003",
+      "status": "fail",
+      "summary": "Ordered concurrent skip/max matched sequential exactly, but unordered concurrent skip/max selected the wrong records: sequential IDs [4,5,6,7,8,9,10] became [4,5,92,6,178,93,261] under -t 4 --unordered -s 3 -n 7.",
+      "evidence": [
+        "bugbot-fixes/bugbot-runtime/skipmax-sequential.stdout.txt",
+        "bugbot-fixes/bugbot-runtime/skipmax-concurrent.stdout.txt",
+        "bugbot-fixes/bugbot-runtime/skipmax-unordered-baseline.stdout.txt",
+        "bugbot-fixes/bugbot-runtime/skipmax-unordered-concurrent.stdout.txt",
+        "bugbot-fixes/bugbot-runtime/skipmax-unordered-comparison.json"
+      ]
+    },
+    {
+      "id": "VAL-BUGBOT-004",
+      "status": "fail",
+      "summary": "Ordered broken-pipe handling exited 0 with two emitted lines and empty stderr, but unordered broken-pipe handling still printed user-visible worker WriteFailed errors to stderr before exiting 0.",
+      "evidence": [
+        "bugbot-fixes/bugbot-runtime/broken-pipe-ordered.stdout.txt",
+        "bugbot-fixes/bugbot-runtime/broken-pipe-ordered.stderr.txt",
+        "bugbot-fixes/bugbot-runtime/broken-pipe-unordered.stdout.txt",
+        "bugbot-fixes/bugbot-runtime/broken-pipe-unordered.stderr.txt"
+      ]
+    },
+    {
+      "id": "VAL-BUGBOT-005",
+      "status": "pass",
+      "summary": "With no -v flag, EVTX_LOG_BINXML=debug still produced binxml debug logs on stderr at verbosity 0.",
+      "evidence": [
+        "bugbot-fixes/bugbot-runtime/env-logging-v0.stderr.txt",
+        "bugbot-fixes/bugbot-runtime/env-logging-v0.stdout.txt"
+      ]
+    },
+    {
+      "id": "VAL-BUGBOT-006",
+      "status": "pass",
+      "summary": "The verbosity ladder behaved in the documented direction: -v emitted INFO lines, -vv added DEBUG lines, and -vvv added TRACE lines with substantially more stderr output.",
+      "evidence": [
+        "bugbot-fixes/bugbot-runtime/verbosity-v.stderr.txt",
+        "bugbot-fixes/bugbot-runtime/verbosity-vv.stderr.txt",
+        "bugbot-fixes/bugbot-runtime/verbosity-vvv.stderr.txt"
+      ]
+    },
+    {
+      "id": "VAL-CROSS-002",
+      "status": "fail",
+      "summary": "docs/architecture.md matches the runtime ownership/cancellation model, but README.md is out of sync with the real CLI: the README says -t > 1 may emit out-of-order by default, while the built help and ordered-concurrency runtime both show that non-deterministic order is gated behind --unordered.",
+      "evidence": [
+        "bugbot-fixes/bugbot-runtime/contract-readme-excerpt.txt",
+        "bugbot-fixes/bugbot-runtime/contract-architecture-excerpt.txt",
+        "bugbot-fixes/bugbot-runtime/help.stdout.txt",
+        "bugbot-fixes/bugbot-runtime/ordered-concurrent.stdout.txt",
+        "bugbot-fixes/bugbot-runtime/unordered-full-comparison.json"
+      ]
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build test -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false",
+      "exitCode": 0,
+      "observation": "Exited 0 and exercised the test graph; output includes expected sink-failure log noise from concurrency tests.",
+      "evidence": "bugbot-fixes/bugbot-runtime/build-test.txt"
+    },
+    {
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false",
+      "exitCode": 0,
+      "observation": "Built the Debug CLI artifact at zig-out/bin/evtx_dump_zig.",
+      "evidence": "bugbot-fixes/bugbot-runtime/build.txt"
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig --help",
+      "exitCode": 0,
+      "observation": "Help text advertises --unordered as the non-deterministic mode switch.",
+      "evidence": "bugbot-fixes/bugbot-runtime/help.stdout.txt"
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -n 100 -t 1 /home/omerba/zig-evtx/samples/security.evtx",
+      "exitCode": 0,
+      "observation": "Sequential ordered baseline emitted 100 records.",
+      "evidence": "bugbot-fixes/bugbot-runtime/ordered-sequential.stdout.txt"
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -n 100 -t 4 /home/omerba/zig-evtx/samples/security.evtx",
+      "exitCode": 0,
+      "observation": "Ordered concurrent output matched the sequential baseline byte-for-byte.",
+      "evidence": "bugbot-fixes/bugbot-runtime/ordered-concurrent.stdout.txt"
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -t 1 /home/omerba/zig-evtx/samples/security.evtx",
+      "exitCode": 0,
+      "observation": "Full-file sequential baseline emitted 2261 records.",
+      "evidence": "bugbot-fixes/bugbot-runtime/unordered-full-sequential.stdout.txt"
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -t 4 --unordered /home/omerba/zig-evtx/samples/security.evtx",
+      "exitCode": 0,
+      "observation": "Full-file unordered concurrent run emitted the same 2261-record multiset as sequential.",
+      "evidence": "bugbot-fixes/bugbot-runtime/unordered-full-comparison.json"
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -s 3 -n 7 -t 1 /home/omerba/zig-evtx/samples/security.evtx",
+      "exitCode": 0,
+      "observation": "Sequential skip/max baseline selected EventRecordID 4 through 10.",
+      "evidence": "bugbot-fixes/bugbot-runtime/skipmax-sequential.stdout.txt"
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -s 3 -n 7 -t 4 /home/omerba/zig-evtx/samples/security.evtx",
+      "exitCode": 0,
+      "observation": "Ordered concurrent skip/max matched the sequential 7-record subset exactly.",
+      "evidence": "bugbot-fixes/bugbot-runtime/skipmax-concurrent.stdout.txt"
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -s 3 -n 7 -t 4 --unordered /home/omerba/zig-evtx/samples/security.evtx",
+      "exitCode": 0,
+      "observation": "Unordered concurrent skip/max selected the wrong records (included 92, 178, 93, 261).",
+      "evidence": "bugbot-fixes/bugbot-runtime/skipmax-unordered-comparison.json"
+    },
+    {
+      "command": "python broken-pipe harness against /home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -n 100 -t 4 /home/omerba/zig-evtx/samples/security.evtx",
+      "exitCode": 0,
+      "observation": "Ordered concurrent run emitted two lines, then exited promptly with empty stderr after the consumer closed the pipe.",
+      "evidence": "bugbot-fixes/bugbot-runtime/broken-pipe-ordered.stdout.txt"
+    },
+    {
+      "command": "python broken-pipe harness against /home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -n 100 -t 4 --unordered /home/omerba/zig-evtx/samples/security.evtx",
+      "exitCode": 0,
+      "observation": "Unordered concurrent run emitted two lines and exited promptly, but stderr printed worker WriteFailed errors.",
+      "evidence": "bugbot-fixes/bugbot-runtime/broken-pipe-unordered.stderr.txt"
+    },
+    {
+      "command": "EVTX_LOG_BINXML=debug /home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -n 1 -t 1 /home/omerba/zig-evtx/samples/system.evtx",
+      "exitCode": 0,
+      "observation": "stderr contained binxml DEBUG lines without any -v flag.",
+      "evidence": "bugbot-fixes/bugbot-runtime/env-logging-v0.stderr.txt"
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -v -o jsonl -n 1 -t 1 /home/omerba/zig-evtx/samples/system.evtx",
+      "exitCode": 0,
+      "observation": "stderr showed INFO-only logging (2 lines).",
+      "evidence": "bugbot-fixes/bugbot-runtime/verbosity-v.stderr.txt"
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -vv -o jsonl -n 1 -t 1 /home/omerba/zig-evtx/samples/system.evtx",
+      "exitCode": 0,
+      "observation": "stderr expanded to INFO+DEBUG logging (58 lines).",
+      "evidence": "bugbot-fixes/bugbot-runtime/verbosity-vv.stderr.txt"
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -vvv -o jsonl -n 1 -t 1 /home/omerba/zig-evtx/samples/system.evtx",
+      "exitCode": 0,
+      "observation": "stderr expanded further to include TRACE logging (240 lines).",
+      "evidence": "bugbot-fixes/bugbot-runtime/verbosity-vvv.stderr.txt"
+    }
+  ],
+  "summary": "Tested 7 assigned assertions: 4 passed and 3 failed. Failures were unordered skip/max selection drift, unordered broken-pipe stderr noise, and README/runtime contract misalignment for ordered vs unordered concurrency."
+}

@@ -43,6 +43,7 @@ Validation surface findings and runtime testing guidance.
 
 - Default PATH `zig` may still point at 0.15.x in some shells; always prefer the explicit Zig 0.16 path.
 - Python validation is optional unless touched by mission work.
+- `zig build test` currently prints expected `worker ... WriteFailed` noise while exercising sink-failure concurrency tests; use the command exit code and targeted evidence files as the source of truth.
 
 ## Flow Validator Guidance: knowledge-import
 
@@ -58,3 +59,11 @@ Validation surface findings and runtime testing guidance.
 - Keep writes within the assigned flow report path under `.factory/validation/<milestone>/user-testing/flows/` and the assigned evidence directory under the mission folder.
 - `zig build`, `zig build test`, and `zig build snapshot` share repo-local cache/output paths by default, so treat the repo as a shared mutable resource unless an isolated cache/output directory is explicitly assigned.
 - Without isolated cache/output directories, serialize build-driving validators for this surface. Read-only artifact inspection may run separately, but do not run multiple build-driving validators against the same repo checkout at once.
+
+## Flow Validator Guidance: bugbot-fixes CLI
+
+- Validate the real CLI/runtime surface from `/home/omerba/zig-evtx` using the explicit Zig 0.16 binary at `"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig"`.
+- Focus on the concurrency and logging contract assertions for ordered output, unordered output, skip/max selection, early sink failure handling, and verbosity behavior.
+- Keep writes within the assigned flow report path under `.factory/validation/<milestone>/user-testing/flows/` and the assigned evidence directory under the mission folder.
+- Build-driving commands (`zig build`, `zig build test`, `zig test`, or any command that reuses the repo-local Zig cache/output directories) must be serialized unless isolated cache/output directories are explicitly assigned.
+- Read-only comparisons of already-produced evidence are safe, but do not run multiple concurrent validators that mutate the same repo checkout or shared Zig cache.
