@@ -163,6 +163,14 @@ fn sortParsedById(records: []ParsedRecord) void {
     }.lessThan);
 }
 
+fn expectMatchingRecordSet(sequential: []ParsedRecord, concurrent: []evtx.worker.EmittedRecord) !void {
+    try std.testing.expectEqual(sequential.len, concurrent.len);
+    for (sequential, concurrent) |seq, conc| {
+        try std.testing.expectEqual(seq.identifier, conc.identifier);
+        try std.testing.expectEqualStrings(seq.bytes, conc.bytes);
+    }
+}
+
 test "concurrency: ordered mode preserves sequential output equivalence" {
     const allocator = std.testing.allocator;
 
@@ -190,11 +198,7 @@ test "concurrency: unordered mode emits same record set as sequential mode" {
     sortParsedById(sequential.records.items);
     sortCollectedById(concurrent.records.items);
 
-    try std.testing.expectEqual(sequential.records.items.len, concurrent.records.items.len);
-    for (sequential.records.items, concurrent.records.items) |seq, conc| {
-        try std.testing.expectEqual(seq.identifier, conc.identifier);
-        try std.testing.expectEqualStrings(seq.bytes, conc.bytes);
-    }
+    try expectMatchingRecordSet(sequential.records.items, concurrent.records.items);
 }
 
 test "concurrency: skip_first and max_records match sequential selection" {
@@ -215,6 +219,44 @@ test "concurrency: skip_first and max_records match sequential selection" {
         try std.testing.expectEqual(seq.identifier, conc.identifier);
         try std.testing.expectEqualStrings(seq.bytes, conc.bytes);
     }
+}
+
+test "concurrency: unordered skip_first and max_records match sequential record subset" {
+    const allocator = std.testing.allocator;
+    const opts: evtx.ParserOptions = .{
+        .skip_first = 3,
+        .max_records = 7,
+        .ordered = false,
+    };
+
+    var sequential = try parseSequentialOutput(allocator, opts, .xml);
+    defer sequential.deinit();
+    var concurrent = try collectConcurrentOutput(allocator, opts, 4);
+    defer concurrent.deinit();
+
+    sortParsedById(sequential.records.items);
+    sortCollectedById(concurrent.records.items);
+
+    try expectMatchingRecordSet(sequential.records.items, concurrent.records.items);
+}
+
+test "concurrency: unordered skip_first and max_records stay exact across chunk boundaries" {
+    const allocator = std.testing.allocator;
+    const opts: evtx.ParserOptions = .{
+        .skip_first = 85,
+        .max_records = 12,
+        .ordered = false,
+    };
+
+    var sequential = try parseSequentialOutput(allocator, opts, .xml);
+    defer sequential.deinit();
+    var concurrent = try collectConcurrentOutput(allocator, opts, 4);
+    defer concurrent.deinit();
+
+    sortParsedById(sequential.records.items);
+    sortCollectedById(concurrent.records.items);
+
+    try expectMatchingRecordSet(sequential.records.items, concurrent.records.items);
 }
 
 test "concurrency: cancellation after max_records stops further emission" {

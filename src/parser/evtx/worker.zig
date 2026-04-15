@@ -129,6 +129,7 @@ const WorkerTask = struct {
     thread: std.Thread,
     chunk_index: usize,
     chunk: Chunk,
+    record_base: usize = 0,
     err: ?anyerror = null,
 };
 
@@ -291,6 +292,22 @@ fn trySkipRecord(shared: *SharedState, skip_counter: *std.atomic.Value(usize)) b
     return prev < shared.opts.skip_first;
 }
 
+fn selectedRecordRangeEnd(opts: ParserOptions) ?usize {
+    if (opts.max_records == 0) return null;
+    return std.math.add(usize, opts.skip_first, opts.max_records) catch std.math.maxInt(usize);
+}
+
+fn usesLogicalSubsetSelection(opts: ParserOptions) bool {
+    return !opts.ordered and opts.skip_first > 0;
+}
+
+fn countChunkRecords(chunk: *const Chunk) !usize {
+    var rec_iter = chunk.records();
+    var count: usize = 0;
+    while (try rec_iter.next()) |_| count += 1;
+    return count;
+}
+
 fn noteJoinedTaskError(shared: *SharedState, joined: JoinedTask, first_err: *?anyerror) void {
     if (joined.err) |err| {
         log.err("worker for chunk {d} failed: {s}", .{ joined.chunk_index, @errorName(err) });
@@ -311,7 +328,7 @@ fn cancelAndJoinActiveWorkers(shared: *SharedState, active: *std.ArrayList(*Work
     joinRemainingWorkers(shared, active, first_err);
 }
 
-fn startWorkerTask(shared: *SharedState, active: *std.ArrayList(*WorkerTask), chunk_index: usize, chunk: Chunk) !void {
+fn startWorkerTask(shared: *SharedState, active: *std.ArrayList(*WorkerTask), chunk_index: usize, chunk: Chunk, record_base: usize) !void {
     const allocator = shared.allocator;
 
     const task = try allocator.create(WorkerTask);
@@ -320,6 +337,7 @@ fn startWorkerTask(shared: *SharedState, active: *std.ArrayList(*WorkerTask), ch
         .thread = undefined,
         .chunk_index = chunk_index,
         .chunk = chunk,
+        .record_base = record_base,
     };
 
     task.thread = try std.Thread.spawn(.{}, workerMain, .{ shared, task });
@@ -331,12 +349,12 @@ fn startWorkerTask(shared: *SharedState, active: *std.ArrayList(*WorkerTask), ch
     try active.append(allocator, task);
 }
 
-fn serializeChunkRecords(shared: *SharedState, chunk_index: usize, chunk: *Chunk, out: *OutputWriter, ctx: *binxml.Context) !void {
+fn serializeChunkRecords(shared: *SharedState, task: *WorkerTask, chunk: *Chunk, out: *OutputWriter, ctx: *binxml.Context) !void {
     const opts = shared.opts;
     var rec_iter = chunk.records();
 
     if (shared.output_slots) |slots| {
-        const slot = &slots[chunk_index];
+        const slot = &slots[task.chunk_index];
 
         while (nextRecord(shared, &rec_iter)) |rec| {
             if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
@@ -347,6 +365,33 @@ fn serializeChunkRecords(shared: *SharedState, chunk_index: usize, chunk: *Chunk
                 continue;
             };
             try scheduleOrderedRecord(shared, slot, rec.identifier, bytes);
+        }
+        return;
+    }
+
+    if (usesLogicalSubsetSelection(opts)) {
+        const selection_end = selectedRecordRangeEnd(opts);
+        var record_index = task.record_base;
+
+        while (nextRecord(shared, &rec_iter)) |rec| : (record_index += 1) {
+            if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
+            if (record_index < opts.skip_first) continue;
+            if (selection_end) |end| {
+                if (record_index >= end) return;
+            }
+
+            const view = EventRecordRaw{ .identifier = rec.identifier, .written_time = rec.written_time, .binxml = rec.binxml, .chunk_buf = &chunk.buf };
+            const bytes = out.serializeRecord(view, ctx) catch |e| {
+                _ = shared.failed.fetchAdd(1, .acq_rel);
+                log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
+                continue;
+            };
+            const pending = try makePendingRecord(shared, rec.identifier, bytes);
+            writeOwnedRecord(shared, pending) catch |err| {
+                handleWriteError(shared, err);
+                return err;
+            };
+            _ = shared.emitted.fetchAdd(1, .acq_rel);
         }
         return;
     }
@@ -396,9 +441,9 @@ fn serializeChunkRecords(shared: *SharedState, chunk_index: usize, chunk: *Chunk
     }
 }
 
-fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) !void {
+fn processChunk(shared: *SharedState, task: *WorkerTask) !void {
     if (shared.output_slots) |slots| {
-        const slot = &slots[chunk_index];
+        const slot = &slots[task.chunk_index];
         defer slot.ready.store(true, .release);
     }
 
@@ -415,13 +460,13 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) !void {
     var ctx = binxml.Context.init(allocator);
     defer ctx.deinit();
 
-    var mutable_chunk = chunk;
+    var mutable_chunk = task.chunk;
 
-    if (opts.verbosity >= 1) log.info("chunk {d}: free_off=0x{x}, last_rec_off=0x{x}", .{ chunk_index, mutable_chunk.header.free_space_offset, mutable_chunk.header.last_event_record_offset });
+    if (opts.verbosity >= 1) log.info("chunk {d}: free_off=0x{x}, last_rec_off=0x{x}", .{ task.chunk_index, mutable_chunk.header.free_space_offset, mutable_chunk.header.last_event_record_offset });
 
     if (opts.validate_checksums) {
         mutable_chunk.validateChecksums() catch |e| {
-            log.err("chunk {d} checksum error: {s}", .{ chunk_index, @errorName(e) });
+            log.err("chunk {d} checksum error: {s}", .{ task.chunk_index, @errorName(e) });
             return;
         };
     }
@@ -432,14 +477,14 @@ fn processChunk(shared: *SharedState, chunk_index: usize, chunk: Chunk) !void {
         return err;
     };
 
-    serializeChunkRecords(shared, chunk_index, &mutable_chunk, &out, &ctx) catch |err| {
+    serializeChunkRecords(shared, task, &mutable_chunk, &out, &ctx) catch |err| {
         setFatal(shared, err);
         return err;
     };
 }
 
 fn workerMain(shared: *SharedState, task: *WorkerTask) void {
-    processChunk(shared, task.chunk_index, task.chunk) catch |err| {
+    processChunk(shared, task) catch |err| {
         task.err = err;
     };
 }
@@ -527,8 +572,13 @@ fn parseConcurrentWithSink(
 
     var chunk_index: usize = 0;
     var actual_chunks: usize = 0;
+    var record_base: usize = 0;
+    const selection_end = if (usesLogicalSubsetSelection(opts)) selectedRecordRangeEnd(opts) else null;
     while (opts.carve or chunk_index < num_chunks) : (chunk_index += 1) {
         if (shared.cancelled.load(.acquire)) break;
+        if (selection_end) |end| {
+            if (record_base >= end) break;
+        }
         const chunk = Chunk.read(reader) catch |e| switch (e) {
             error.EndOfStream, error.BadChunkSignature => break,
             else => {
@@ -538,7 +588,16 @@ fn parseConcurrentWithSink(
         };
         actual_chunks += 1;
 
-        try startWorkerTask(&shared, &active, chunk_index, chunk);
+        const chunk_record_base = record_base;
+        if (selection_end != null or usesLogicalSubsetSelection(opts)) {
+            record_base += try countChunkRecords(&chunk);
+        }
+
+        if (usesLogicalSubsetSelection(opts)) {
+            if (record_base <= opts.skip_first) continue;
+        }
+
+        try startWorkerTask(&shared, &active, chunk_index, chunk, chunk_record_base);
 
         if (active.items.len >= worker_limit) {
             const joined = joinWorker(allocator, active.orderedRemove(0));
@@ -848,6 +907,12 @@ test "ordered output slot is marked ready when chunk processing returns early" {
     };
     shared.cancelled.store(true, .release);
 
-    try processChunk(&shared, 0, undefined);
+    var task = WorkerTask{
+        .thread = undefined,
+        .chunk_index = 0,
+        .chunk = undefined,
+    };
+
+    try processChunk(&shared, &task);
     try std.testing.expect(slots[0].ready.load(.acquire));
 }
