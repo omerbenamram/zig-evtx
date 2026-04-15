@@ -1,0 +1,48 @@
+{
+  "milestone": "knowledge-import",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build test -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build test -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" fmt src/**/*.zig",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1,
+    "failedFeatures": [
+      "import-hermes-zig-0-16-skill-and-memos"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "import-hermes-zig-0-16-skill-and-memos",
+      "severity": "blocking",
+      "description": "The knowledge-import acceptance criteria explicitly include reading build.zig.zon for Zig 0.16 alignment after importing context, but build.zig.zon still declares `.minimum_zig_version = \"0.15.2\"`. This leaves the imported Zig 0.16 guidance misaligned with repo-facing toolchain metadata, so the feature does not fully satisfy its expected behavior as reviewed from the committed diff."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "skill:zig-abstract-io-migration",
+      "suggestion": "Split the validator guidance so knowledge-import-only tasks may record unrelated baseline Zig 0.16 build/test failures without being told to rerun the repo hard gate after each edit cluster.",
+      "evidence": "Transcript handoff skillFeedback.followedProcedure=false with deviations for the hard-gate step, while the feature description explicitly says unrelated Zig 0.16 runtime/build blockers should be surfaced but left for the baseline runtime feature.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}

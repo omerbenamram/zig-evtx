@@ -4,6 +4,7 @@ const alloc = @import("alloc");
 const fs = std.fs;
 
 const evtx = @import("parser/evtx/mod.zig");
+const logger = @import("logger.zig");
 const runtime = @import("runtime.zig");
 
 /// Default read buffer size for file I/O
@@ -15,6 +16,7 @@ pub fn main(init: std.process.Init) !void {
 
     const allocator = init.gpa;
     const io = init.io;
+    logger.initEnvironment(init.environ_map);
 
     var args_iter = std.process.Args.Iterator.init(init.minimal.args);
 

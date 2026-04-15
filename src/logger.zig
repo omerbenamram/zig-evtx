@@ -7,6 +7,8 @@ const MAX_LOG_MESSAGE_SIZE: usize = 4096;
 
 pub const Level = enum(u8) { err = 1, warn = 2, info = 3, debug = 4, trace = 5 };
 
+var environ_map: ?*const std.process.Environ.Map = null;
+
 /// Mutex protecting writes to module_levels hashmap
 var logger_mutex: std.Io.Mutex = .init;
 
@@ -19,11 +21,9 @@ fn unlockLogger() void {
 }
 
 fn getEnvVarOwned(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {
-    const key_z = allocator.dupeZ(u8, key) catch return null;
-    defer allocator.free(key_z);
-
-    const value_z = std.c.getenv(key_z.ptr) orelse return null;
-    return allocator.dupe(u8, std.mem.sliceTo(value_z, 0)) catch null;
+    const env = environ_map orelse return null;
+    const value = env.get(key) orelse return null;
+    return allocator.dupe(u8, value) catch null;
 }
 
 fn parseLevel(s: []const u8) ?Level {
@@ -212,6 +212,16 @@ pub fn setGlobalLevel(lvl: Level) void {
     defer unlockLogger();
     global_level_atomic.store(@intFromEnum(lvl), .release);
     global_level_loaded = true;
+    if (module_levels_inited) {
+        module_levels.clearRetainingCapacity();
+    }
+}
+
+pub fn initEnvironment(env: *const std.process.Environ.Map) void {
+    lockLogger();
+    defer unlockLogger();
+    environ_map = env;
+    global_level_loaded = false;
     if (module_levels_inited) {
         module_levels.clearRetainingCapacity();
     }
