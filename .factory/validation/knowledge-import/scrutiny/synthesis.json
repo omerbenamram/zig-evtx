@@ -1,7 +1,7 @@
 {
   "milestone": "knowledge-import",
-  "round": 2,
-  "status": "fail",
+  "round": 3,
+  "status": "pass",
   "validatorsRun": {
     "test": {
       "passed": true,
@@ -21,28 +21,18 @@
   },
   "reviewsSummary": {
     "total": 1,
-    "passed": 0,
-    "failed": 1,
-    "failedFeatures": [
-      "import-hermes-zig-0-16-skill-and-memos"
-    ]
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": []
   },
-  "blockingIssues": [
-    {
-      "featureId": "import-hermes-zig-0-16-skill-and-memos",
-      "severity": "blocking",
-      "description": "The knowledge-import acceptance criteria explicitly include reading build.zig.zon for Zig 0.16 alignment after importing context, but build.zig.zon still declares `.minimum_zig_version = \"0.15.2\"`. This leaves the imported Zig 0.16 guidance misaligned with repo-facing toolchain metadata, so the feature does not fully satisfy its expected behavior as reviewed from the committed diff."
-    }
-  ],
+  "blockingIssues": [],
   "appliedUpdates": [],
-  "suggestedGuidanceUpdates": [
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [
     {
-      "target": "skill:zig-abstract-io-migration",
-      "suggestion": "Split the validator guidance so knowledge-import-only tasks may record unrelated baseline Zig 0.16 build/test failures without being told to rerun the repo hard gate after each edit cluster.",
-      "evidence": "Transcript handoff skillFeedback.followedProcedure=false with deviations for the hard-gate step, while the feature description explicitly says unrelated Zig 0.16 runtime/build blockers should be surfaced but left for the baseline runtime feature.",
-      "isSystemic": false
+      "observation": "The repo-local zig-abstract-io-migration skill now explicitly exempts knowledge-import-only features from unrelated hard-gate failures already tracked by other features.",
+      "reason": "already-documented"
     }
   ],
-  "rejectedObservations": [],
   "previousRound": ".factory/validation/knowledge-import/scrutiny/synthesis.json"
 }
