@@ -1,7 +1,7 @@
 {
   "milestone": "bugbot-fixes",
-  "round": 1,
-  "status": "fail",
+  "round": 2,
+  "status": "pass",
   "validatorsRun": {
     "test": {
       "passed": true,
@@ -15,27 +15,19 @@
     },
     "lint": {
       "passed": true,
-      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" fmt /home/omerba/zig-evtx/src/**/*.zig",
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" fmt \"/home/omerba/zig-evtx\"/src/**/*.zig",
       "exitCode": 0
     }
   },
   "reviewsSummary": {
     "total": 1,
-    "passed": 0,
-    "failed": 1,
-    "failedFeatures": [
-      "fix-bugbot-concurrency-and-logging-regressions"
-    ]
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": []
   },
-  "blockingIssues": [
-    {
-      "featureId": "fix-bugbot-concurrency-and-logging-regressions",
-      "severity": "blocking",
-      "description": "src/parser/evtx/worker.zig:515 still returns early on allocator.create, std.Thread.spawn, and active.append failures after workers have started, so parseConcurrentWithSink can unwind without joinRemainingWorkers and leave live workers holding dangling stack pointers to shared state."
-    }
-  ],
+  "blockingIssues": [],
   "appliedUpdates": [],
   "suggestedGuidanceUpdates": [],
   "rejectedObservations": [],
-  "previousRound": null
+  "previousRound": "/home/omerba/zig-evtx/.factory/validation/bugbot-fixes/scrutiny/synthesis.round1.json"
 }
