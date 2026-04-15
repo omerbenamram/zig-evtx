@@ -24,6 +24,13 @@ None
 5. After each cluster of edits, run the narrowest relevant validation command first, then the repo-level hard gate from `.factory/services.yaml`.
 6. If the change also affects Python/build integration, run the Python path too and report it explicitly.
 
+## zig-evtx repository notes
+
+- Treat this skill as repo-local guidance; future workers must not rely on hidden Hermes state once these files are committed.
+- Keep imported guidance specific to `zig-evtx` runtime seams: CLI startup, snapshot tooling, parser/output ownership, and concurrency cleanup.
+- Use the mission Zig 0.16 toolchain explicitly at `/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig` for validation examples and implementation notes.
+- When importing or updating knowledge, mirror it into repository-owned surfaces under `.factory/library/` or `docs/` so reviewers can inspect it with ordinary repo reads.
+
 ## Example Handoff
 
 ```json
