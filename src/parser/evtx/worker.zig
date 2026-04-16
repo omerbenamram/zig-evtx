@@ -20,6 +20,7 @@ pub const EventRecordRaw = format.EventRecordRaw;
 pub const IoRuntime = struct {
     io: std.Io,
     stdout_file: *std.Io.File,
+    stdout_writer: *std.Io.File.Writer,
 };
 
 pub const EmittedRecord = struct {
@@ -158,10 +159,8 @@ fn writeAll(shared: *SharedState, record: PendingRecord) !void {
 
     switch (shared.sink) {
         .stdout => |io_runtime| {
-            var write_buf: [4096]u8 = undefined;
-            var writer = io_runtime.stdout_file.writer(io_runtime.io, &write_buf);
-            try writer.interface.writeAll(record.bytes);
-            try writer.interface.flush();
+            try io_runtime.stdout_writer.interface.writeAll(record.bytes);
+            try io_runtime.stdout_writer.interface.flush();
             shared.allocator.free(record.bytes);
         },
         .collect => |collector| {
@@ -897,12 +896,15 @@ test "ordered worker cleanup joins remaining active workers after first worker e
 test "stdout pipe write failures are not reported as worker errors" {
     const allocator = std.testing.allocator;
 
-    var dummy_stdout: std.Io.File = undefined;
+    var dummy_stdout = std.Io.File.stdout();
+    var dummy_write_buf: [16]u8 = undefined;
+    var dummy_stdout_writer = dummy_stdout.writer(std.Options.debug_threaded_io.?.io(), &dummy_write_buf);
     var shared = SharedState{
         .allocator = allocator,
         .sink = .{ .stdout = .{
             .io = std.Options.debug_threaded_io.?.io(),
             .stdout_file = &dummy_stdout,
+            .stdout_writer = &dummy_stdout_writer,
         } },
         .opts = .{},
         .out_kind = .xml,

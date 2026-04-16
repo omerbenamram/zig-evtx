@@ -145,7 +145,9 @@ fn runCli(allocator: std.mem.Allocator, io: std.Io, opts: CliOptions) !void {
             .jsonl => .json_lines,
         };
         var stdout_file = std.Io.File.stdout();
-        parser.parseConcurrent(.{ .io = io, .stdout_file = &stdout_file }, &reader, out_kind, num_threads) catch |err| {
+        var stdout_write_buf: [4096]u8 = undefined;
+        var stdout_writer = stdout_file.writer(io, &stdout_write_buf);
+        parser.parseConcurrent(.{ .io = io, .stdout_file = &stdout_file, .stdout_writer = &stdout_writer }, &reader, out_kind, num_threads) catch |err| {
             if (runtime.shouldTreatOutputFileErrorAsCleanExit(stdout_file, err)) return;
             return err;
         };

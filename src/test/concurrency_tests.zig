@@ -37,6 +37,16 @@ const ParsedOutput = struct {
     }
 };
 
+const JsonlLineSet = struct {
+    allocator: std.mem.Allocator,
+    lines: std.ArrayList([]u8) = .empty,
+
+    fn deinit(self: *JsonlLineSet) void {
+        for (self.lines.items) |line| self.allocator.free(line);
+        self.lines.deinit(self.allocator);
+    }
+};
+
 const SequentialParserCollector = struct {
     allocator: std.mem.Allocator,
     collector: LogicalRecordCollector,
@@ -165,6 +175,96 @@ fn parseSequentialParserOutput(allocator: std.mem.Allocator, opts: evtx.ParserOp
     };
 
     return withSampleReader(allocator, ParsedOutput, Runner.run, Context{ .allocator = allocator, .opts = opts, .mode = mode });
+}
+
+fn readDirFileAlloc(io: std.Io, dir: std.Io.Dir, allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]u8 {
+    var file = try dir.openFile(io, path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    const stat = try file.stat(io);
+    if (stat.size > max_bytes) return error.FileTooBig;
+
+    const file_size: usize = @intCast(stat.size);
+    const contents = try allocator.alloc(u8, file_size);
+    errdefer allocator.free(contents);
+
+    if (file_size == 0) return contents;
+
+    var read_buf: [8192]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+    try reader.interface.readSliceAll(contents);
+    return contents;
+}
+
+fn collectExpectedJsonlLines(allocator: std.mem.Allocator, opts: evtx.ParserOptions) !JsonlLineSet {
+    var parsed = try parseSequentialOutput(allocator, opts, .json_lines);
+    defer parsed.deinit();
+
+    var lines = JsonlLineSet{ .allocator = allocator };
+    errdefer lines.deinit();
+
+    for (parsed.records.items) |record| {
+        const line = std.mem.trim(u8, record.bytes, "\n");
+        try lines.lines.append(allocator, try allocator.dupe(u8, line));
+    }
+
+    return lines;
+}
+
+fn collectConcurrentRedirectedJsonlLines(allocator: std.mem.Allocator, opts: evtx.ParserOptions, num_threads: usize) !JsonlLineSet {
+    var io_impl = std.Io.Threaded.init(allocator, .{});
+    defer io_impl.deinit();
+    const io = io_impl.io();
+
+    var sample = try openSample(io);
+    defer sample.close(io);
+
+    var read_buf: [8192]u8 = undefined;
+    var reader = sample.reader(io, &read_buf);
+
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    {
+        var out_file = try tmp.dir.createFile(io, "out.jsonl", .{ .truncate = true, .read = true });
+        defer out_file.close(io);
+
+        var out_write_buf: [4096]u8 = undefined;
+        var out_writer = out_file.writer(io, &out_write_buf);
+
+        var parser = evtx.EvtxParser.init(allocator, opts);
+        try parser.parseConcurrent(.{
+            .io = io,
+            .stdout_file = &out_file,
+            .stdout_writer = &out_writer,
+        }, &reader, .json_lines, num_threads);
+    }
+
+    const contents = try readDirFileAlloc(io, tmp.dir, allocator, "out.jsonl", 8 * 1024 * 1024);
+    defer allocator.free(contents);
+
+    var lines = JsonlLineSet{ .allocator = allocator };
+    errdefer lines.deinit();
+
+    var iter = std.mem.splitScalar(u8, contents, '\n');
+    while (iter.next()) |line| {
+        if (line.len == 0) continue;
+
+        var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
+        parsed.deinit();
+
+        try lines.lines.append(allocator, try allocator.dupe(u8, line));
+    }
+
+    return lines;
+}
+
+fn sortJsonlLines(lines: [][]u8) void {
+    std.mem.sort([]u8, lines, {}, struct {
+        fn lessThan(_: void, lhs: []u8, rhs: []u8) bool {
+            return std.mem.order(u8, lhs, rhs) == .lt;
+        }
+    }.lessThan);
 }
 
 fn collectConcurrentOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions, num_threads: usize) !evtx.worker.CollectedOutput {
@@ -390,4 +490,45 @@ test "concurrency: broken pipe and write failures stop cleanly" {
     try std.testing.expectEqual(@as(usize, 2), unordered_broken_pipe_output.records.items.len);
 
     try std.testing.expectError(error.TestSinkWriteFailed, collectConcurrentOutputWithFailure(allocator, .{ .ordered = false }, 4, 2, error.TestSinkWriteFailed));
+}
+
+test "concurrency: ordered redirected jsonl preserves sequential subset" {
+    const allocator = std.testing.allocator;
+    const opts: evtx.ParserOptions = .{
+        .skip_first = 3,
+        .max_records = 7,
+        .ordered = true,
+    };
+
+    var expected = try collectExpectedJsonlLines(allocator, opts);
+    defer expected.deinit();
+    var actual = try collectConcurrentRedirectedJsonlLines(allocator, opts, 4);
+    defer actual.deinit();
+
+    try std.testing.expectEqual(expected.lines.items.len, actual.lines.items.len);
+    for (expected.lines.items, actual.lines.items) |want, got| {
+        try std.testing.expectEqualStrings(want, got);
+    }
+}
+
+test "concurrency: unordered redirected jsonl preserves sequential subset record set" {
+    const allocator = std.testing.allocator;
+    const opts: evtx.ParserOptions = .{
+        .skip_first = 3,
+        .max_records = 7,
+        .ordered = false,
+    };
+
+    var expected = try collectExpectedJsonlLines(allocator, opts);
+    defer expected.deinit();
+    var actual = try collectConcurrentRedirectedJsonlLines(allocator, opts, 4);
+    defer actual.deinit();
+
+    sortJsonlLines(expected.lines.items);
+    sortJsonlLines(actual.lines.items);
+
+    try std.testing.expectEqual(expected.lines.items.len, actual.lines.items.len);
+    for (expected.lines.items, actual.lines.items) |want, got| {
+        try std.testing.expectEqualStrings(want, got);
+    }
 }
