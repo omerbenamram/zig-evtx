@@ -12,6 +12,7 @@ Environment variables, external dependencies, and setup notes.
 - Use Zig 0.16 from `/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig` for mission work and validation.
 - Do not rely on PATH `zig` unless it resolves to the same Zig 0.16 binary.
 - Repo setup helper `.factory/init.sh` is currently checked in without the executable bit; invoke it as `sh .factory/init.sh` instead of running it directly.
+- GitHub Actions workflow Zig pins should stay aligned with the repo’s declared Zig 0.16 baseline.
 
 ## Python tooling
 
