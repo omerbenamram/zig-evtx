@@ -7,7 +7,7 @@ on:
     branches: [ main ]
 
 env:
-  ZIG_VERSION: 0.15.2
+  ZIG_VERSION: 0.16.0
   USE_C_ALLOC: '0'
   WITH_PYTHON: '0'
 
