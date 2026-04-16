@@ -69,14 +69,8 @@ class TestIterRecords:
 
 
 class TestIterRecordsFromBytes:
-    """Tests for iter_records_from_bytes function.
+    """Tests for iter_records_from_bytes function."""
 
-    Note: These tests are currently skipped due to a pydust limitation where
-    []const u8 is interpreted as str instead of bytes. The from_bytes
-    functionality needs pydust to be updated to support PyBytes.
-    """
-
-    @pytest.mark.skip(reason="pydust limitation: []const u8 expects str not bytes")
     def test_from_bytes_xml(self):
         """Reading from bytes works."""
         with open(SAMPLE_FILE, "rb") as f:
@@ -86,7 +80,6 @@ class TestIterRecordsFromBytes:
         for rec in records:
             assert "<Event" in rec
 
-    @pytest.mark.skip(reason="pydust limitation: []const u8 expects str not bytes")
     def test_from_bytes_matches_file(self):
         """Reading from bytes produces same output as from file."""
         with open(SAMPLE_FILE, "rb") as f:
