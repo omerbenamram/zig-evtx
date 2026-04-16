@@ -16,23 +16,24 @@ pub fn ignoreSigpipe() void {
 }
 
 pub fn shouldTreatOutputErrorAsCleanExit(err: anyerror, kind: std.Io.File.Kind) bool {
-    return switch (err) {
-        error.BrokenPipe => true,
-        error.WriteFailed => kind == .named_pipe or kind == .unix_domain_socket,
-        else => false,
-    };
+    return shouldTreatOutputErrorAsCleanExitForKind(err, kind);
 }
 
-pub fn shouldTreatOutputFileErrorAsCleanExit(file: std.Io.File, err: anyerror) bool {
+pub fn shouldTreatOutputErrorAsCleanExitForKind(err: anyerror, maybe_kind: ?std.Io.File.Kind) bool {
     if (err == error.BrokenPipe) return true;
     if (err != error.WriteFailed) return false;
     if (comptime builtin.os.tag == .windows) return false;
 
+    const kind = maybe_kind orelse return false;
+    return kind == .named_pipe or kind == .unix_domain_socket;
+}
+
+pub fn shouldTreatOutputFileErrorAsCleanExit(file: std.Io.File, err: anyerror) bool {
     var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
     defer threaded.deinit();
 
-    const st = file.stat(threaded.io()) catch return false;
-    return shouldTreatOutputErrorAsCleanExit(err, st.kind);
+    const st = file.stat(threaded.io()) catch return shouldTreatOutputErrorAsCleanExitForKind(err, null);
+    return shouldTreatOutputErrorAsCleanExitForKind(err, st.kind);
 }
 
 pub fn configureVerbosity(verbosity: u8) void {
@@ -60,6 +61,7 @@ test "output error clean-exit semantics distinguish broken pipes from generic wr
     try std.testing.expect(shouldTreatOutputErrorAsCleanExit(error.WriteFailed, .unix_domain_socket));
     try std.testing.expect(!shouldTreatOutputErrorAsCleanExit(error.WriteFailed, .file));
     try std.testing.expect(!shouldTreatOutputErrorAsCleanExit(error.AccessDenied, .named_pipe));
+    try std.testing.expect(!shouldTreatOutputErrorAsCleanExitForKind(error.WriteFailed, null));
 }
 
 test "configureVerbosity zero preserves environment-derived module levels" {

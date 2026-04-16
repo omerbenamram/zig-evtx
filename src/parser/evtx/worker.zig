@@ -112,6 +112,7 @@ const SharedState = struct {
     sink: ConcurrentSink,
     opts: ParserOptions,
     out_kind: OutKind,
+    stdout_kind: ?std.Io.File.Kind = null,
     fatal_mutex: std.Io.Mutex = .init,
     write_mutex: std.Io.Mutex = .init,
     fatal_error: ?anyerror = null,
@@ -186,10 +187,22 @@ fn setBrokenPipe(shared: *SharedState) void {
 }
 
 fn handleWriteError(shared: *SharedState, err: anyerror) void {
+    if (shouldTreatSinkErrorAsCleanStop(shared, err)) {
+        setBrokenPipe(shared);
+        return;
+    }
+
     switch (err) {
         error.BrokenPipe => setBrokenPipe(shared),
         else => setFatal(shared, err),
     }
+}
+
+fn shouldTreatSinkErrorAsCleanStop(shared: *const SharedState, err: anyerror) bool {
+    return switch (shared.sink) {
+        .stdout => runtime.shouldTreatOutputErrorAsCleanExitForKind(err, shared.stdout_kind),
+        .collect => false,
+    };
 }
 
 fn nextRecord(shared: *SharedState, iter: *format.RecordIterator) ?EventRecordRaw {
@@ -310,6 +323,10 @@ fn countChunkRecords(chunk: *const Chunk) !usize {
 
 fn noteJoinedTaskError(shared: *SharedState, joined: JoinedTask, first_err: *?anyerror) void {
     if (joined.err) |err| {
+        if (shouldTreatSinkErrorAsCleanStop(shared, err)) {
+            setBrokenPipe(shared);
+            return;
+        }
         log.err("worker for chunk {d} failed: {s}", .{ joined.chunk_index, @errorName(err) });
         shared.cancelled.store(true, .release);
         if (first_err.* == null) first_err.* = err;
@@ -562,6 +579,13 @@ fn parseConcurrentWithSink(
         .opts = opts,
         .out_kind = out_kind,
         .output_slots = output_slots,
+    };
+    shared.stdout_kind = switch (sink) {
+        .stdout => |io_runtime| blk: {
+            const st = io_runtime.stdout_file.stat(io_runtime.io) catch break :blk null;
+            break :blk st.kind;
+        },
+        .collect => null,
     };
 
     var active = std.ArrayList(*WorkerTask).empty;
@@ -868,6 +892,51 @@ test "ordered worker cleanup joins remaining active workers after first worker e
     try std.testing.expect(state.releaser_started.load(.acquire));
     try std.testing.expect(state.blocker_exited.load(.acquire));
     try std.testing.expectEqual(@as(usize, 0), active.items.len);
+}
+
+test "stdout pipe write failures are not reported as worker errors" {
+    const allocator = std.testing.allocator;
+
+    var dummy_stdout: std.Io.File = undefined;
+    var shared = SharedState{
+        .allocator = allocator,
+        .sink = .{ .stdout = .{
+            .io = std.Options.debug_threaded_io.?.io(),
+            .stdout_file = &dummy_stdout,
+        } },
+        .opts = .{},
+        .out_kind = .xml,
+        .stdout_kind = .named_pipe,
+    };
+
+    var first_err: ?anyerror = null;
+    noteJoinedTaskError(&shared, .{ .chunk_index = 0, .err = error.WriteFailed }, &first_err);
+
+    try std.testing.expect(first_err == null);
+    try std.testing.expect(shared.cancelled.load(.acquire));
+    try std.testing.expect(shared.broken_pipe.load(.acquire));
+}
+
+test "collect sink write failures still surface as worker errors" {
+    const allocator = std.testing.allocator;
+
+    var collector = CollectState{ .allocator = allocator };
+    defer collector.deinit();
+
+    var shared = SharedState{
+        .allocator = allocator,
+        .sink = .{ .collect = &collector },
+        .opts = .{},
+        .out_kind = .xml,
+    };
+
+    var first_err: ?anyerror = null;
+    noteJoinedTaskError(&shared, .{ .chunk_index = 0, .err = error.WriteFailed }, &first_err);
+
+    try std.testing.expect(first_err != null);
+    try std.testing.expect(first_err.? == error.WriteFailed);
+    try std.testing.expect(shared.cancelled.load(.acquire));
+    try std.testing.expect(!shared.broken_pipe.load(.acquire));
 }
 
 test "startup failure cleanup joins active workers when task allocation fails" {
