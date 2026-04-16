@@ -1,0 +1,185 @@
+{
+  "groupId": "bugbot-rerun-round3",
+  "surface": "CLI / shell validation",
+  "milestone": "bugbot-fixes",
+  "testedAt": "2026-04-16T06:05:41.479266+00:00",
+  "isolation": {
+    "repoRoot": "/home/omerba/zig-evtx",
+    "missionDir": "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa",
+    "zigBinary": "/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig",
+    "sharedRepoCheckout": true,
+    "sharedZigCacheAndOutput": true,
+    "concurrencyDecision": "1 validator only for this CLI surface",
+    "writeBoundary": {
+      "reportPath": "/home/omerba/zig-evtx/.factory/validation/bugbot-fixes/user-testing/flows/bugbot-rerun-round3.json",
+      "evidenceDir": "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/bugbot-fixes/bugbot-rerun-round3"
+    }
+  },
+  "toolsUsed": [
+    "Read",
+    "Execute"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-BUGBOT-003",
+      "title": "Limit and skip semantics remain exact under concurrency",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Build the Debug CLI artifact with Zig 0.16 and run the hard-gate test command.",
+          "expected": "The current repository state should build successfully so the real CLI surface can be retested.",
+          "observed": "Both `zig build -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false` and `zig build test -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false` exited 0; `zig build test` emitted the known sink-failure noise covered by mission guidance."
+        },
+        {
+          "action": "Run sequential, ordered concurrent, and unordered concurrent JSONL commands for `samples/security.evtx` with `-s 3 -n 7`.",
+          "expected": "Concurrent modes should emit exactly the same 7-record EventRecordID subset as the sequential baseline.",
+          "observed": "Sequential, ordered, and unordered runs all emitted 7 valid JSON lines with EventRecordIDs [4, 5, 6, 7, 8, 9, 10]."
+        },
+        {
+          "action": "Repeat the same skip/max comparison on `samples/security_big_sample.evtx` with `-s 123 -n 25`.",
+          "expected": "Concurrent modes should still emit the exact selected subset without overshoot or loss on a larger sample.",
+          "observed": "Sequential, ordered, and unordered runs all emitted 25 valid JSON lines with matching EventRecordIDs 227249 through 227273."
+        }
+      ],
+      "evidence": {
+        "files": [
+          "bugbot-fixes/bugbot-rerun-round3/build.txt",
+          "bugbot-fixes/bugbot-rerun-round3/build-test.txt",
+          "bugbot-fixes/bugbot-rerun-round3/skipmax-security-sequential.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/skipmax-security-sequential.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/skipmax-security-ordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/skipmax-security-ordered.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/skipmax-security-unordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/skipmax-security-unordered.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/skipmax-security-big-sequential.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/skipmax-security-big-sequential.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/skipmax-security-big-ordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/skipmax-security-big-ordered.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/skipmax-security-big-unordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/skipmax-security-big-unordered.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/skipmax-analysis.json",
+          "bugbot-fixes/bugbot-rerun-round3/VAL-BUGBOT-003-summary.txt",
+          "bugbot-fixes/bugbot-rerun-round3/terminal-VAL-BUGBOT-003.typescript"
+        ],
+        "terminalSnapshots": [
+          "bugbot-fixes/bugbot-rerun-round3/terminal-VAL-BUGBOT-003.typescript"
+        ],
+        "commands": [
+          "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false",
+          "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build test -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -s 3 -n 7 -t 1 \"/home/omerba/zig-evtx/samples/security.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -s 3 -n 7 -t 4 \"/home/omerba/zig-evtx/samples/security.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -s 3 -n 7 -t 4 --unordered \"/home/omerba/zig-evtx/samples/security.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -s 123 -n 25 -t 1 \"/home/omerba/zig-evtx/samples/security_big_sample.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -s 123 -n 25 -t 4 \"/home/omerba/zig-evtx/samples/security_big_sample.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -s 123 -n 25 -t 4 --unordered \"/home/omerba/zig-evtx/samples/security_big_sample.evtx\""
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-002",
+      "title": "Bugbot concurrency fixes preserve the documented runtime contract",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Read README, docs/architecture.md, and `evtx_dump_zig --help` for the ordered/unordered and broken-pipe contract.",
+          "expected": "Docs/help should describe ordered output by default, `--unordered` for non-deterministic emission order, and process-facing broken-pipe handling.",
+          "observed": "README, architecture excerpts, and help output all align on ordered-by-default output, non-deterministic unordered emission, and shell/process ownership of broken-pipe handling."
+        },
+        {
+          "action": "Run redirected JSONL spot checks with `-n` on `samples/security.evtx` and `samples/security_big_sample.evtx` for sequential, ordered, and unordered concurrent modes.",
+          "expected": "Ordered concurrent output should match sequential exactly; unordered output should remain valid JSONL while using non-deterministic emission order.",
+          "observed": "Ordered `-t 4` matched the sequential outputs exactly for both samples. Unordered `-t 4 --unordered` emitted the requested number of valid JSON lines with non-deterministic order on both samples."
+        },
+        {
+          "action": "Run a full-file redirected JSONL comparison on `samples/security.evtx` for sequential, ordered, and unordered concurrent modes.",
+          "expected": "Ordered output should match the full sequential file exactly, while unordered output should preserve the full logical record set even though order changes.",
+          "observed": "Sequential and ordered runs both emitted 2261 valid JSON lines with identical EventRecordID order. Unordered emitted 2261 valid JSON lines with a different order, but the full EventRecordID set matched sequential exactly."
+        },
+        {
+          "action": "Run ordered and unordered concurrent JSONL through an early-closing consumer.",
+          "expected": "Broken-pipe handling should stop promptly with clean process-facing behavior and no stderr noise.",
+          "observed": "Both ordered and unordered broken-pipe checks captured 2 lines, exited 0, did not time out, and produced empty stderr."
+        }
+      ],
+      "evidence": {
+        "files": [
+          "bugbot-fixes/bugbot-rerun-round3/contract-readme-excerpt.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-architecture-excerpt.txt",
+          "bugbot-fixes/bugbot-rerun-round3/help.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/help.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-sequential.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-sequential.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-ordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-ordered.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-unordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-unordered.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-big-sequential.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-big-sequential.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-big-ordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-big-ordered.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-big-unordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-big-unordered.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-runtime-comparison.json",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-full-sequential.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-full-sequential.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-full-ordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-full-ordered.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-full-unordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-full-unordered.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/contract-security-full-comparison.json",
+          "bugbot-fixes/bugbot-rerun-round3/broken-pipe-ordered.json",
+          "bugbot-fixes/bugbot-rerun-round3/broken-pipe-ordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/broken-pipe-ordered.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/broken-pipe-unordered.json",
+          "bugbot-fixes/bugbot-rerun-round3/broken-pipe-unordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun-round3/broken-pipe-unordered.stderr.txt",
+          "bugbot-fixes/bugbot-rerun-round3/VAL-CROSS-002-summary.txt",
+          "bugbot-fixes/bugbot-rerun-round3/VAL-CROSS-002-full-summary.txt",
+          "bugbot-fixes/bugbot-rerun-round3/terminal-VAL-CROSS-002.typescript"
+        ],
+        "terminalSnapshots": [
+          "bugbot-fixes/bugbot-rerun-round3/terminal-VAL-CROSS-002.typescript"
+        ],
+        "commands": [
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" --help",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -n 100 -t 1 \"/home/omerba/zig-evtx/samples/security.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -n 100 -t 4 \"/home/omerba/zig-evtx/samples/security.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -n 100 -t 4 --unordered \"/home/omerba/zig-evtx/samples/security.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -n 150 -t 1 \"/home/omerba/zig-evtx/samples/security_big_sample.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -n 150 -t 4 \"/home/omerba/zig-evtx/samples/security_big_sample.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -n 150 -t 4 --unordered \"/home/omerba/zig-evtx/samples/security_big_sample.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -t 1 \"/home/omerba/zig-evtx/samples/security.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -t 4 \"/home/omerba/zig-evtx/samples/security.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -t 4 --unordered \"/home/omerba/zig-evtx/samples/security.evtx\"",
+          "broken-pipe harness -> /home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -n 100 -t 4 /home/omerba/zig-evtx/samples/security.evtx",
+          "broken-pipe harness -> /home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -n 100 -t 4 --unordered /home/omerba/zig-evtx/samples/security.evtx"
+        ],
+        "network": "not applicable"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false",
+      "exitCode": 0,
+      "observation": "Built the Debug CLI used for the rerun.",
+      "evidence": [
+        "bugbot-fixes/bugbot-rerun-round3/build.txt"
+      ]
+    },
+    {
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build test -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false",
+      "exitCode": 0,
+      "observation": "Hard-gate test command passed; known sink-failure log noise appeared but did not fail the run.",
+      "evidence": [
+        "bugbot-fixes/bugbot-rerun-round3/build-test.txt"
+      ]
+    }
+  ],
+  "summary": "Retested 2 assertions and both passed. Concurrent skip/max selection now matched sequential baselines on both representative samples, and the documented ordered/unordered plus broken-pipe runtime contract matched observed CLI behavior on the current repository state."
+}

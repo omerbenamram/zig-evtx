@@ -1,42 +1,19 @@
 {
   "milestone": "bugbot-fixes",
-  "round": 2,
-  "status": "fail",
+  "round": 3,
+  "status": "pass",
   "assertionsSummary": {
-    "total": 7,
-    "passed": 5,
-    "failed": 2,
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
     "blocked": 0
   },
   "passedAssertions": [
-    "VAL-BUGBOT-001",
-    "VAL-BUGBOT-002",
-    "VAL-BUGBOT-004",
-    "VAL-BUGBOT-005",
-    "VAL-BUGBOT-006"
+    "VAL-BUGBOT-003",
+    "VAL-CROSS-002"
   ],
-  "failedAssertions": [
-    {
-      "id": "VAL-BUGBOT-003",
-      "reason": "Concurrent CLI `-s 3 -n 7` no longer preserves the selected subset: sequential emitted EventRecordIDs [4, 5, 6, 7, 8, 9, 10], while both `-t 4` and `-t 4 --unordered` emitted only EventRecordID [10]."
-    },
-    {
-      "id": "VAL-CROSS-002",
-      "reason": "README, docs/architecture.md, and `--help` now agree on ordered-by-default semantics, but actual concurrent redirected JSONL output still violates that contract: `-t 4` and `-t 4 --unordered` emit one valid record plus malformed fragments instead of preserving the documented ordered/unordered record behavior."
-    }
-  ],
+  "failedAssertions": [],
   "blockedAssertions": [],
-  "appliedUpdates": [
-    {
-      "target": "user-testing.md",
-      "description": "Added `Flow Validator Guidance: bugbot-fixes CLI` describing the shared-repo isolation boundary and serialized build-driving validation requirement for this runtime surface.",
-      "source": "setup"
-    },
-    {
-      "target": "user-testing.md",
-      "description": "Documented that `zig build test` currently emits expected `worker ... WriteFailed` noise while exercising sink-failure concurrency tests, so validators should rely on exit code and targeted evidence.",
-      "source": "flow-report"
-    }
-  ],
-  "previousRound": "/home/omerba/zig-evtx/.factory/validation/bugbot-fixes/user-testing/synthesis.round1.json"
+  "appliedUpdates": [],
+  "previousRound": "/home/omerba/zig-evtx/.factory/validation/bugbot-fixes/user-testing/synthesis.round2.json"
 }
