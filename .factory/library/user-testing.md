@@ -39,6 +39,13 @@ Validation surface findings and runtime testing guidance.
   - negligible resource delta from `zig build test` and CLI smoke validation
   - CLI validation is lightweight relative to machine headroom
 
+### Python integration
+- Max concurrent validators: **1**
+- Rationale:
+  - `make py-editable` and `make py-test` mutate the shared repo checkout, `.venv`, Zig cache, and `zig-out` artifacts.
+  - The Python validation path reuses the same build graph and editable install state, so concurrent validators could race on the environment and produce misleading results.
+  - The current milestone has a single Python assertion, so serialization is sufficient and safest.
+
 ## Known gotchas
 
 - Default PATH `zig` may still point at 0.15.x in some shells; always prefer the explicit Zig 0.16 path.
@@ -67,3 +74,11 @@ Validation surface findings and runtime testing guidance.
 - Keep writes within the assigned flow report path under `.factory/validation/<milestone>/user-testing/flows/` and the assigned evidence directory under the mission folder.
 - Build-driving commands (`zig build`, `zig build test`, `zig test`, or any command that reuses the repo-local Zig cache/output directories) must be serialized unless isolated cache/output directories are explicitly assigned.
 - Read-only comparisons of already-produced evidence are safe, but do not run multiple concurrent validators that mutate the same repo checkout or shared Zig cache.
+
+## Flow Validator Guidance: integration-followup Python
+
+- Validate the real Python binding surface from `/home/omerba/zig-evtx` using the explicit Zig 0.16 binary at `"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig"`.
+- Use the supported repo commands `make py-editable ZIG="..."` and `make py-test ZIG="..."` rather than ad hoc build steps so the validation matches the documented user path.
+- Keep writes within the assigned flow report path under `.factory/validation/<milestone>/user-testing/flows/` and the assigned evidence directory under the mission folder.
+- Treat the repo checkout, `.venv`, Zig cache, and editable-install state as shared mutable resources; run this surface in isolation with a single validator unless a dedicated cloned checkout and venv are explicitly assigned.
+- If Python byte-backed iteration remains skipped, record that as allowed only when the tested assertion is the conditional mission contract (`VAL-PY-001`) and the supported `make py-test` flow still exits successfully on the current repo state.
