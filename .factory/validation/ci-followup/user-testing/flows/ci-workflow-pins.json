@@ -1,0 +1,54 @@
+{
+  "groupId": "ci-workflow-pins",
+  "milestone": "ci-followup",
+  "testedAt": "2026-04-16T08:21:16.489096+00:00",
+  "isolation": {
+    "surface": "repo-artifacts read-only inspection",
+    "repoRoot": "/home/omerba/zig-evtx",
+    "allowedRepoFiles": [
+      "/home/omerba/zig-evtx/build.zig.zon",
+      "/home/omerba/zig-evtx/README.md",
+      "/home/omerba/zig-evtx/.github/workflows/ci.yml",
+      "/home/omerba/zig-evtx/.github/workflows/zig-cross.yml"
+    ]
+  },
+  "toolsUsed": [
+    "Read"
+  ],
+  "assertionResults": [
+    {
+      "id": "VAL-CI-001",
+      "status": "pass",
+      "evidence": [
+        {
+          "file": "ci-followup/ci-workflow-pins/VAL-CI-001-ci-yml.txt",
+          "excerpt": "ci.yml installs Zig with `version: 0.16.0` in the build-and-test job."
+        }
+      ]
+    },
+    {
+      "id": "VAL-CI-002",
+      "status": "pass",
+      "evidence": [
+        {
+          "file": "ci-followup/ci-workflow-pins/VAL-CI-002-zig-cross-yml.txt",
+          "excerpt": "zig-cross.yml sets `ZIG_VERSION: 0.16.0` and both jobs install Zig from `${{ env.ZIG_VERSION }}`."
+        }
+      ]
+    },
+    {
+      "id": "VAL-CROSS-003",
+      "status": "pass",
+      "evidence": [
+        {
+          "file": "ci-followup/ci-workflow-pins/VAL-CROSS-003-baseline-alignment.txt",
+          "excerpt": "build.zig.zon minimum Zig version, README prerequisites, and both workflow pins all point to Zig 0.16.0."
+        }
+      ]
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "overallStatus": "pass",
+  "summary": "All assigned CI pin assertions passed by read-only inspection: ci.yml pins Zig 0.16.0, zig-cross.yml references Zig 0.16.0 across its jobs, and both align with build.zig.zon and README baseline guidance."
+}

@@ -46,6 +46,13 @@ Validation surface findings and runtime testing guidance.
   - The Python validation path reuses the same build graph and editable install state, so concurrent validators could race on the environment and produce misleading results.
   - The current milestone has a single Python assertion, so serialization is sufficient and safest.
 
+### Repo artifact inspection
+- Max concurrent validators: **3**
+- Rationale:
+  - Read-only inspection of committed files is cheap and does not touch shared build caches.
+  - Validation writes are limited to per-flow report and evidence paths, so isolated validators can safely run in parallel when they use distinct output paths.
+  - Current machine state shows adequate CPU headroom and ~29 GiB available memory despite swap pressure, so a small amount of read-only parallelism is safe.
+
 ## Known gotchas
 
 - Default PATH `zig` may still point at 0.15.x in some shells; always prefer the explicit Zig 0.16 path.
@@ -82,3 +89,11 @@ Validation surface findings and runtime testing guidance.
 - Keep writes within the assigned flow report path under `.factory/validation/<milestone>/user-testing/flows/` and the assigned evidence directory under the mission folder.
 - Treat the repo checkout, `.venv`, Zig cache, and editable-install state as shared mutable resources; run this surface in isolation with a single validator unless a dedicated cloned checkout and venv are explicitly assigned.
 - If Python byte-backed iteration remains skipped, record that as allowed only when the tested assertion is the conditional mission contract (`VAL-PY-001`) and the supported `make py-test` flow still exits successfully on the current repo state.
+
+## Flow Validator Guidance: ci-followup repo-artifacts
+
+- Scope is limited to read-only validation of the repo baseline and workflow files needed for `VAL-CI-001`, `VAL-CI-002`, and `VAL-CROSS-003`.
+- Inspect `build.zig.zon`, `README.md`, `.github/workflows/ci.yml`, and `.github/workflows/zig-cross.yml` directly from `/home/omerba/zig-evtx`.
+- Do not run remote CI, push commits, or broaden validation beyond confirming that workflow Zig pins match the repo-declared Zig 0.16 baseline.
+- Write only to the assigned flow report path under `.factory/validation/<milestone>/user-testing/flows/` and the assigned evidence directory under the mission folder.
+- This surface is safe for parallel read-only validation when output paths are isolated, but keep assertions that rely on the same baseline files in a single validator to avoid duplicate work.
