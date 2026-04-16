@@ -1,0 +1,237 @@
+{
+  "groupId": "bugbot-rerun",
+  "surface": "CLI / shell validation",
+  "milestone": "bugbot-fixes",
+  "testedAt": "2026-04-16T05:44:46.945557+00:00",
+  "isolation": {
+    "repoRoot": "/home/omerba/zig-evtx",
+    "missionDir": "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa",
+    "zigBinary": "/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig",
+    "sharedRepoCheckout": true,
+    "sharedZigCacheAndOutput": true,
+    "concurrencyDecision": "1 validator only for this CLI rerun surface",
+    "writeBoundary": {
+      "reportPath": "/home/omerba/zig-evtx/.factory/validation/bugbot-fixes/user-testing/flows/bugbot-rerun.json",
+      "evidenceDir": "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/bugbot-fixes/bugbot-rerun"
+    }
+  },
+  "toolsUsed": [
+    "Read",
+    "Grep",
+    "LS",
+    "Execute"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-BUGBOT-003",
+      "title": "Limit and skip semantics remain exact under concurrency",
+      "status": "fail",
+      "steps": [
+        {
+          "action": "Run sequential JSONL baseline with `-o jsonl -s 3 -n 7 -t 1 samples/security.evtx`.",
+          "expected": "Emit the selected 7-record subset.",
+          "observed": "Emitted 7 valid JSON records with EventRecordIDs ['4', '5', '6', '7', '8', '9', '10']."
+        },
+        {
+          "action": "Run ordered concurrent JSONL with `-o jsonl -s 3 -n 7 -t 4 samples/security.evtx`.",
+          "expected": "Emit the same 7 records in the same order as sequential.",
+          "observed": "Exited 0 but emitted 1 valid JSON record with EventRecordIDs ['10']."
+        },
+        {
+          "action": "Run unordered concurrent JSONL with `-o jsonl -s 3 -n 7 -t 4 --unordered samples/security.evtx`.",
+          "expected": "Emit the same 7-record set, possibly reordered.",
+          "observed": "Exited 0 but emitted 1 valid JSON record with EventRecordIDs ['10']."
+        }
+      ],
+      "evidence": {
+        "files": [
+          "bugbot-fixes/bugbot-rerun/skipmax-sequential.stdout.txt",
+          "bugbot-fixes/bugbot-rerun/skipmax-ordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun/skipmax-unordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun/skipmax-analysis.json"
+        ],
+        "commands": [
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -s 3 -n 7 -t 1 \"/home/omerba/zig-evtx/samples/security.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -s 3 -n 7 -t 4 \"/home/omerba/zig-evtx/samples/security.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -s 3 -n 7 -t 4 --unordered \"/home/omerba/zig-evtx/samples/security.evtx\""
+        ]
+      },
+      "issues": "Concurrent skip/max selection is still incorrect on the user-facing CLI: both `-t 4` and `-t 4 --unordered` returned only EventRecordID 10 instead of the 7-record subset [4,5,6,7,8,9,10]."
+    },
+    {
+      "id": "VAL-BUGBOT-004",
+      "title": "Early sink failure stops concurrent output cleanly",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Run ordered concurrent JSONL through an early-closing pipe consumer.",
+          "expected": "Process should stop promptly, return the clean exit behavior, and avoid stderr noise.",
+          "observed": "Captured 2 lines, return code 0, timedOut=False, stderr empty."
+        },
+        {
+          "action": "Run unordered concurrent JSONL through the same early-closing consumer.",
+          "expected": "Process should stop promptly, return the clean exit behavior, and avoid stderr noise.",
+          "observed": "Captured 2 lines, return code 0, timedOut=False, stderr empty."
+        }
+      ],
+      "evidence": {
+        "files": [
+          "bugbot-fixes/bugbot-rerun/broken-pipe-ordered.json",
+          "bugbot-fixes/bugbot-rerun/broken-pipe-ordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun/broken-pipe-ordered.stderr.txt",
+          "bugbot-fixes/bugbot-rerun/broken-pipe-unordered.json",
+          "bugbot-fixes/bugbot-rerun/broken-pipe-unordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun/broken-pipe-unordered.stderr.txt"
+        ],
+        "commands": [
+          "python harness -> /home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -n 100 -t 4 /home/omerba/zig-evtx/samples/security.evtx",
+          "python harness -> /home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -n 100 -t 4 --unordered /home/omerba/zig-evtx/samples/security.evtx"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-002",
+      "title": "Bugbot concurrency fixes preserve the documented runtime contract",
+      "status": "fail",
+      "steps": [
+        {
+          "action": "Read the current README and architecture excerpts plus the built `--help` output.",
+          "expected": "Documentation and help should describe ordered output by default, `--unordered` for non-deterministic order, and orchestration-owned cancellation/broken-pipe semantics.",
+          "observed": "README, docs/architecture.md, and `--help` are aligned on ordered-by-default semantics, `--unordered` behavior, and broken-pipe ownership."
+        },
+        {
+          "action": "Run sequential baseline `-o jsonl -n 100 -t 1 samples/security.evtx`.",
+          "expected": "Emit 100 valid JSONL records.",
+          "observed": "Emitted 100 valid JSON lines with EventRecordIDs 1 through 100."
+        },
+        {
+          "action": "Run concurrent ordered and unordered JSONL commands against the same sample.",
+          "expected": "Ordered mode should match the sequential output exactly; unordered mode may reorder but must still emit the same logical record set as valid records.",
+          "observed": "Ordered `-t 4` emitted 9 lines with only 1 valid JSON record and malformed fragments; unordered `-t 4 --unordered` emitted 5 lines with only 1 valid JSON record and malformed fragments."
+        },
+        {
+          "action": "Check the early-closing sink behavior from VAL-BUGBOT-004.",
+          "expected": "Broken-pipe handling should remain clean at the process boundary.",
+          "observed": "Broken-pipe handling is now clean, but the ordered/unordered output contract still fails for normal redirected JSONL output."
+        }
+      ],
+      "evidence": {
+        "files": [
+          "bugbot-fixes/bugbot-rerun/contract-readme-excerpt.txt",
+          "bugbot-fixes/bugbot-rerun/contract-architecture-excerpt.txt",
+          "bugbot-fixes/bugbot-rerun/help.stdout.txt",
+          "bugbot-fixes/bugbot-rerun/contract-sequential.stdout.txt",
+          "bugbot-fixes/bugbot-rerun/contract-ordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun/contract-unordered.stdout.txt",
+          "bugbot-fixes/bugbot-rerun/contract-runtime-comparison.json",
+          "bugbot-fixes/bugbot-rerun/broken-pipe-ordered.json",
+          "bugbot-fixes/bugbot-rerun/broken-pipe-unordered.json"
+        ],
+        "commands": [
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" --help",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -n 100 -t 1 \"/home/omerba/zig-evtx/samples/security.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -n 100 -t 4 \"/home/omerba/zig-evtx/samples/security.evtx\"",
+          "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -n 100 -t 4 --unordered \"/home/omerba/zig-evtx/samples/security.evtx\""
+        ]
+      },
+      "issues": "The docs/help contract is aligned, but the actual concurrent CLI no longer satisfies it: redirected `-t 4` and `-t 4 --unordered` JSONL output collapsed into one valid record plus malformed fragments instead of preserving the documented ordered/unordered record semantics."
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "commands": [
+    {
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false",
+      "exitCode": 0,
+      "observation": "Build the Debug CLI artifact used for rerun validation.",
+      "evidence": [
+        "bugbot-fixes/bugbot-rerun/build.txt"
+      ]
+    },
+    {
+      "command": "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" --help",
+      "exitCode": 0,
+      "observation": "Capture current CLI help text for runtime-contract evidence.",
+      "evidence": [
+        "bugbot-fixes/bugbot-rerun/help.stdout.txt",
+        "bugbot-fixes/bugbot-rerun/help.stderr.txt"
+      ]
+    },
+    {
+      "command": "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -s 3 -n 7 -t 1 \"/home/omerba/zig-evtx/samples/security.evtx\"",
+      "exitCode": 0,
+      "observation": "Sequential skip/max baseline for EventRecordID subset comparison.",
+      "evidence": [
+        "bugbot-fixes/bugbot-rerun/skipmax-sequential.stdout.txt",
+        "bugbot-fixes/bugbot-rerun/skipmax-sequential.stderr.txt"
+      ]
+    },
+    {
+      "command": "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -s 3 -n 7 -t 4 \"/home/omerba/zig-evtx/samples/security.evtx\"",
+      "exitCode": 0,
+      "observation": "Ordered concurrent skip/max rerun.",
+      "evidence": [
+        "bugbot-fixes/bugbot-rerun/skipmax-ordered.stdout.txt",
+        "bugbot-fixes/bugbot-rerun/skipmax-ordered.stderr.txt"
+      ]
+    },
+    {
+      "command": "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -s 3 -n 7 -t 4 --unordered \"/home/omerba/zig-evtx/samples/security.evtx\"",
+      "exitCode": 0,
+      "observation": "Unordered concurrent skip/max rerun.",
+      "evidence": [
+        "bugbot-fixes/bugbot-rerun/skipmax-unordered.stdout.txt",
+        "bugbot-fixes/bugbot-rerun/skipmax-unordered.stderr.txt"
+      ]
+    },
+    {
+      "command": "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -n 100 -t 1 \"/home/omerba/zig-evtx/samples/security.evtx\"",
+      "exitCode": 0,
+      "observation": "Sequential baseline for ordered/unordered runtime-contract comparison.",
+      "evidence": [
+        "bugbot-fixes/bugbot-rerun/contract-sequential.stdout.txt",
+        "bugbot-fixes/bugbot-rerun/contract-sequential.stderr.txt"
+      ]
+    },
+    {
+      "command": "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -n 100 -t 4 \"/home/omerba/zig-evtx/samples/security.evtx\"",
+      "exitCode": 0,
+      "observation": "Default concurrent ordered output comparison against sequential baseline.",
+      "evidence": [
+        "bugbot-fixes/bugbot-rerun/contract-ordered.stdout.txt",
+        "bugbot-fixes/bugbot-rerun/contract-ordered.stderr.txt"
+      ]
+    },
+    {
+      "command": "\"/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig\" -o jsonl -n 100 -t 4 --unordered \"/home/omerba/zig-evtx/samples/security.evtx\"",
+      "exitCode": 0,
+      "observation": "Explicit unordered runtime-contract comparison against sequential baseline.",
+      "evidence": [
+        "bugbot-fixes/bugbot-rerun/contract-unordered.stdout.txt",
+        "bugbot-fixes/bugbot-rerun/contract-unordered.stderr.txt"
+      ]
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -n 100 -t 4 /home/omerba/zig-evtx/samples/security.evtx",
+      "exitCode": 0,
+      "observation": "Ordered concurrent broken-pipe rerun using an early-closing consumer.",
+      "evidence": [
+        "bugbot-fixes/bugbot-rerun/broken-pipe-ordered.json",
+        "bugbot-fixes/bugbot-rerun/broken-pipe-ordered.stdout.txt",
+        "bugbot-fixes/bugbot-rerun/broken-pipe-ordered.stderr.txt"
+      ]
+    },
+    {
+      "command": "/home/omerba/zig-evtx/zig-out/bin/evtx_dump_zig -o jsonl -n 100 -t 4 --unordered /home/omerba/zig-evtx/samples/security.evtx",
+      "exitCode": 0,
+      "observation": "Unordered concurrent broken-pipe rerun using an early-closing consumer.",
+      "evidence": [
+        "bugbot-fixes/bugbot-rerun/broken-pipe-unordered.json",
+        "bugbot-fixes/bugbot-rerun/broken-pipe-unordered.stdout.txt",
+        "bugbot-fixes/bugbot-rerun/broken-pipe-unordered.stderr.txt"
+      ]
+    }
+  ],
+  "summary": "Retested 3 assertions: 1 passed and 2 failed. VAL-BUGBOT-004 now passes with clean broken-pipe exits, while VAL-BUGBOT-003 and VAL-CROSS-002 still fail because concurrent JSONL output under `-t 4` no longer preserves the expected record subset or the documented ordered/unordered output contract."
+}

@@ -1,28 +1,31 @@
 {
   "milestone": "bugbot-fixes",
-  "round": 2,
+  "round": 1,
   "status": "fail",
   "assertionsSummary": {
     "total": 7,
-    "passed": 5,
-    "failed": 2,
+    "passed": 4,
+    "failed": 3,
     "blocked": 0
   },
   "passedAssertions": [
     "VAL-BUGBOT-001",
     "VAL-BUGBOT-002",
-    "VAL-BUGBOT-004",
     "VAL-BUGBOT-005",
     "VAL-BUGBOT-006"
   ],
   "failedAssertions": [
     {
       "id": "VAL-BUGBOT-003",
-      "reason": "Concurrent CLI `-s 3 -n 7` no longer preserves the selected subset: sequential emitted EventRecordIDs [4, 5, 6, 7, 8, 9, 10], while both `-t 4` and `-t 4 --unordered` emitted only EventRecordID [10]."
+      "reason": "Unordered concurrent skip/max selected EventRecordIDs [4, 5, 92, 6, 178, 93, 261] instead of the sequential subset [4, 5, 6, 7, 8, 9, 10]."
+    },
+    {
+      "id": "VAL-BUGBOT-004",
+      "reason": "Unordered concurrent broken-pipe handling exited 0 but still printed worker WriteFailed errors to stderr."
     },
     {
       "id": "VAL-CROSS-002",
-      "reason": "README, docs/architecture.md, and `--help` now agree on ordered-by-default semantics, but actual concurrent redirected JSONL output still violates that contract: `-t 4` and `-t 4 --unordered` emit one valid record plus malformed fragments instead of preserving the documented ordered/unordered record behavior."
+      "reason": "README concurrency notes are out of sync with the real CLI/runtime contract: --unordered is required for non-deterministic ordering."
     }
   ],
   "blockedAssertions": [],
@@ -38,5 +41,5 @@
       "source": "flow-report"
     }
   ],
-  "previousRound": "/home/omerba/zig-evtx/.factory/validation/bugbot-fixes/user-testing/synthesis.round1.json"
+  "previousRound": null
 }
