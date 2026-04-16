@@ -1,0 +1,33 @@
+{
+  "milestone": "integration-followup",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build test -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build -Dtarget=native -Doptimize=ReleaseFast -Duse-c-alloc=false -Dwith-python=false",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" fmt \"/home/omerba/zig-evtx\"/src/**/*.zig",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [],
+  "previousRound": null
+}
