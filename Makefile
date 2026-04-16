@@ -1,7 +1,7 @@
 ### Top-level Makefile (thin) -> includes modular fragments in makefiles/
 
 # ---- Environment (kept at top) ----
-ZIG ?= /home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig
+ZIG ?= zig
 TARGET ?= native
 OPT ?= ReleaseFast
 TEST_OPT ?= Debug
