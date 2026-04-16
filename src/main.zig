@@ -71,7 +71,8 @@ fn run(init: std.process.Init) !u8 {
     const io = init.io;
     logger.initEnvironment(init.environ_map);
 
-    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    var args_iter = try init.minimal.args.iterateAllocator(allocator);
+    defer args_iter.deinit();
     var args = std.ArrayList([]const u8).empty;
     defer args.deinit(allocator);
 

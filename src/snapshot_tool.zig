@@ -59,7 +59,8 @@ fn run(init: std.process.Init) !u8 {
     const allocator = init.gpa;
     const io = init.io;
 
-    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    var args_iter = try init.minimal.args.iterateAllocator(allocator);
+    defer args_iter.deinit();
 
     // Skip program name
     _ = args_iter.next();
