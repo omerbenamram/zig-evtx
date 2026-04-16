@@ -60,7 +60,6 @@ pub const PydustStep = struct {
     hexversion: []const u8,
 
     pydust_source_file: []const u8,
-    pydust_ffi_file: []const u8,
     python_include_dir: []const u8,
     python_library_dir: []const u8,
 
@@ -103,8 +102,7 @@ pub const PydustStep = struct {
             .python_exe = python_exe,
             .libpython = libpython,
             .hexversion = hexversion,
-            .pydust_source_file = "vendor/ziggy-pydust/src/pydust.zig",
-            .pydust_ffi_file = "vendor/ziggy-pydust/src/ffi.h",
+            .pydust_source_file = "",
             .python_include_dir = "",
             .python_library_dir = "",
         };
@@ -115,6 +113,10 @@ pub const PydustStep = struct {
         self.python_library_dir = self.pythonOutput(
             "import os, sysconfig; print(os.path.relpath(sysconfig.get_config_var('LIBDIR')), end='')",
         ) catch @panic("Failed to setup Python");
+        self.pydust_source_file = self.pythonOutput(
+            "import pydust; import os; print(os.path.relpath(os.path.join(os.path.dirname(pydust.__file__), 'src/pydust.zig')), end='')",
+        ) catch @panic("Failed to setup Python");
+
         // Option for emitting test binary based on the given root source. This can be helpful for debugging.
         const debugRoot = b.option(
             []const u8,
@@ -122,36 +124,33 @@ pub const PydustStep = struct {
             "The root path of a file emitted as a binary for use with the debugger",
         );
         if (debugRoot) |root| {
-            {
-                const pyconf = b.addOptions();
-                pyconf.addOption([:0]const u8, "module_name", "debug");
-                pyconf.addOption(bool, "limited_api", false);
-                pyconf.addOption([]const u8, "hexversion", hexversion);
+            const pyconf = b.addOptions();
+            pyconf.addOption([:0]const u8, "module_name", "debug");
+            pyconf.addOption(bool, "limited_api", false);
+            pyconf.addOption([]const u8, "hexversion", hexversion);
 
-                const testdebug_root_mod = b.createModule(.{
+            const testdebug = b.addTest(.{
+                .root_module = b.createModule(.{
                     .root_source_file = b.path(root),
                     .target = b.resolveTargetQuery(.{}),
                     .optimize = .Debug,
-                });
-                const testdebug = b.addTest(.{
-                    .root_module = testdebug_root_mod,
-                });
-                testdebug.root_module.addOptions("pyconf", pyconf);
-                const testdebug_module = b.createModule(.{
-                    .root_source_file = b.path(self.pydust_source_file),
-                    .imports = &.{.{ .name = "pyconf", .module = pyconf.createModule() }},
-                });
-                testdebug_module.addIncludePath(b.path(self.python_include_dir));
-                testdebug.root_module.addImport("pydust", testdebug_module);
-                testdebug.root_module.link_libc = true;
-                testdebug.root_module.linkSystemLibrary(libpython, .{});
-                testdebug.root_module.addLibraryPath(b.path(self.python_library_dir));
-                // Needed to support miniconda statically linking libpython on macos
-                testdebug.root_module.addRPath(b.path(self.python_library_dir));
+                }),
+            });
+            testdebug.root_module.addOptions("pyconf", pyconf);
+            const testdebug_module = b.createModule(.{
+                .root_source_file = b.path(self.pydust_source_file),
+                .imports = &.{.{ .name = "pyconf", .module = pyconf.createModule() }},
+            });
+            testdebug_module.addIncludePath(b.path(self.python_include_dir));
+            testdebug.root_module.addImport("pydust", testdebug_module);
+            testdebug.linkLibC();
+            testdebug.linkSystemLibrary(libpython);
+            testdebug.addLibraryPath(b.path(self.python_library_dir));
+            // Needed to support miniconda statically linking libpython on macos
+            testdebug.addRPath(b.path(self.python_library_dir));
 
-                const debugBin = b.addInstallBinFile(testdebug.getEmittedBin(), "debug.bin");
-                b.getInstallStep().dependOn(&debugBin.step);
-            }
+            const debugBin = b.addInstallBinFile(testdebug.getEmittedBin(), "debug.bin");
+            b.getInstallStep().dependOn(&debugBin.step);
         }
 
         return self;
@@ -170,22 +169,19 @@ pub const PydustStep = struct {
         pyconf.addOption([]const u8, "hexversion", self.hexversion);
 
         // Configure and install the Python module shared library
-        const lib_root_mod = b.createModule(.{
-            .root_source_file = options.root_source_file,
-            .target = b.resolveTargetQuery(options.target),
-            .optimize = options.optimize,
-        });
         const lib = b.addLibrary(.{
-            .linkage = .dynamic,
             .name = short_name,
-            .root_module = lib_root_mod,
+            .linkage = .dynamic,
+            .root_module = b.createModule(.{
+                .root_source_file = options.root_source_file,
+                .target = b.resolveTargetQuery(options.target),
+                .optimize = options.optimize,
+                //.main_pkg_path = options.main_pkg_path,
+            }),
         });
         lib.root_module.addOptions("pyconf", pyconf);
-
-        // Create FFI module via translate-c from Python headers
         const translate_c = self.addTranslateC(options);
         translate_c.addIncludePath(b.path(self.python_include_dir));
-
         const lib_module = b.createModule(.{
             .root_source_file = b.path(self.pydust_source_file),
             .imports = &.{
@@ -195,7 +191,7 @@ pub const PydustStep = struct {
         });
         lib_module.addIncludePath(b.path(self.python_include_dir));
         lib.root_module.addImport("pydust", lib_module);
-        lib.root_module.link_libc = true;
+        lib.linkLibC();
         lib.linker_allow_shlib_undefined = true;
 
         // Install the shared library within the source tree
@@ -208,7 +204,7 @@ pub const PydustStep = struct {
         b.getInstallStep().dependOn(&install.step);
 
         // Invoke stub generator on the emitted binary
-        const workingDir = self.owner.build_root.path orelse ".";
+        const workingDir = std.fs.cwd().realpathAlloc(self.allocator, ".") catch @panic("OOM");
         const genArgs: []const []const u8 = if (self.check_stubs)
             &.{ self.python_exe, "-m", "pydust.generate_stubs", options.name, workingDir, "--check" }
         else
@@ -218,13 +214,13 @@ pub const PydustStep = struct {
         self.generate_stubs.dependOn(&stubs.step);
 
         // Configure a test runner for the module
-        const libtest_root_mod = b.createModule(.{
-            .root_source_file = options.root_source_file,
-            .target = b.resolveTargetQuery(options.target),
-            .optimize = options.optimize,
-        });
         const libtest = b.addTest(.{
-            .root_module = libtest_root_mod,
+            .root_module = b.createModule(.{
+                .root_source_file = options.root_source_file,
+                // .main_pkg_path = options.main_pkg_path,
+                .target = b.resolveTargetQuery(options.target),
+                .optimize = options.optimize,
+            }),
         });
         libtest.root_module.addOptions("pyconf", pyconf);
         const libtest_module = b.createModule(.{
@@ -236,11 +232,11 @@ pub const PydustStep = struct {
         });
         libtest_module.addIncludePath(b.path(self.python_include_dir));
         libtest.root_module.addImport("pydust", libtest_module);
-        libtest.root_module.link_libc = true;
-        libtest.root_module.linkSystemLibrary(self.libpython, .{});
-        libtest.root_module.addLibraryPath(b.path(self.python_library_dir));
+        libtest.linkLibC();
+        libtest.linkSystemLibrary(self.libpython);
+        libtest.addLibraryPath(b.path(self.python_library_dir));
         // Needed to support miniconda statically linking libpython on macos
-        libtest.root_module.addRPath(b.path(self.python_library_dir));
+        libtest.addRPath(b.path(self.python_library_dir));
 
         // Install the test binary
         const install_libtest = b.addInstallBinFile(
@@ -259,18 +255,6 @@ pub const PydustStep = struct {
             .library_step = lib,
             .test_step = libtest,
         };
-    }
-
-    fn addTranslateC(self: PydustStep, options: PythonModuleOptions) *std.Build.Step.TranslateC {
-        const b = self.owner;
-        const translate_c = b.addTranslateC(.{
-            .root_source_file = b.path(self.pydust_ffi_file),
-            .target = b.resolveTargetQuery(options.target),
-            .optimize = options.optimize,
-        });
-        if (options.limited_api)
-            translate_c.defineCMacro("Py_LIMITED_API", self.hexversion);
-        return translate_c;
     }
 
     fn libraryDestRelPath(allocator: std.mem.Allocator, options: PythonModuleOptions) ![]const u8 {
@@ -306,6 +290,18 @@ pub const PydustStep = struct {
     fn pythonOutput(self: *PydustStep, code: []const u8) ![]const u8 {
         return getPythonOutput(self.allocator, self.python_exe, code);
     }
+
+    fn addTranslateC(self: PydustStep, options: PythonModuleOptions) *std.Build.Step.TranslateC {
+        const b = self.owner;
+        const translate_c = b.addTranslateC(.{
+            .root_source_file = b.path("pydust/src/ffi.h"),
+            .target = b.resolveTargetQuery(options.target),
+            .optimize = options.optimize,
+        });
+        if (options.limited_api)
+            translate_c.defineCMacro("Py_LIMITED_API", self.hexversion);
+        return translate_c;
+    }
 };
 
 fn getLibpython(allocator: std.mem.Allocator, python_exe: []const u8) ![]const u8 {
@@ -330,39 +326,26 @@ fn getLibpython(allocator: std.mem.Allocator, python_exe: []const u8) ![]const u
 }
 
 fn getPythonOutput(allocator: std.mem.Allocator, python_exe: []const u8, code: []const u8) ![]const u8 {
-    var io_impl = std.Io.Threaded.init(allocator, .{});
-    defer io_impl.deinit();
-    const result = try std.process.run(allocator, io_impl.io(), .{
+    const result = try runProcess(.{
+        .allocator = allocator,
         .argv = &.{ python_exe, "-c", code },
     });
-    switch (result.term) {
-        .exited => |codepoint| if (codepoint != 0) {
-            std.debug.print("Failed to execute {s}:\n{s}\n", .{ code, result.stderr });
-            std.process.exit(1);
-        },
-        else => {
-            std.debug.print("Failed to execute {s}:\n{s}\n", .{ code, result.stderr });
-            std.process.exit(1);
-        },
+    if (result.term.Exited != 0) {
+        std.debug.print("Failed to execute {s}:\n{s}\n", .{ code, result.stderr });
+        std.process.exit(1);
     }
     allocator.free(result.stderr);
     return result.stdout;
 }
 
 fn getStdOutput(allocator: std.mem.Allocator, argv: []const []const u8) ![]const u8 {
-    var io_impl = std.Io.Threaded.init(allocator, .{});
-    defer io_impl.deinit();
-    const result = try std.process.run(allocator, io_impl.io(), .{ .argv = argv });
-    switch (result.term) {
-        .exited => |codepoint| if (codepoint != 0) {
-            std.debug.print("Failed to execute {any}:\n{s}\n", .{ argv, result.stderr });
-            std.process.exit(1);
-        },
-        else => {
-            std.debug.print("Failed to execute {any}:\n{s}\n", .{ argv, result.stderr });
-            std.process.exit(1);
-        },
+    const result = try runProcess(.{ .allocator = allocator, .argv = argv });
+    if (result.term.Exited != 0) {
+        std.debug.print("Failed to execute {any}:\n{s}\n", .{ argv, result.stderr });
+        std.process.exit(1);
     }
     allocator.free(result.stderr);
     return result.stdout;
 }
+
+const runProcess = if (builtin.zig_version.minor >= 12) std.process.Child.run else std.process.Child.exec;

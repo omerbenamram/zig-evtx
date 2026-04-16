@@ -97,7 +97,11 @@ pub const OutputWriter = struct {
         const Adapter = struct {
             fn writeAll(ctx: *anyopaque, bytes: []const u8) WriterError!void {
                 const typed: *dest_info = @ptrCast(@alignCast(ctx));
-                try typed.interface.writeAll(bytes);
+                if (comptime @hasField(dest_info, "interface")) {
+                    try typed.interface.writeAll(bytes);
+                } else {
+                    try typed.writeAll(bytes);
+                }
             }
 
             fn flush(ctx: *anyopaque) WriterError!void {
