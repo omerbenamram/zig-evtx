@@ -101,8 +101,13 @@ pub const ValueType = enum(u8) {
     /// Returns the fixed byte size for a raw type byte, or null if variable-length.
     /// Use this when working with raw u8 type codes from binary data.
     pub fn fixedSizeFromRaw(vtype: u8) ?usize {
-        const vt = std.meta.intToEnum(ValueType, baseType(vtype)) catch return null;
-        return vt.fixedSize();
+        const base = baseType(vtype);
+        inline for (std.meta.fields(ValueType)) |field| {
+            if (base == field.value) {
+                return @as(ValueType, @enumFromInt(field.value)).fixedSize();
+            }
+        }
+        return null;
     }
 };
 
@@ -168,9 +173,12 @@ pub fn VTypeMixin(comptime T: type) type {
         pub fn valueType(self: *const @This()) ?ValueType {
             const parent: *const T = @fieldParentPtr("vt", self);
             const raw = ValueType.baseType(parent.vtype);
-            return std.meta.intToEnum(ValueType, raw) catch |err| switch (err) {
-                error.InvalidEnumTag => null,
-            };
+            inline for (std.meta.fields(ValueType)) |field| {
+                if (raw == field.value) {
+                    return @as(ValueType, @enumFromInt(field.value));
+                }
+            }
+            return null;
         }
     };
 }

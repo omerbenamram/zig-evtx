@@ -1,0 +1,41 @@
+{
+  "milestone": "bugbot-fixes",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build test -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build -Dtarget=native -Doptimize=ReleaseFast -Duse-c-alloc=false -Dwith-python=false",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" fmt /home/omerba/zig-evtx/src/**/*.zig",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1,
+    "failedFeatures": [
+      "fix-bugbot-concurrency-and-logging-regressions"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "fix-bugbot-concurrency-and-logging-regressions",
+      "severity": "blocking",
+      "description": "src/parser/evtx/worker.zig:515 still returns early on allocator.create, std.Thread.spawn, and active.append failures after workers have started, so parseConcurrentWithSink can unwind without joinRemainingWorkers and leave live workers holding dangling stack pointers to shared state."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [],
+  "previousRound": null
+}

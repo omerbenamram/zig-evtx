@@ -24,9 +24,11 @@ pub const Options = struct {
 /// Streaming iterator state - combines source handling and parsing.
 const IterState = struct {
     allocator: std.mem.Allocator,
+    io_impl: std.Io.Threaded,
 
     // Source (mutually exclusive)
-    infile: ?std.fs.File = null,
+    infile: ?std.Io.File = null,
+    file_pos: u64 = 0,
     bytes_data: []const u8 = &.{},
     bytes_pos: usize = 0,
 
@@ -49,11 +51,16 @@ const IterState = struct {
     // Output buffer for Python
     buf: std.ArrayList(u8) = .empty,
 
+    fn io(self: *IterState) std.Io {
+        return self.io_impl.io();
+    }
+
     /// Read from whichever source is active.
     pub fn readNoEof(self: *IterState, dest: []u8) !void {
         if (self.infile) |f| {
-            const n = try f.readAll(dest);
+            const n = try f.readPositionalAll(self.io(), dest, self.file_pos);
             if (n < dest.len) return error.EndOfStream;
+            self.file_pos += n;
         } else {
             if (self.bytes_pos + dest.len > self.bytes_data.len) return error.EndOfStream;
             @memcpy(dest, self.bytes_data[self.bytes_pos..][0..dest.len]);
@@ -66,6 +73,8 @@ const IterState = struct {
         errdefer allocator.destroy(self);
 
         const is_xml = std.mem.eql(u8, fmt, "xml");
+        var io_impl = std.Io.Threaded.init(allocator, .{});
+        errdefer io_impl.deinit();
 
         // Initialize context first (infallible init; later operations may still fail)
         var ctx = binxml.Context.init(allocator);
@@ -76,6 +85,7 @@ const IterState = struct {
         errdefer out.deinit();
         self.* = .{
             .allocator = allocator,
+            .io_impl = io_impl,
             .opts = opts,
             .is_xml = is_xml,
             .out = out,
@@ -93,8 +103,9 @@ const IterState = struct {
         self.out.deinit();
         self.ctx.deinit();
         self.buf.deinit(self.allocator);
-        if (self.infile) |*f| f.close();
+        if (self.infile) |*f| f.close(self.io());
         if (self.bytes_data.len > 0) self.allocator.free(self.bytes_data);
+        self.io_impl.deinit();
         self.allocator.destroy(self);
     }
 
@@ -167,15 +178,10 @@ pub fn initIterFromPath(
     try validateFormat(fmt);
     const allocator = alloc_mod.get();
 
-    var infile: ?std.fs.File = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
-    errdefer if (infile) |*f| f.close();
-
     const state = try IterState.init(allocator, opts, fmt);
     errdefer state.deinit();
 
-    // Transfer ownership to state, mark local as null to prevent double-close
-    state.infile = infile;
-    infile = null;
+    state.infile = try std.Io.Dir.cwd().openFile(state.io(), path, .{ .mode = .read_only });
 
     try state.readHeader();
 
@@ -226,10 +232,14 @@ pub fn nextRecord(storage: *[IterStateSize]u8) !?[]const u8 {
 pub fn dumpFileBytes(path: []const u8, fmt: []const u8, opts: Options) ![]const u8 {
     const allocator = alloc_mod.get();
 
-    var infile = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
-    defer infile.close();
+    var io_impl = std.Io.Threaded.init(allocator, .{});
+    defer io_impl.deinit();
+    const io = io_impl.io();
+
+    var infile = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
+    defer infile.close(io);
     var read_buf: [8192]u8 = undefined;
-    var reader = infile.reader(&read_buf);
+    var reader = infile.reader(io, &read_buf);
 
     var scratch = std.Io.Writer.Allocating.initCapacity(allocator, 64 * 1024) catch std.Io.Writer.Allocating.init(allocator);
     errdefer scratch.deinit();
@@ -264,15 +274,19 @@ pub fn dumpFileBytes(path: []const u8, fmt: []const u8, opts: Options) ![]const 
 pub fn dumpFileToFile(path: []const u8, out_path: []const u8, fmt: []const u8, opts: Options) !void {
     const allocator = alloc_mod.get();
 
-    var infile = try std.fs.cwd().openFile(path, .{ .mode = .read_only });
-    defer infile.close();
-    var read_buf: [8192]u8 = undefined;
-    var reader = infile.reader(&read_buf);
+    var io_impl = std.Io.Threaded.init(allocator, .{});
+    defer io_impl.deinit();
+    const io = io_impl.io();
 
-    var outfile = try std.fs.cwd().createFile(out_path, .{ .truncate = true });
-    defer outfile.close();
+    var infile = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
+    defer infile.close(io);
+    var read_buf: [8192]u8 = undefined;
+    var reader = infile.reader(io, &read_buf);
+
+    var outfile = try std.Io.Dir.cwd().createFile(io, out_path, .{ .truncate = true });
+    defer outfile.close(io);
     var write_buf: [8192]u8 = undefined;
-    var out_writer = outfile.writer(&write_buf);
+    var out_writer = outfile.writer(io, &write_buf);
 
     var parser = EvtxParser.init(allocator, .{
         .validate_checksums = opts.validate_checksums,
@@ -284,11 +298,11 @@ pub fn dumpFileToFile(path: []const u8, out_path: []const u8, fmt: []const u8, o
 
     var out = blk: {
         if (std.mem.eql(u8, fmt, "xml")) {
-            break :blk try OutputWriter.initXml(allocator, &out_writer.interface);
+            break :blk try OutputWriter.initXml(allocator, &out_writer);
         } else if (std.mem.eql(u8, fmt, "json")) {
-            break :blk try OutputWriter.initJson(allocator, &out_writer.interface, .single);
+            break :blk try OutputWriter.initJson(allocator, &out_writer, .single);
         } else if (std.mem.eql(u8, fmt, "jsonl") or std.mem.eql(u8, fmt, "jsonlines")) {
-            break :blk try OutputWriter.initJson(allocator, &out_writer.interface, .lines);
+            break :blk try OutputWriter.initJson(allocator, &out_writer, .lines);
         } else {
             return error.InvalidFormat;
         }

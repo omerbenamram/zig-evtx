@@ -70,6 +70,186 @@ The parser uses a **two-stage architecture** with type-safe template caching:
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
+## Zig 0.16 std.Io architecture boundary
+
+The repository is moving toward the std.Io layering intended by Zig 0.16.
+For zig-evtx, that means keeping a hard boundary between a small runtime shell
+that owns process I/O and concurrency primitives, and a pure parser and
+renderer core that only consumes injected reader and writer capabilities.
+
+### Boundary in one sentence
+
+Initialize `std.Io` once at the executable or tool entrypoint, construct any
+runtime-backed stdout or file sink there, and pass only the minimum reader,
+writer, and option state down into parsing and rendering code.
+
+### Layering model used by this repo
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     RUNTIME SHELL                                           │
+│                                                                             │
+│  `src/main.zig`              `src/snapshot_tool.zig`                        │
+│  benchmarks / bindings       future embedding adapters                      │
+│                                                                             │
+│  Owns:                                                                      │
+│  - `std.Io` initialization                                                   │
+│  - stdout / stderr / file handle construction                               │
+│  - thread-count selection and execution mode                                │
+│  - top-level cancellation policy                                             │
+│  - process-facing broken-pipe handling                                       │
+└──────────────────────────────┬──────────────────────────────────────────────┘
+                               │ injects concrete runtime state
+                               ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     ORCHESTRATION LAYER                                     │
+│                                                                             │
+│  `src/parser/evtx/parser.zig`                                               │
+│  `src/parser/evtx/output.zig`                                               │
+│  `src/parser/evtx/worker.zig`                                               │
+│                                                                             │
+│  Owns:                                                                      │
+│  - parser options and execution mode                                        │
+│  - chunk scheduling and record iteration                                    │
+│  - output mode selection                                                    │
+│  - ordered vs unordered concurrent drain semantics                          │
+│  - propagation of cancellation and fatal write state                        │
+└──────────────────────────────┬──────────────────────────────────────────────┘
+                               │ injects abstract read / write capability
+                               ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     PURE CORE                                               │
+│                                                                             │
+│  BinXML parsing, IR construction, template instantiation, renderers         │
+│                                                                             │
+│  Owns:                                                                      │
+│  - deterministic EVTX and BinXML parsing                                    │
+│  - template cache and arena lifetimes                                       │
+│  - format rendering logic                                                   │
+│                                                                             │
+│  Does not own:                                                              │
+│  - process stdio                                                            │
+│  - global `std.Io` runtime lookup                                           │
+│  - thread creation policy                                                   │
+│  - shell-level pipe decisions                                               │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Why this boundary matters for zig-evtx
+
+- EVTX parsing is deterministic and spec-driven. It benefits from receiving a
+  reader and producing records without needing to know where bytes come from or
+  where output goes.
+- Zig 0.16 std.Io is designed around explicit runtime ownership. The repo gets
+  a cleaner migration if runtime-backed handles are created once and then
+  threaded downward explicitly.
+- Concurrent output is the one place where runtime state, cancellation, and
+  shell-visible failure modes meet. That seam belongs in the orchestration
+  layer, not inside BinXML parsing or rendering code.
+
+### Intended ownership rules
+
+#### Runtime shell owns std.Io initialization
+
+- `main.zig`, `snapshot_tool.zig`, and other top-level adapters should be the
+  only places that initialize the std.Io runtime and derive stdout, stderr,
+  file readers, or file writers from it.
+- The parser stack should accept injected handles or capabilities.
+- Worker code should consume explicitly provided runtime-backed state when
+  concurrent writes require it.
+
+#### Pure core owns parsing and serialization logic
+
+- Core parsing code should remain generic over the minimum reader operations it
+  needs.
+- Rendering code should remain generic over the minimum writer operations it
+  needs.
+- Scratch buffering should stay local to serialization helpers such as
+  `OutputWriter`, because that keeps buffering strategy close to formatting
+  logic without leaking runtime construction throughout the repo.
+
+#### Orchestration owns cancellation and emission policy
+
+- `parser.zig` and the concurrent worker path own when to stop after
+  `max_records`, how ordered slots drain, and how unordered mode emits records.
+- They should propagate cancellation as state passed through worker control
+  paths.
+- They should not re-derive a global runtime internally.
+
+### Cancellation ownership
+
+Cancellation in zig-evtx should be single-owner and top-down.
+
+- The entrypoint chooses the high-level stop conditions: CLI record limit,
+  explicit cancellation, process write failure, or broken pipe.
+- The orchestration layer translates those conditions into worker stop signals
+  and ordered-drain termination.
+- The pure parser core stays cancellation-aware only through return paths and
+  bounded work units. It should not own shared cancellation state.
+
+For concurrent execution this implies:
+
+- `max_records` belongs to orchestration, because it is an emission policy.
+- broken-pipe and write-failure handling belong at the shell or parser
+  boundary, because they are properties of the active sink.
+- worker threads should observe one explicit cancellation source rather than
+  mix local flags, implicit runtime state, and shell-specific error handling.
+
+### Backend strategy
+
+The repo should support multiple shells around one parser core.
+
+- CLI backend: process stdio, thread count, and shell-visible broken-pipe
+  behavior.
+- snapshot backend: file-backed readers and writers with deterministic output.
+- embedding backends such as Python: adapter-owned buffers or files with the
+  same parser and renderer core.
+
+This works best when backends differ only in the runtime shell layer.
+
+Practical rule:
+
+- add backend-specific I/O setup in entrypoints or adapter files
+- keep parser, renderer, and template code backend-agnostic
+- keep worker runtime needs explicit so tests can inject collection sinks or
+  failure behavior without depending on process stdout
+
+### Anti-patterns to avoid during the Zig 0.16 migration
+
+- Initializing or looking up std.Io runtime state deep inside `worker.zig`,
+  renderers, or parsing helpers.
+- Letting parser internals depend on process stdout or stderr ownership.
+- Reintroducing 0.15-style `.interface` probing or multiple reader and writer
+  shape fallbacks in core code.
+- Creating extra buffering layers whose only job is to count bytes or mimic old
+  generic wrappers.
+- Encoding broken-pipe behavior directly into pure rendering logic.
+- Making concurrency tests rely only on shell pipelines when a controlled sink
+  can be injected at the orchestration seam.
+
+### Current repo read, relevant to this boundary
+
+- `src/parser/evtx/output.zig`, `src/main.zig`, and `src/snapshot_tool.zig`
+  already reflect part of the intended 0.16 direction.
+- `OutputWriter.initSerializeOnly` already keeps scratch buffering local. That
+  matches the desired pure-core boundary.
+- `src/parser/evtx/worker.zig` is still the hottest integration seam because it
+  mixes scheduling, serialization, draining, cancellation, and pipe behavior.
+- The active stabilization work should keep owning `worker.zig`. Documentation
+  in this file exists to lock the target boundary without changing that code in
+  parallel.
+
+### Review checklist for future changes
+
+When touching std.Io-related code, prefer changes that satisfy all of these:
+
+- Entry points initialize runtime-backed I/O exactly once.
+- Parser and renderer APIs receive injected capability rather than constructing
+  their own shell resources.
+- Cancellation has one clear owner and one propagation path.
+- Ordered and unordered concurrent output semantics stay in orchestration code.
+- Core EVTX and BinXML logic stays deterministic and backend-agnostic.
+
 ## Type-Safe Template System
 
 The parser enforces correctness at compile time using wrapper types:

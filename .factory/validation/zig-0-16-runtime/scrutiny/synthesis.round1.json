@@ -1,0 +1,47 @@
+{
+  "milestone": "zig-0-16-runtime",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build test -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build -Dtarget=native -Doptimize=ReleaseFast -Duse-c-alloc=false -Dwith-python=false",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" fmt src/**/*.zig",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 1,
+    "passed": 0,
+    "failed": 1,
+    "failedFeatures": [
+      "declare-zig-0-16-baseline-and-build-path"
+    ]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "declare-zig-0-16-baseline-and-build-path",
+      "severity": "blocking",
+      "description": "`src/main.zig:61` currently converts every `error.WriteFailed` into exit code 0, but `src/parser/evtx/output.zig:105` uses `error.WriteFailed` for any destination flush failure. Non-pipe stdout write/flush failures can therefore be silently reported as success."
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Added `.factory/library/runtime-output-failures.md` to document that `error.WriteFailed` is a generic sink write/flush failure and must be distinguished from true broken-pipe handling.",
+      "sourceFeature": "declare-zig-0-16-baseline-and-build-path"
+    }
+  ],
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [],
+  "previousRound": null
+}

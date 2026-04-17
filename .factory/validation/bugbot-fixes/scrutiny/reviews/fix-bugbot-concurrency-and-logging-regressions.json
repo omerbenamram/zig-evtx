@@ -1,0 +1,22 @@
+{
+  "featureId": "fix-bugbot-concurrency-and-logging-regressions",
+  "reviewedAt": "2026-04-15T21:24:25.886590Z",
+  "commitId": "ab31d99",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "The commit correctly fixes the reported ordered-slot readiness, unordered sink cleanup, verbosity-zero logging behavior, and join-on-worker-error path, but it still leaves active worker threads running on other early-return paths in parseConcurrentWithSink.",
+    "issues": [
+      {
+        "file": "src/parser/evtx/worker.zig",
+        "line": 515,
+        "severity": "blocking",
+        "description": "parseConcurrentWithSink still uses plain `try` on `allocator.create`, `std.Thread.spawn`, and `active.append` while previously spawned workers remain in `active`. If any of those operations fail after workers have started, the function returns before `joinRemainingWorkers`, `shared`/`output_slots` unwind, and the still-running workers keep dereferencing dangling stack pointers. This leaves the feature incomplete for the broader early-worker-cleanup requirement."
+      }
+    ]
+  },
+  "sharedStateObservations": [],
+  "addressesFailureFrom": null,
+  "summary": "Review failed: the feature fixes the four named Bugbot regressions and adds solid regression coverage, but parseConcurrentWithSink still has an unjoined-active-worker early-return path on task allocation/spawn/list-append failures."
+}

@@ -1,0 +1,9 @@
+commands:
+  install: uv venv .venv && uv pip install "ziggy-pydust==0.26.0"
+  build: "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build -Dtarget=native -Doptimize=ReleaseFast -Duse-c-alloc=false -Dwith-python=false"
+  test: "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build test -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false"
+  lint: "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" fmt src/**/*.zig"
+  snapshot: "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build snapshot -Dtarget=native -Doptimize=ReleaseFast -Duse-c-alloc=false"
+  py_test: "make py-test ZIG=\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\""
+
+services: {}

@@ -109,9 +109,9 @@ const XmlClassification = struct {
 const JsonClassification = struct {
     /// Lane is ASCII (0x00-0x7F) - outputs 1 byte
     is_ascii: Mask8,
-    /// Lane is control char (0x00-0x1F) - needs \uXXXX encoding
+    /// Lane is control char (0x00-0x1F) - needs \\uXXXX encoding
     is_control: Mask8,
-    /// Lane needs special JSON escape: " \ \b \f \n \r \t
+    /// Lane needs special JSON escape: \" \\ \\b \\f \\n \\r \\t
     needs_special_escape: Mask8,
     /// Lane needs 2-byte UTF-8 encoding (0x80-0x7FF, non-surrogate)
     is_two_byte: Mask8,
@@ -122,6 +122,10 @@ const JsonClassification = struct {
     /// Lane is a low surrogate (0xDC00-0xDFFF) - ends a pair
     is_low_surrogate: Mask8,
 };
+
+fn maskLane(mask: Mask8, lane: usize) bool {
+    return @as([8]bool, mask)[lane];
+}
 
 /// Classify 8 UTF-16 code units for XML escaping.
 fn classifyXml(v: Vec8u16) XmlClassification {
@@ -377,12 +381,12 @@ pub fn writeUtf16LeXmlEscaped_simd(w: *std.Io.Writer, utf16le: []const u8, num_c
         // === Emission Loop: Process each lane using classification results ===
         var lane: usize = 0;
         while (lane < 8) : (lane += 1) {
-            const code_unit = vec[lane];
+            const code_unit = @as(u16, block[lane * 2]) | (@as(u16, block[lane * 2 + 1]) << 8);
 
             // --- Case 1: ASCII ---
-            if (class.is_ascii[lane]) {
+            if (maskLane(class.is_ascii, lane)) {
                 const c: u8 = @truncate(code_unit);
-                if (class.needs_escape[lane]) {
+                if (maskLane(class.needs_escape, lane)) {
                     // XML escape required
                     try out.writeSlice(xmlEntity(c).?);
                 } else {
@@ -393,25 +397,25 @@ pub fn writeUtf16LeXmlEscaped_simd(w: *std.Io.Writer, utf16le: []const u8, num_c
             }
 
             // --- Case 2: 2-byte UTF-8 (U+0080 - U+07FF) ---
-            if (class.is_two_byte[lane]) {
+            if (maskLane(class.is_two_byte, lane)) {
                 try out.writeArray(2, encode2Byte(code_unit));
                 continue;
             }
 
             // --- Case 3: 3-byte UTF-8 (U+0800 - U+FFFF, non-surrogate) ---
-            if (class.is_three_byte[lane]) {
+            if (maskLane(class.is_three_byte, lane)) {
                 try out.writeArray(3, encode3Byte(code_unit));
                 continue;
             }
 
             // --- Case 4: High Surrogate (start of pair) ---
-            if (class.is_high_surrogate[lane]) {
+            if (maskLane(class.is_high_surrogate, lane)) {
                 // Find the low surrogate
                 var low_surrogate: ?u16 = null;
 
                 if (lane + 1 < 8) {
                     // Low surrogate is in this block
-                    const next_unit = vec[lane + 1];
+                    const next_unit = @as(u16, block[(lane + 1) * 2]) | (@as(u16, block[(lane + 1) * 2 + 1]) << 8);
                     if (next_unit >= 0xDC00 and next_unit <= 0xDFFF) {
                         low_surrogate = next_unit;
                         lane += 1; // Skip the low surrogate in next iteration
@@ -494,16 +498,16 @@ pub fn writeUtf16LeJsonEscaped_simd(w: *std.Io.Writer, utf16le: []const u8, num_
         // === Emission Loop ===
         var lane: usize = 0;
         while (lane < 8) : (lane += 1) {
-            const code_unit = vec[lane];
+            const code_unit = @as(u16, block[lane * 2]) | (@as(u16, block[lane * 2 + 1]) << 8);
 
             // --- Case 1: ASCII ---
-            if (class.is_ascii[lane]) {
+            if (maskLane(class.is_ascii, lane)) {
                 const c: u8 = @truncate(code_unit);
 
-                if (class.needs_special_escape[lane]) {
+                if (maskLane(class.needs_special_escape, lane)) {
                     // Named JSON escape: \", \\, \b, \f, \n, \r, \t
                     try out.writeSlice(jsonEscape(c).?);
-                } else if (class.is_control[lane]) {
+                } else if (maskLane(class.is_control, lane)) {
                     // Control char without named escape → \uXXXX
                     try writeJsonUnicodeEscape(&out, c);
                 } else {
@@ -514,23 +518,23 @@ pub fn writeUtf16LeJsonEscaped_simd(w: *std.Io.Writer, utf16le: []const u8, num_
             }
 
             // --- Case 2: 2-byte UTF-8 ---
-            if (class.is_two_byte[lane]) {
+            if (maskLane(class.is_two_byte, lane)) {
                 try out.writeArray(2, encode2Byte(code_unit));
                 continue;
             }
 
             // --- Case 3: 3-byte UTF-8 ---
-            if (class.is_three_byte[lane]) {
+            if (maskLane(class.is_three_byte, lane)) {
                 try out.writeArray(3, encode3Byte(code_unit));
                 continue;
             }
 
             // --- Case 4: High Surrogate ---
-            if (class.is_high_surrogate[lane]) {
+            if (maskLane(class.is_high_surrogate, lane)) {
                 var low_surrogate: ?u16 = null;
 
                 if (lane + 1 < 8) {
-                    const next_unit = vec[lane + 1];
+                    const next_unit = @as(u16, block[(lane + 1) * 2]) | (@as(u16, block[(lane + 1) * 2 + 1]) << 8);
                     if (next_unit >= 0xDC00 and next_unit <= 0xDFFF) {
                         low_surrogate = next_unit;
                         lane += 1;
@@ -614,9 +618,7 @@ fn buildUtf16Case(alloc: std.mem.Allocator, id: CaseId) ![]u8 {
 }
 
 fn runXmlCase(id: CaseId) !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
+    const alloc = std.testing.allocator;
 
     const bytes = try buildUtf16Case(alloc, id);
     defer alloc.free(bytes);
@@ -640,9 +642,7 @@ fn runXmlCase(id: CaseId) !void {
 }
 
 fn runJsonCase(id: CaseId) !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const alloc = gpa.allocator();
+    const alloc = std.testing.allocator;
 
     const bytes = try buildUtf16Case(alloc, id);
     defer alloc.free(bytes);

@@ -4,6 +4,7 @@ const std = @import("std");
 const binxml = @import("../binxml/mod.zig");
 const logger = @import("../../logger.zig");
 const log = logger.scoped("evtx");
+const runtime = @import("../../runtime.zig");
 
 const format = @import("format.zig");
 const worker = @import("worker.zig");
@@ -43,30 +44,13 @@ pub const EvtxParser = struct {
     }
 
     pub fn parse(self: *EvtxParser, reader: anytype, out: anytype) !void {
-        // Configure logging levels per verbosity
-        switch (self.opts.verbosity) {
-            0 => {},
-            1 => {
-                logger.setModuleLevel("evtx", .info);
-                logger.setModuleLevel("binxml", .warn);
-                log.info("reading file header...", .{});
-            },
-            2 => {
-                logger.setModuleLevel("evtx", .debug);
-                logger.setModuleLevel("binxml", .debug);
-                log.info("reading file header...", .{});
-            },
-            else => {
-                logger.setModuleLevel("evtx", .trace);
-                logger.setModuleLevel("binxml", .trace);
-                log.info("reading file header...", .{});
-            },
-        }
+        runtime.configureVerbosity(self.opts.verbosity);
         const hdr: FileHeader = try FileHeader.read(reader);
 
         var chunk_index: usize = 0;
         var emitted: usize = 0;
         var skipped: usize = 0;
+        var selected_including_skips: usize = 0;
         var failed: usize = 0;
         var ctx = binxml.Context.init(self.allocator);
         defer ctx.deinit();
@@ -84,10 +68,7 @@ pub const EvtxParser = struct {
             ctx.resetPerChunk();
             // Pre-cache common strings from chunk header for faster lookups
             try ctx.preCacheFromChunkHeader(&chunk.buf, &chunk.header.common_string_offsets);
-            // Only enable deepest renderer-specific traces at -vvv
-            if (self.opts.verbosity >= 3) logger.setModuleLevel("binxml", .trace);
             var rec_iter = chunk.records();
-            var selected_including_skips: usize = 0;
             while (try rec_iter.next()) |rec| {
                 if (self.opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
                 // Skip initial records if requested
@@ -105,7 +86,7 @@ pub const EvtxParser = struct {
                     }
                     continue; // keep going to inspect later records and compare outputs
                 };
-                if (out_mut.dest) |dest| try dest.writeAll(bytes);
+                try out_mut.writeSerialized(bytes);
                 emitted += 1;
                 if (self.opts.max_records != 0) {
                     if (self.opts.skip_first > 0) {
@@ -119,8 +100,16 @@ pub const EvtxParser = struct {
         if (self.opts.verbosity >= 1) log.info("done. emitted={d} failed={d}", .{ emitted, failed });
     }
 
-    /// Concurrent parsing entry point: read chunks sequentially, parse in a thread pool, and stream outputs to stdout.
-    pub fn parseConcurrent(self: *EvtxParser, reader: anytype, out_kind: OutKind, num_threads: usize) !void {
-        try worker.parseConcurrent(self.allocator, reader, self.opts, out_kind, num_threads);
+    /// Concurrent parsing entry point: read chunks sequentially, parse in a thread pool, and stream outputs to the provided sink.
+    pub fn parseConcurrent(self: *EvtxParser, io_runtime: worker.IoRuntime, reader: anytype, out_kind: OutKind, num_threads: usize) !void {
+        try worker.parseConcurrent(self.allocator, io_runtime, reader, self.opts, out_kind, num_threads);
+    }
+
+    pub fn collectConcurrent(self: *EvtxParser, reader: anytype, out_kind: OutKind, num_threads: usize) !worker.CollectedOutput {
+        return try worker.collectConcurrentOutput(self.allocator, reader, self.opts, out_kind, num_threads);
+    }
+
+    pub fn collectConcurrentWithFailure(self: *EvtxParser, reader: anytype, out_kind: OutKind, num_threads: usize, fail_after_records: usize, fail_error: anyerror) !worker.CollectedOutput {
+        return try worker.collectConcurrentOutputWithFailure(self.allocator, reader, self.opts, out_kind, num_threads, fail_after_records, fail_error);
     }
 };

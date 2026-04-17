@@ -1,0 +1,38 @@
+{
+  "milestone": "knowledge-import",
+  "round": 3,
+  "status": "pass",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build test -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false",
+      "exitCode": 0
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" build test -Dtarget=native -Doptimize=Debug -Duse-c-alloc=false",
+      "exitCode": 0
+    },
+    "lint": {
+      "passed": true,
+      "command": "\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\" fmt src/**/*.zig",
+      "exitCode": 0
+    }
+  },
+  "reviewsSummary": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [
+    {
+      "observation": "The repo-local zig-abstract-io-migration skill now explicitly exempts knowledge-import-only features from unrelated hard-gate failures already tracked by other features.",
+      "reason": "already-documented"
+    }
+  ],
+  "previousRound": ".factory/validation/knowledge-import/scrutiny/synthesis.json"
+}

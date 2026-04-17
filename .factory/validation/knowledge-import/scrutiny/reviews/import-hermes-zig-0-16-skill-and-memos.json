@@ -1,0 +1,21 @@
+{
+  "featureId": "import-hermes-zig-0-16-skill-and-memos",
+  "reviewedAt": "2026-04-15T20:21:09Z",
+  "commitId": "ecca9a28ed66399e6c8969bac91bac2572c37ca1",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The current repo state shows the Hermes-derived skill and memo imports are present, repo-local, zig-evtx-specific, and reference the explicit Zig 0.16 toolchain path. The original blocking concern from the prior review is no longer valid for this feature because build.zig.zon now belongs to a separate runtime-baseline feature and current scrutiny has already recorded that repo-facing baseline metadata issue outside the scope of this knowledge-import feature.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The worker skill now documents an explicit exception for knowledge-import-only or docs-only features when unrelated repo hard-gate failures are already tracked by another runtime/build feature, which matches how this feature was validated on re-review.",
+      "evidence": "/home/omerba/zig-evtx/.factory/skills/zig-abstract-io-migration/SKILL.md:27-30 \u2014 step 6 says unrelated repo hard-gate failures should be reported but not treated as failure for knowledge-import-only work."
+    }
+  ],
+  "addressesFailureFrom": "/home/omerba/zig-evtx/.factory/validation/knowledge-import/scrutiny/reviews/import-hermes-zig-0-16-skill-and-memos.json",
+  "summary": "Re-reviewed feature import-hermes-zig-0-16-skill-and-memos against current repo state, the transcript skeleton, and commit ecca9a28ed66399e6c8969bac91bac2572c37ca1. The feature now passes milestone scrutiny: the repo-local skill and memo imports satisfy the knowledge-import scope, and the earlier build.zig.zon mismatch has been reassigned to the separate Zig 0.16 runtime-baseline feature rather than blocking this knowledge-import feature."
+}

@@ -1,0 +1,66 @@
+{
+  "groupId": "python-integration",
+  "testedAt": "2026-04-16T06:34:58.038064+00:00",
+  "isolation": {
+    "surface": "Python integration",
+    "repoRoot": "/home/omerba/zig-evtx",
+    "missionDir": "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa",
+    "zig": "/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig",
+    "mode": "single-validator isolation only",
+    "sharedResourcesAllowed": [
+      "repo checkout",
+      ".venv",
+      "Zig cache",
+      "zig-out"
+    ]
+  },
+  "toolsUsed": [
+    "Read",
+    "Execute"
+  ],
+  "assertions": [
+    {
+      "id": "VAL-PY-001",
+      "title": "Python build and test path still works if touched",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Inspect mission guidance and branch diff for Python integration touch points",
+          "expected": "Determine whether Python validation is required for this milestone",
+          "observed": "Python integration was clearly touched in this branch (e.g. pydust.build.zig, src/evtx_pydust_impl.zig, vendor/ziggy-pydust/src/*), so the conditional assertion should be exercised now."
+        },
+        {
+          "action": "Run the supported validation path: make py-test ZIG=\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\"",
+          "expected": "The documented Python build/test flow completes successfully on the Zig 0.16 baseline",
+          "observed": "Command exited 0 after building the editable Python package and running pytest."
+        },
+        {
+          "action": "Review pytest results from the supported flow",
+          "expected": "Python tests pass; known allowed skipped bytes-backed iteration tests do not count as a failure",
+          "observed": "pytest reported 12 passed, 2 skipped in 0.03s; the skipped bytes-backed iteration tests match the known allowed skips from guidance."
+        }
+      ],
+      "commands": [
+        "git -C /home/omerba/zig-evtx diff --name-only origin/main...HEAD",
+        "make py-test ZIG=\"/home/omerba/.local/share/mise/installs/zig/0.16.0/bin/zig\""
+      ],
+      "evidence": {
+        "files": [
+          "integration-followup/python-integration/python-surface-touched.txt",
+          "integration-followup/python-integration/make-py-test.command.txt",
+          "integration-followup/python-integration/make-py-test.stdout.txt",
+          "integration-followup/python-integration/make-py-test.stderr.txt",
+          "integration-followup/python-integration/make-py-test.exit-code.txt",
+          "integration-followup/python-integration/make-py-test.meta.json"
+        ],
+        "commandExitCode": 0,
+        "stdoutSummary": "pytest collected 14 tests and finished with 12 passed, 2 skipped.",
+        "stderrSummary": "uv/bootstrap output showed environment/package installation and editable build steps; no failure diagnostics were present."
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "VAL-PY-001 passed: Python integration was touched in this mission branch, and the supported Zig 0.16 validation path `make py-test` completed successfully with 12 passed and 2 allowed skipped tests."
+}

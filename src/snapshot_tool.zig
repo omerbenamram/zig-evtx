@@ -38,27 +38,28 @@ fn getProjectRoot() []const u8 {
     return ".";
 }
 
-pub fn main() void {
-    const exit_code = run() catch |err| {
+pub fn main(init: std.process.Init) void {
+    const exit_code = run(init) catch |err| {
         // If stdout/stderr is closed (piped to head, etc), exit successfully.
         if (err == error.WriteFailed) return;
         // Error already reported to stderr.
         if (err == error.UnknownTest) std.process.exit(1);
 
         var write_buf: [512]u8 = undefined;
-        var stderr_file = std.fs.File.stderr();
-        var stderr = stderr_file.writer(&write_buf);
+        const stderr_file = std.Io.File.stderr();
+        var stderr = stderr_file.writer(init.io, &write_buf);
         _ = stderr.interface.print("snapshot_test: {s}\n", .{@errorName(err)}) catch {};
-        stderr.interface.flush() catch {};
+        stderr.flush() catch {};
         std.process.exit(1);
     };
     std.process.exit(exit_code);
 }
 
-fn run() !u8 {
-    const allocator = alloc_mod.get();
+fn run(init: std.process.Init) !u8 {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    var args_iter = try std.process.argsWithAllocator(allocator);
+    var args_iter = try init.minimal.args.iterateAllocator(allocator);
     defer args_iter.deinit();
 
     // Skip program name
@@ -73,7 +74,7 @@ fn run() !u8 {
         } else if (std.mem.eql(u8, arg, "--test") or std.mem.eql(u8, arg, "-t")) {
             test_filter = args_iter.next();
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            try printHelp();
+            try printHelp(io);
             return 0;
         }
     }
@@ -94,8 +95,8 @@ fn run() !u8 {
         }
         if (filtered_count == 0) {
             var write_buf: [512]u8 = undefined;
-            var stderr_file = std.fs.File.stderr();
-            var stderr = stderr_file.writer(&write_buf);
+            const stderr_file = std.Io.File.stderr();
+            var stderr = stderr_file.writer(io, &write_buf);
             try stderr.interface.print("Unknown test: {s}\n", .{filter});
             try stderr.interface.writeAll("Available tests: ");
             for (snapshot_tests.tests, 0..) |t, i| {
@@ -103,15 +104,15 @@ fn run() !u8 {
                 try stderr.interface.writeAll(t.name);
             }
             try stderr.interface.writeAll("\n");
-            try stderr.interface.flush();
+            try stderr.flush();
             return error.UnknownTest;
         }
         tests_to_run = filtered_tests[0..filtered_count];
     }
 
     var write_buf: [4096]u8 = undefined;
-    var stdout_file = std.fs.File.stdout();
-    var stdout = stdout_file.writer(&write_buf);
+    const stdout_file = std.Io.File.stdout();
+    var stdout = stdout_file.writer(io, &write_buf);
     const w = &stdout.interface;
 
     try w.writeAll("Running snapshot tests...\n\n");
@@ -208,10 +209,10 @@ fn run() !u8 {
     return if (failed > 0) 1 else 0;
 }
 
-fn printHelp() !void {
+fn printHelp(io: std.Io) !void {
     var write_buf: [1024]u8 = undefined;
-    var stdout_file = std.fs.File.stdout();
-    var stdout = stdout_file.writer(&write_buf);
+    const stdout_file = std.Io.File.stdout();
+    var stdout = stdout_file.writer(io, &write_buf);
     try stdout.interface.writeAll(
         \\snapshot_test - Snapshot-based regression tests for EVTX parser
         \\
@@ -227,5 +228,5 @@ fn printHelp() !void {
         \\  -h, --help        Show this help message
         \\
     );
-    try stdout.interface.flush();
+    try stdout.flush();
 }

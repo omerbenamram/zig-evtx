@@ -10,6 +10,19 @@ pub const __doc__ = "EVTX Python bindings";
 // comptime type introspection walking through the complex evtx type hierarchy.
 const impl = @import("evtx_pydust_impl.zig");
 
+fn initIterFromPythonBytes(
+    storage: *[impl.IterStateSize]u8,
+    data: py.PyObject,
+    format: []const u8,
+    opts: impl.Options,
+) !void {
+    var buffer = try data.getBuffer(Root, py.PyBuffer.Flags.SIMPLE);
+    defer buffer.release();
+
+    const bytes = buffer.buf[0..@intCast(buffer.len)];
+    try impl.initIterFromBytes(storage, bytes, format, opts);
+}
+
 /// Native EVTX iterator exposed to Python via pydust.
 ///
 /// WARNING: This type has a known GC timing issue. When Python uses patterns like
@@ -69,7 +82,7 @@ const IterDef = struct {
     }
 
     pub fn from_bytes(args: struct {
-        data: []const u8,
+        data: py.PyObject,
         format: []const u8,
         skip_first: usize = 0,
         max_records: usize = 0,
@@ -79,7 +92,7 @@ const IterDef = struct {
     }) !*IterDef {
         var self = try py.alloc(Root, IterDef);
         self.* = .{};
-        try impl.initIterFromBytes(&self.state_storage, args.data, args.format, .{
+        try initIterFromPythonBytes(&self.state_storage, args.data, args.format, .{
             .skip_first = args.skip_first,
             .max_records = args.max_records,
             .validate_checksums = args.validate_checksums,

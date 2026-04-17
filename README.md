@@ -5,23 +5,46 @@
 
 ## Features
 
-- **Cross-platform**: Builds on Linux, macOS, and Windows via Zig 0.15
+- **Cross-platform**: Builds on Linux, macOS, and Windows
 - **Multiple outputs**: XML, JSON, and JSON Lines (jsonl)
-- **Concurrent parsing**: Multi-threaded mode for throughput; single-threaded for stable order
+- **Concurrent parsing**: Multi-threaded ordered output by default; add `--unordered` for maximum throughput when record order does not matter
 - **Python bindings**: Lightweight module via `ziggy-pydust` for streaming results
 - **Type-safe template caching**: Templates are parsed once, cached with placeholder markers, and instantiated efficiently
+
+## std.Io architecture direction
+
+The repo is aligning around the Zig 0.16 `std.Io` ownership model.
+
+- Entry points such as the CLI and snapshot tool own `std.Io` initialization,
+  stdout and file-handle setup, and process-facing failure policy.
+- Parser and renderer code stay backend-agnostic and consume injected reader or
+  writer capability.
+- Concurrent execution keeps cancellation, ordered drain, unordered emission,
+  and broken-pipe handling at the parser or runtime-shell boundary.
+- `OutputWriter` keeps scratch buffering local instead of spreading buffering
+  setup across the whole codebase.
+
+See `docs/architecture.md` for the runtime-shell vs pure-core boundary,
+ cancellation ownership, backend strategy, and migration anti-patterns.
 
 ## Quick start
 
 Prerequisites:
 
-- Zig 0.14.1
+- Zig 0.16.0
 - Python available on PATH (used by the build to vendor pydust)
 
 Build the CLI and Python extension:
 
 ```bash
 make build OPT=ReleaseFast
+```
+
+If you keep multiple Zig versions installed, point `make` at your Zig 0.16
+binary explicitly:
+
+```bash
+make build OPT=ReleaseFast ZIG=/path/to/zig-0.16
 ```
 
 Run on a sample file (see `samples/`):
@@ -49,21 +72,23 @@ make jsonl FILE=samples/system.evtx
 ## CLI usage
 
 ```text
-Usage: evtx_dump_zig [-v|-vv|-vvv] [-o xml|json|jsonl] [-s N] [-n N] [-t NUM_THREADS] <file.evtx>
+Usage: evtx_dump_zig [-v|-vv|-vvv] [-o xml|json|jsonl] [-s N] [-n N] [-t NUM_THREADS] [--unordered] <file.evtx>
 
 Options:
   -o <mode>       Output mode: xml | json | jsonl
   -v|-vv|-vvv     Verbosity
   -n N            Limit to first N records
   -s N            Skip first N records
-  -t N            Number of threads (1 enforces stable order)
+  -t N            Number of worker threads (ordered output by default)
+  --unordered     Emit chunks as they finish (faster, non-deterministic order)
   --no-checks     Disable CRC/consistency checks
 ```
 
 Notes:
 
-- With `-t > 1`, records may be emitted out-of-order for maximum throughput.
-- With `-t 1`, records are emitted in order.
+- `-t 1` runs single-threaded and emits records in file order.
+- `-t > 1` still preserves ordered output by default.
+- Add `--unordered` with `-t > 1` to allow chunk-completion order for maximum throughput.
 
 ## Python bindings
 

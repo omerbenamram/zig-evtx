@@ -1,0 +1,21 @@
+{
+  "featureId": "fix-writefailed-exit-semantics",
+  "reviewedAt": "2026-04-15T20:54:33+00:00",
+  "commitId": "51f5c8c66b098350ba4f2f16933757179ab8665c",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The fix addresses the prior blocking issue. `src/main.zig` no longer treats every `error.WriteFailed` as success, and instead routes help, sequential output, flush, and concurrent output failures through `runtime.shouldTreatOutputFileErrorAsCleanExit`, which only allows clean exit for `error.BrokenPipe` or `error.WriteFailed` on pipe-like stdout sinks. The new `src/runtime.zig` regression test covers the intended distinction, and I did not find a remaining blocking issue in the touched surfaces.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The repo setup script exists at `.factory/init.sh`, but it is not executable, so direct invocation fails unless workers know to run it through `sh`; that expectation is not documented in the mission guidance or services manifest.",
+      "evidence": "Fix handoff verification records that the direct `.factory/init.sh` attempt failed and the worker reran `sh \"/home/omerba/zig-evtx/.factory/init.sh\"`; current file mode is `-rw-r--r--` for `/home/omerba/zig-evtx/.factory/init.sh`."
+    }
+  ],
+  "addressesFailureFrom": "/home/omerba/zig-evtx/.factory/validation/zig-0-16-runtime/scrutiny/reviews/declare-zig-0-16-baseline-and-build-path.json",
+  "summary": "Reviewed the prior failure, both relevant commits, the fix handoff, and the fix transcript skeleton. The new runtime helper restores the intended semantics by keeping broken-pipe/closed-socket exits clean while letting generic stdout write failures surface as errors, and the added regression coverage specifically exercises that distinction. I found no remaining blocking issue in the fix."
+}

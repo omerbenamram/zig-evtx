@@ -1,0 +1,56 @@
+{
+  "surface": "knowledge-import",
+  "assertions": [
+    {
+      "id": "VAL-KNOWLEDGE-001",
+      "status": "pass",
+      "reason": "Repo-local Zig 0.16 skill guidance exists under `.factory/skills/` and explicitly directs workers to repo-owned migration/library documents instead of hidden Hermes state.",
+      "evidence": [
+        {
+          "path": "/home/omerba/zig-evtx/.factory/skills/zig-abstract-io-migration/SKILL.md",
+          "lines": "3, 12, 20, 30-33",
+          "summary": "Skill describes Zig 0.16 std.Io migration guidance, requires reading repo-local library docs, marks itself as repo-local guidance, and says imported knowledge must be mirrored into `.factory/library/` or `docs/`."
+        },
+        {
+          "path": "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/knowledge-import/read-knowledge/assertion-evidence.md",
+          "summary": "Collected excerpts for the assigned knowledge assertion review."
+        }
+      ]
+    },
+    {
+      "id": "VAL-KNOWLEDGE-002",
+      "status": "pass",
+      "reason": "Hermes-derived migration memos are stored inside repo-owned library documents, including a general Zig 0.16 migration memo and repo-specific concurrency/architecture guidance.",
+      "evidence": [
+        {
+          "path": "/home/omerba/zig-evtx/.factory/library/zig-0.16-migration.md",
+          "lines": "3, 11, 46",
+          "summary": "General repo-local Zig 0.16 migration memo derived from Hermes research, including explicit std.Io and concurrency ownership guidance."
+        },
+        {
+          "path": "/home/omerba/zig-evtx/.factory/library/architecture.md",
+          "lines": "18, 37-41, 62-64",
+          "summary": "Repo-specific architecture memo records concurrency/runtime invariants and says imported migration/concurrency guidance is preserved in repo docs/library without hidden Hermes state."
+        },
+        {
+          "path": "/home/omerba/zig-evtx/.factory/library/environment.md",
+          "lines": "12",
+          "summary": "Supporting repo-local environment memo pins the Zig 0.16 toolchain path used for mission work and validation."
+        },
+        {
+          "path": "/home/omerba/.factory/missions/4809ebff-a53c-42de-9036-9c53731b11aa/evidence/knowledge-import/read-knowledge/assertion-evidence.md",
+          "summary": "Collected excerpts for the assigned knowledge assertion review."
+        }
+      ]
+    }
+  ],
+  "toolsUsed": [
+    "Read",
+    "LS",
+    "Glob",
+    "Grep"
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Both assigned knowledge-import assertions pass based on repo-local `.factory/skills/` and `.factory/library/` artifacts; no external or hidden Hermes state was needed."
+}
