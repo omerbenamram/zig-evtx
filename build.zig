@@ -66,7 +66,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&test_run.step);
 
     // Benchmarks are temporarily excluded from the default install graph during Zig 0.16 migration.
-    _ = b.dependency("zbench", dep_opts).module("zbench");
     _ = b.step("bench-zbench", "Run zBench microbenchmarks");
     _ = b.step("bench-serialize", "Run serialization microbenchmarks");
 
