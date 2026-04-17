@@ -268,39 +268,33 @@ fn sortJsonlLines(lines: [][]u8) void {
 }
 
 fn collectConcurrentOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions, num_threads: usize) !evtx.worker.CollectedOutput {
-    const Context = struct {
-        allocator: std.mem.Allocator,
-        opts: evtx.ParserOptions,
-        num_threads: usize,
-    };
+    var io_impl = std.Io.Threaded.init(allocator, .{});
+    defer io_impl.deinit();
+    const io = io_impl.io();
 
-    const Runner = struct {
-        fn run(ctx_data: Context, reader: anytype) !evtx.worker.CollectedOutput {
-            var parser = evtx.EvtxParser.init(ctx_data.allocator, ctx_data.opts);
-            return try parser.collectConcurrent(reader, .xml, ctx_data.num_threads);
-        }
-    };
+    var file = try openSample(io);
+    defer file.close(io);
 
-    return withSampleReader(allocator, evtx.worker.CollectedOutput, Runner.run, Context{ .allocator = allocator, .opts = opts, .num_threads = num_threads });
+    var read_buf: [8192]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+
+    var parser = evtx.EvtxParser.init(allocator, opts);
+    return try parser.collectConcurrent(io, &reader, .xml, num_threads);
 }
 
 fn collectConcurrentOutputWithFailure(allocator: std.mem.Allocator, opts: evtx.ParserOptions, num_threads: usize, fail_after_records: usize, fail_error: anyerror) !evtx.worker.CollectedOutput {
-    const Context = struct {
-        allocator: std.mem.Allocator,
-        opts: evtx.ParserOptions,
-        num_threads: usize,
-        fail_after_records: usize,
-        fail_error: anyerror,
-    };
+    var io_impl = std.Io.Threaded.init(allocator, .{});
+    defer io_impl.deinit();
+    const io = io_impl.io();
 
-    const Runner = struct {
-        fn run(ctx_data: Context, reader: anytype) !evtx.worker.CollectedOutput {
-            var parser = evtx.EvtxParser.init(ctx_data.allocator, ctx_data.opts);
-            return try parser.collectConcurrentWithFailure(reader, .xml, ctx_data.num_threads, ctx_data.fail_after_records, ctx_data.fail_error);
-        }
-    };
+    var file = try openSample(io);
+    defer file.close(io);
 
-    return withSampleReader(allocator, evtx.worker.CollectedOutput, Runner.run, Context{ .allocator = allocator, .opts = opts, .num_threads = num_threads, .fail_after_records = fail_after_records, .fail_error = fail_error });
+    var read_buf: [8192]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+
+    var parser = evtx.EvtxParser.init(allocator, opts);
+    return try parser.collectConcurrentWithFailure(io, &reader, .xml, num_threads, fail_after_records, fail_error);
 }
 
 fn sortCollectedById(records: []evtx.worker.EmittedRecord) void {
@@ -509,6 +503,27 @@ test "concurrency: ordered redirected jsonl preserves sequential subset" {
     for (expected.lines.items, actual.lines.items) |want, got| {
         try std.testing.expectEqualStrings(want, got);
     }
+}
+
+test "concurrency: sink failure mid-run cancels workers without leaking records" {
+    // Trigger a sink failure (BrokenPipe-equivalent) AFTER several records have
+    // been emitted, while many more chunks worth of work are still in-flight.
+    // The orchestrator must cancel the intake (which cancels in-flight workers
+    // via deferred Future.cancel), drain any records still buffered in the
+    // per-task and shared queues, and free their bytes so std.testing.allocator
+    // reports zero leaks.
+    const allocator = std.testing.allocator;
+
+    // Ordered mode with max_records well below total: drain stops early and
+    // the orchestrator must tear everything down without leaking.
+    var ordered = try collectConcurrentOutputWithFailure(allocator, .{ .ordered = true }, 4, 4, error.BrokenPipe);
+    defer ordered.deinit();
+    try std.testing.expectEqual(@as(usize, 4), ordered.records.items.len);
+
+    // Same exercise for the unordered single-queue path.
+    var unordered = try collectConcurrentOutputWithFailure(allocator, .{ .ordered = false }, 4, 4, error.BrokenPipe);
+    defer unordered.deinit();
+    try std.testing.expectEqual(@as(usize, 4), unordered.records.items.len);
 }
 
 test "concurrency: unordered redirected jsonl preserves sequential subset record set" {

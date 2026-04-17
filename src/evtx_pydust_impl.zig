@@ -298,11 +298,11 @@ pub fn dumpFileToFile(path: []const u8, out_path: []const u8, fmt: []const u8, o
 
     var out = blk: {
         if (std.mem.eql(u8, fmt, "xml")) {
-            break :blk try OutputWriter.initXml(allocator, &out_writer);
+            break :blk try OutputWriter.initXml(allocator, &out_writer.interface);
         } else if (std.mem.eql(u8, fmt, "json")) {
-            break :blk try OutputWriter.initJson(allocator, &out_writer, .single);
+            break :blk try OutputWriter.initJson(allocator, &out_writer.interface, .single);
         } else if (std.mem.eql(u8, fmt, "jsonl") or std.mem.eql(u8, fmt, "jsonlines")) {
-            break :blk try OutputWriter.initJson(allocator, &out_writer, .lines);
+            break :blk try OutputWriter.initJson(allocator, &out_writer.interface, .lines);
         } else {
             return error.InvalidFormat;
         }

@@ -9,15 +9,29 @@ pub const Level = enum(u8) { err = 1, warn = 2, info = 3, debug = 4, trace = 5 }
 
 var environ_map: ?*const std.process.Environ.Map = null;
 
-/// Mutex protecting writes to module_levels hashmap
-var logger_mutex: std.Io.Mutex = .init;
+/// Spinlock protecting the `module_levels` hashmap and the global level cache.
+///
+/// We deliberately do NOT use `std.Io.Mutex` here, because the logger is a
+/// genuinely cross-cutting concern: it must work without an `Io` instance in
+/// scope (early process startup, arbitrary library code, tests). The previous
+/// implementation reached for `std.Options.debug_threaded_io.?.io()` as a
+/// global fallback, which is the I/O equivalent of grabbing a global allocator
+/// and is exactly the anti-pattern the rest of this codebase is moving away
+/// from.
+///
+/// `std.Thread.Mutex` no longer exists in Zig 0.16, so we use a compact
+/// atomic spinlock instead. The critical sections are tiny (a few StringHashMap
+/// operations) and never await I/O, so spinning is the right trade-off.
+var logger_locked: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
 
 fn lockLogger() void {
-    logger_mutex.lockUncancelable(std.Options.debug_threaded_io.?.io());
+    while (logger_locked.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+        std.atomic.spinLoopHint();
+    }
 }
 
 fn unlockLogger() void {
-    logger_mutex.unlock(std.Options.debug_threaded_io.?.io());
+    logger_locked.store(false, .release);
 }
 
 fn getEnvVarOwned(allocator: std.mem.Allocator, key: []const u8) ?[]u8 {

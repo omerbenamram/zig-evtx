@@ -28,11 +28,8 @@ pub fn shouldTreatOutputErrorAsCleanExitForKind(err: anyerror, maybe_kind: ?std.
     return kind == .named_pipe or kind == .unix_domain_socket;
 }
 
-pub fn shouldTreatOutputFileErrorAsCleanExit(file: std.Io.File, err: anyerror) bool {
-    var threaded = std.Io.Threaded.init(std.heap.smp_allocator, .{});
-    defer threaded.deinit();
-
-    const st = file.stat(threaded.io()) catch return shouldTreatOutputErrorAsCleanExitForKind(err, null);
+pub fn shouldTreatOutputFileErrorAsCleanExit(io: std.Io, file: std.Io.File, err: anyerror) bool {
+    const st = file.stat(io) catch return shouldTreatOutputErrorAsCleanExitForKind(err, null);
     return shouldTreatOutputErrorAsCleanExitForKind(err, st.kind);
 }
 

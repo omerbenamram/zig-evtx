@@ -1,5 +1,24 @@
 # std.Io concurrency and testing implementation plan for zig-evtx
 
+## Status: SUPERSEDED
+
+This plan was written under the assumption that the existing slot-based ordered
+drain would be preserved. It has been superseded by the more aggressive
+redesign in `docs/plans/std.io_idiomatic_redesign_*.plan.md` (and now
+implemented in `src/parser/evtx/worker.zig`), which:
+
+- replaces `std.Thread.spawn` with `io.concurrent` futures;
+- replaces the per-chunk `OutputSlot` (with its atomic `ready` flag) with a
+  `std.Io.Queue(EmittedRecord)` per chunk plus an ordered meta queue
+  threaded to the drain;
+- removes the `cancelled` / `broken_pipe` / `fatal_error` shared atomics in
+  favor of cooperative cancellation via `defer future.cancel(io)`;
+- removes the global `std.Options.debug_threaded_io` fallback from
+  `worker.zig`, `logger.zig`, and `runtime.zig`.
+
+Steps 1, 3, 4, and 5 below are still useful as background; Step 2 is
+historical.
+
 ## Status note
 
 A commit of the current working state is blocked because `/home/omerba/Work/zig-evtx` does not contain a `.git` directory. This plan is saved directly in the repo tree for delegated execution.

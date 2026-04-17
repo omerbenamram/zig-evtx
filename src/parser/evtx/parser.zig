@@ -105,11 +105,11 @@ pub const EvtxParser = struct {
         try worker.parseConcurrent(self.allocator, io_runtime, reader, self.opts, out_kind, num_threads);
     }
 
-    pub fn collectConcurrent(self: *EvtxParser, reader: anytype, out_kind: OutKind, num_threads: usize) !worker.CollectedOutput {
-        return try worker.collectConcurrentOutput(self.allocator, reader, self.opts, out_kind, num_threads);
+    pub fn collectConcurrent(self: *EvtxParser, io: std.Io, reader: anytype, out_kind: OutKind, num_threads: usize) !worker.CollectedOutput {
+        return try worker.collectConcurrentOutput(self.allocator, io, reader, self.opts, out_kind, num_threads);
     }
 
-    pub fn collectConcurrentWithFailure(self: *EvtxParser, reader: anytype, out_kind: OutKind, num_threads: usize, fail_after_records: usize, fail_error: anyerror) !worker.CollectedOutput {
-        return try worker.collectConcurrentOutputWithFailure(self.allocator, reader, self.opts, out_kind, num_threads, fail_after_records, fail_error);
+    pub fn collectConcurrentWithFailure(self: *EvtxParser, io: std.Io, reader: anytype, out_kind: OutKind, num_threads: usize, fail_after_records: usize, fail_error: anyerror) !worker.CollectedOutput {
+        return try worker.collectConcurrentOutputWithFailure(self.allocator, io, reader, self.opts, out_kind, num_threads, fail_after_records, fail_error);
     }
 };

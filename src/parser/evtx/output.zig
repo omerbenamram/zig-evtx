@@ -17,103 +17,55 @@ pub const JsonMode = enum { single, lines };
 
 pub const OutputMode = enum { xml, json_single, json_lines };
 
-/// Non-generic output serializer using concrete std.Io.Writer.
-pub fn IoWriter(comptime Writer: type) type {
-    return struct {
-        value: Writer,
+/// Wraps `std.Io.Writer.Allocating` so it can be the scratch buffer for
+/// serialization. The wrapper exists only to expose a `*std.Io.Writer`
+/// uniformly; callers should otherwise treat it as a thin shim.
+pub const SerializeWriter = struct {
+    value: std.Io.Writer.Allocating,
 
-        const Self = @This();
+    pub fn init(value: std.Io.Writer.Allocating) SerializeWriter {
+        return .{ .value = value };
+    }
 
-        pub fn init(value: Writer) Self {
-            return .{ .value = value };
-        }
+    pub fn writeAll(self: *SerializeWriter, bytes: []const u8) WriterError!void {
+        try self.value.writer.writeAll(bytes);
+    }
 
-        pub fn writeAll(self: *Self, bytes: []const u8) WriterError!void {
-            try self.writer().writeAll(bytes);
-        }
+    pub fn writeByte(self: *SerializeWriter, byte: u8) WriterError!void {
+        try self.value.writer.writeByte(byte);
+    }
 
-        pub fn writeByte(self: *Self, byte: u8) WriterError!void {
-            try self.writer().writeByte(byte);
-        }
-
-        pub fn flush(self: *Self) WriterError!void {
-            if (@hasField(Writer, "writer")) return;
-            try self.value.flush();
-        }
-
-        pub fn writer(self: *Self) *std.Io.Writer {
-            if (@hasField(Writer, "writer")) {
-                return &self.value.writer;
-            }
-            if (@hasField(Writer, "interface")) {
-                return &self.value.interface;
-            }
-            @compileError("Writer must provide writer or interface field");
-        }
-    };
-}
-
-pub const SerializeWriter = IoWriter(std.Io.Writer.Allocating);
+    pub fn writer(self: *SerializeWriter) *std.Io.Writer {
+        return &self.value.writer;
+    }
+};
 
 pub const OutputWriter = struct {
     /// Destination writer for final output. Null in serialize-only mode.
-    dest_ctx: ?*anyopaque,
-    dest_write_all_fn: ?*const fn (*anyopaque, []const u8) WriterError!void,
-    dest_flush_fn: ?*const fn (*anyopaque) WriterError!void,
+    /// Stored as the abstract `*std.Io.Writer`; callers that have a concrete
+    /// `std.Io.File.Writer` should pass `&file_writer.interface`.
+    dest: ?*std.Io.Writer,
     /// Output format mode
     mode: OutputMode,
     /// Scratch writer for serialized output.
     scratch: SerializeWriter,
 
-    pub fn initXml(allocator: std.mem.Allocator, dest: anytype) !OutputWriter {
-        return init(allocator, dest, .xml);
+    pub fn initXml(allocator: std.mem.Allocator, dest: *std.Io.Writer) !OutputWriter {
+        return initWriter(allocator, dest, .xml);
     }
 
-    pub fn initJson(allocator: std.mem.Allocator, dest: anytype, json_mode: JsonMode) !OutputWriter {
-        return init(allocator, dest, if (json_mode == .single) .json_single else .json_lines);
+    pub fn initJson(allocator: std.mem.Allocator, dest: *std.Io.Writer, json_mode: JsonMode) !OutputWriter {
+        return initWriter(allocator, dest, if (json_mode == .single) .json_single else .json_lines);
     }
 
     /// Initialize for serialize-only mode (no destination writer needed).
     pub fn initSerializeOnly(allocator: std.mem.Allocator, mode_: OutputMode) !OutputWriter {
-        return .{
-            .dest_ctx = null,
-            .dest_write_all_fn = null,
-            .dest_flush_fn = null,
-            .mode = mode_,
-            .scratch = .init(try std.Io.Writer.Allocating.initCapacity(allocator, 4096)),
-        };
+        return initWriter(allocator, null, mode_);
     }
 
-    fn init(allocator: std.mem.Allocator, dest: anytype, mode: OutputMode) !OutputWriter {
-        const Dest = @TypeOf(dest);
-        const dest_info = comptime switch (@typeInfo(Dest)) {
-            .pointer => |ptr| blk: {
-                if (ptr.size != .one) @compileError("destination writer must be a single-item pointer");
-                break :blk ptr.child;
-            },
-            else => @compileError("destination writer must be passed by pointer"),
-        };
-
-        const Adapter = struct {
-            fn writeAll(ctx: *anyopaque, bytes: []const u8) WriterError!void {
-                const typed: *dest_info = @ptrCast(@alignCast(ctx));
-                if (comptime @hasField(dest_info, "interface")) {
-                    try typed.interface.writeAll(bytes);
-                } else {
-                    try typed.writeAll(bytes);
-                }
-            }
-
-            fn flush(ctx: *anyopaque) WriterError!void {
-                const typed: *dest_info = @ptrCast(@alignCast(ctx));
-                typed.flush() catch return error.WriteFailed;
-            }
-        };
-
+    fn initWriter(allocator: std.mem.Allocator, dest: ?*std.Io.Writer, mode: OutputMode) !OutputWriter {
         return .{
-            .dest_ctx = @ptrCast(dest),
-            .dest_write_all_fn = Adapter.writeAll,
-            .dest_flush_fn = Adapter.flush,
+            .dest = dest,
             .mode = mode,
             .scratch = .init(try std.Io.Writer.Allocating.initCapacity(allocator, 4096)),
         };
@@ -142,14 +94,12 @@ pub const OutputWriter = struct {
     }
 
     pub fn writeSerialized(self: *OutputWriter, bytes: []const u8) WriterError!void {
-        const write_all = self.dest_write_all_fn orelse return;
-        const dest_ctx = self.dest_ctx orelse return;
-        try write_all(dest_ctx, bytes);
+        const dest = self.dest orelse return;
+        try dest.writeAll(bytes);
     }
 
     pub fn flush(self: *OutputWriter) WriterError!void {
-        const flush_fn = self.dest_flush_fn orelse return;
-        const dest_ctx = self.dest_ctx orelse return;
-        try flush_fn(dest_ctx);
+        const dest = self.dest orelse return;
+        try dest.flush();
     }
 };

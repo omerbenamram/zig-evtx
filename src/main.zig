@@ -90,7 +90,7 @@ fn run(init: std.process.Init) !u8 {
     switch (action) {
         .help => {
             printHelp(io, false) catch |err| {
-                if (runtime.shouldTreatOutputFileErrorAsCleanExit(std.Io.File.stdout(), err)) return 0;
+                if (runtime.shouldTreatOutputFileErrorAsCleanExit(io, std.Io.File.stdout(), err)) return 0;
                 return err;
             };
             return 0;
@@ -126,17 +126,17 @@ fn runCli(allocator: std.mem.Allocator, io: std.Io, opts: CliOptions) !void {
         const stdout_file = std.Io.File.stdout();
         var stdout_writer = stdout_file.writer(io, &write_buf);
         var output = switch (opts.output_mode) {
-            .xml => try evtx.OutputWriter.initXml(allocator, &stdout_writer),
-            .json => try evtx.OutputWriter.initJson(allocator, &stdout_writer, .single),
-            .jsonl => try evtx.OutputWriter.initJson(allocator, &stdout_writer, .lines),
+            .xml => try evtx.OutputWriter.initXml(allocator, &stdout_writer.interface),
+            .json => try evtx.OutputWriter.initJson(allocator, &stdout_writer.interface, .single),
+            .jsonl => try evtx.OutputWriter.initJson(allocator, &stdout_writer.interface, .lines),
         };
         defer output.deinit();
         parser.parse(&reader, &output) catch |e| {
-            if (runtime.shouldTreatOutputFileErrorAsCleanExit(stdout_file, e)) return;
+            if (runtime.shouldTreatOutputFileErrorAsCleanExit(io, stdout_file, e)) return;
             return e;
         };
         output.flush() catch |e| {
-            if (runtime.shouldTreatOutputFileErrorAsCleanExit(stdout_file, e)) return;
+            if (runtime.shouldTreatOutputFileErrorAsCleanExit(io, stdout_file, e)) return;
             return e;
         };
     } else {
@@ -149,7 +149,7 @@ fn runCli(allocator: std.mem.Allocator, io: std.Io, opts: CliOptions) !void {
         var stdout_write_buf: [4096]u8 = undefined;
         var stdout_writer = stdout_file.writer(io, &stdout_write_buf);
         parser.parseConcurrent(.{ .io = io, .stdout_file = &stdout_file, .stdout_writer = &stdout_writer }, &reader, out_kind, num_threads) catch |err| {
-            if (runtime.shouldTreatOutputFileErrorAsCleanExit(stdout_file, err)) return;
+            if (runtime.shouldTreatOutputFileErrorAsCleanExit(io, stdout_file, err)) return;
             return err;
         };
     }
