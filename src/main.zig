@@ -24,7 +24,10 @@ const help_message =
     \\  -n N                Stop after N records (0 = all)
     \\  -s N                Skip first N records
     \\  --no-checks         Disable EVTX checksum validation
-    \\  --carve             Scan all chunks until EOF (ignore header's chunk count)
+    \\  --carve             Dirty-file recovery mode: scan past the header's
+    \\                        num_chunks, skip corrupted chunks, and tolerate
+    \\                        records whose trailing size-repeat disagrees.
+    \\                        Off by default (strict spec parsing).
     \\  --unordered         Output chunks as they complete (faster, non-deterministic order)
     \\  -t NUM_THREADS      Override number of worker threads (default: CPU count)
     \\
@@ -90,7 +93,7 @@ fn run(init: std.process.Init) !u8 {
     switch (action) {
         .help => {
             printHelp(io, false) catch |err| {
-                if (runtime.shouldTreatOutputFileErrorAsCleanExit(std.Io.File.stdout(), err)) return 0;
+                if (runtime.shouldTreatOutputFileErrorAsCleanExit(io, std.Io.File.stdout(), err)) return 0;
                 return err;
             };
             return 0;
@@ -121,35 +124,33 @@ fn runCli(allocator: std.mem.Allocator, io: std.Io, opts: CliOptions) !void {
     var num_threads: usize = opts.threads_opt orelse cpu_count;
     if (num_threads == 0) num_threads = 1;
 
+    const out_mode: evtx.OutputMode = switch (opts.output_mode) {
+        .xml => .xml,
+        .json => .json_single,
+        .jsonl => .json_lines,
+    };
+
     if (num_threads <= 1) {
         var write_buf: [8192]u8 = undefined;
         const stdout_file = std.Io.File.stdout();
         var stdout_writer = stdout_file.writer(io, &write_buf);
-        var output = switch (opts.output_mode) {
-            .xml => try evtx.OutputWriter.initXml(allocator, &stdout_writer),
-            .json => try evtx.OutputWriter.initJson(allocator, &stdout_writer, .single),
-            .jsonl => try evtx.OutputWriter.initJson(allocator, &stdout_writer, .lines),
-        };
-        defer output.deinit();
-        parser.parse(&reader, &output) catch |e| {
-            if (runtime.shouldTreatOutputFileErrorAsCleanExit(stdout_file, e)) return;
+        var serializer = try evtx.Serializer.init(allocator, out_mode);
+        defer serializer.deinit();
+        var sink = evtx.WriterSink.init(&stdout_writer.interface);
+        parser.parse(&reader.interface, &serializer, &sink) catch |e| {
+            if (runtime.shouldTreatOutputFileErrorAsCleanExit(io, stdout_file, e)) return;
             return e;
         };
-        output.flush() catch |e| {
-            if (runtime.shouldTreatOutputFileErrorAsCleanExit(stdout_file, e)) return;
+        sink.flush() catch |e| {
+            if (runtime.shouldTreatOutputFileErrorAsCleanExit(io, stdout_file, e)) return;
             return e;
         };
     } else {
-        const out_kind: evtx.EvtxParser.OutKind = switch (opts.output_mode) {
-            .xml => .xml,
-            .json => .json_single,
-            .jsonl => .json_lines,
-        };
         var stdout_file = std.Io.File.stdout();
         var stdout_write_buf: [4096]u8 = undefined;
         var stdout_writer = stdout_file.writer(io, &stdout_write_buf);
-        parser.parseConcurrent(.{ .io = io, .stdout_file = &stdout_file, .stdout_writer = &stdout_writer }, &reader, out_kind, num_threads) catch |err| {
-            if (runtime.shouldTreatOutputFileErrorAsCleanExit(stdout_file, err)) return;
+        parser.parseConcurrent(.{ .io = io, .stdout_file = &stdout_file, .stdout_writer = &stdout_writer }, &reader.interface, out_mode, num_threads) catch |err| {
+            if (runtime.shouldTreatOutputFileErrorAsCleanExit(io, stdout_file, err)) return;
             return err;
         };
     }

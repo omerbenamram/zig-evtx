@@ -49,41 +49,21 @@ pub const ValueType = enum(u8) {
         return (raw & ARRAY_FLAG) != 0;
     }
 
-    /// Comptime helper to generate type checker functions.
-    fn makeChecker(comptime expected: ValueType) fn (u8) bool {
-        return struct {
-            pub fn check(raw: u8) bool {
-                return baseType(raw) == @intFromEnum(expected);
-            }
-        }.check;
+    /// True if the raw type byte (after stripping the array flag) matches
+    /// `expected`. Replaces 24 individual comptime-generated checker
+    /// functions; only `isBinXml`/`isNull` are kept as named aliases for
+    /// readability at the call sites that actually use them.
+    pub fn is(comptime expected: ValueType, raw: u8) bool {
+        return baseType(raw) == @intFromEnum(expected);
     }
 
-    // Comptime-generated type checkers for each variant
-    pub const isNull = makeChecker(.null);
-    pub const isString = makeChecker(.string);
-    pub const isAnsiString = makeChecker(.ansi_string);
-    pub const isInt8 = makeChecker(.int8);
-    pub const isUint8 = makeChecker(.uint8);
-    pub const isInt16 = makeChecker(.int16);
-    pub const isUint16 = makeChecker(.uint16);
-    pub const isInt32 = makeChecker(.int32);
-    pub const isUint32 = makeChecker(.uint32);
-    pub const isInt64 = makeChecker(.int64);
-    pub const isUint64 = makeChecker(.uint64);
-    pub const isReal32 = makeChecker(.real32);
-    pub const isReal64 = makeChecker(.real64);
-    pub const isBool = makeChecker(.bool);
-    pub const isBinary = makeChecker(.binary);
-    pub const isGuid = makeChecker(.guid);
-    pub const isSizeT = makeChecker(.size_t);
-    pub const isFiletime = makeChecker(.filetime);
-    pub const isSystime = makeChecker(.systime);
-    pub const isSid = makeChecker(.sid);
-    pub const isHexInt32 = makeChecker(.hex_int32);
-    pub const isHexInt64 = makeChecker(.hex_int64);
-    pub const isEvtHandle = makeChecker(.evt_handle);
-    pub const isBinXml = makeChecker(.bin_xml);
-    pub const isEvtXml = makeChecker(.evt_xml);
+    pub fn isNull(raw: u8) bool {
+        return is(.null, raw);
+    }
+
+    pub fn isBinXml(raw: u8) bool {
+        return is(.bin_xml, raw);
+    }
 
     /// Returns the fixed byte size for this value type, or null if variable-length.
     pub fn fixedSize(self: ValueType) ?usize {
@@ -98,16 +78,13 @@ pub const ValueType = enum(u8) {
         };
     }
 
-    /// Returns the fixed byte size for a raw type byte, or null if variable-length.
-    /// Use this when working with raw u8 type codes from binary data.
+    /// Returns the fixed byte size for a raw type byte, or null if
+    /// variable-length / unknown. Uses `std.enums.fromInt` to validate
+    /// the byte falls within `ValueType`, then defers to `fixedSize`.
     pub fn fixedSizeFromRaw(vtype: u8) ?usize {
         const base = baseType(vtype);
-        inline for (std.meta.fields(ValueType)) |field| {
-            if (base == field.value) {
-                return @as(ValueType, @enumFromInt(field.value)).fixedSize();
-            }
-        }
-        return null;
+        const tag = std.enums.fromInt(ValueType, base) orelse return null;
+        return tag.fixedSize();
     }
 };
 
@@ -150,54 +127,51 @@ pub const TemplateDefinitionHeader = struct {
     pub const binary_size: usize = 24;
 };
 
-/// Zero-bit mixin for vtype proxy methods.
-/// Access via the `vt` field: `header.vt.isBinXml()`
-pub fn VTypeMixin(comptime T: type) type {
-    return struct {
-        pub fn isBinXml(self: *const @This()) bool {
-            const parent: *const T = @fieldParentPtr("vt", self);
-            return ValueType.isBinXml(parent.vtype);
-        }
-        pub fn isNull(self: *const @This()) bool {
-            const parent: *const T = @fieldParentPtr("vt", self);
-            return ValueType.isNull(parent.vtype);
-        }
-        pub fn isArray(self: *const @This()) bool {
-            const parent: *const T = @fieldParentPtr("vt", self);
-            return ValueType.isArray(parent.vtype);
-        }
-        pub fn baseType(self: *const @This()) u8 {
-            const parent: *const T = @fieldParentPtr("vt", self);
-            return ValueType.baseType(parent.vtype);
-        }
-        pub fn valueType(self: *const @This()) ?ValueType {
-            const parent: *const T = @fieldParentPtr("vt", self);
-            const raw = ValueType.baseType(parent.vtype);
-            inline for (std.meta.fields(ValueType)) |field| {
-                if (raw == field.value) {
-                    return @as(ValueType, @enumFromInt(field.value));
-                }
-            }
-            return null;
-        }
-    };
-}
-
 pub const ValueTokenHeader = struct {
     token: u8,
     vtype: u8,
-    vt: VTypeMixin(ValueTokenHeader) = .{},
 
     pub const binary_size: usize = 2;
+
+    pub fn isBinXml(self: ValueTokenHeader) bool {
+        return ValueType.isBinXml(self.vtype);
+    }
+    pub fn isNull(self: ValueTokenHeader) bool {
+        return ValueType.isNull(self.vtype);
+    }
+    pub fn isArray(self: ValueTokenHeader) bool {
+        return ValueType.isArray(self.vtype);
+    }
+    pub fn baseType(self: ValueTokenHeader) u8 {
+        return ValueType.baseType(self.vtype);
+    }
+    pub fn valueType(self: ValueTokenHeader) ?ValueType {
+        return std.enums.fromInt(ValueType, ValueType.baseType(self.vtype));
+    }
 };
 
 pub const SubstitutionHeader = struct {
     token: u8,
     id: u16,
     vtype: u8,
-    vt: VTypeMixin(SubstitutionHeader) = .{},
 
     pub const binary_size: usize = 4;
+
+    pub fn isBinXml(self: SubstitutionHeader) bool {
+        return ValueType.isBinXml(self.vtype);
+    }
+    pub fn isNull(self: SubstitutionHeader) bool {
+        return ValueType.isNull(self.vtype);
+    }
+    pub fn isArray(self: SubstitutionHeader) bool {
+        return ValueType.isArray(self.vtype);
+    }
+    pub fn baseType(self: SubstitutionHeader) u8 {
+        return ValueType.baseType(self.vtype);
+    }
+    pub fn valueType(self: SubstitutionHeader) ?ValueType {
+        return std.enums.fromInt(ValueType, ValueType.baseType(self.vtype));
+    }
 };
 
 pub const CharRefHeader = packed struct {

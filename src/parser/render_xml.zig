@@ -73,43 +73,46 @@ fn renderOpenTagStart(element: *const IR.Element, writer: *std.Io.Writer, indent
 // Content Rendering
 // ============================================================================
 
-/// Render IR nodes to XML. CData handling differs by context:
+/// Render a single IR node to XML. CData handling differs by context:
 /// - In attributes: CData is XML-escaped (no CDATA wrapper allowed in attributes)
 /// - In element content: CData uses <![CDATA[...]]> wrapper
-fn renderNodes(nodes: []const IR.Node, writer: *std.Io.Writer, comptime in_attribute: bool) WriterError!void {
-    for (nodes) |node| {
-        switch (node) {
-            .Text => |text| try util.writeUtf16LeXmlEscaped(writer, text.utf16, text.num_chars),
-            .Value => |val| try vf.formatValueXmlFromRaw(writer, val.vtype, val.bytes),
-            .CharRef => |charref| try writer.print("&#{d};", .{charref}),
-            .EntityRef => |name| {
-                try writer.writeByte('&');
-                try writeNameXml(name, writer);
-                try writer.writeByte(';');
-            },
-            .CData => |cdata| {
-                if (in_attribute) {
-                    // Attributes cannot contain CDATA sections - escape instead
-                    try util.writeUtf16LeXmlEscaped(writer, cdata.utf16, cdata.num_chars);
-                } else {
-                    try writer.writeAll("<![CDATA[");
-                    try util.writeUtf16LeRawToUtf8(writer, cdata.utf16, cdata.num_chars);
-                    try writer.writeAll("]]>");
-                }
-            },
-            .PITarget => |name| {
-                try writer.writeAll("<?");
-                try writeNameXml(name, writer);
-            },
-            .PIData => |pidata| {
-                try writer.writeByte(' ');
-                try util.writeUtf16LeRawToUtf8(writer, pidata.utf16, pidata.num_chars);
-                try writer.writeAll("?>");
-            },
-            .Element => {},
-            .Placeholder => unreachable, // ElementTree guarantees no placeholders
-        }
+fn renderNode(node: IR.Node, writer: *std.Io.Writer, comptime in_attribute: bool) WriterError!void {
+    switch (node) {
+        .Text => |text| try util.writeUtf16LeXmlEscaped(writer, text.utf16, text.num_chars),
+        .Value => |val| try vf.formatValueXmlFromRaw(writer, val.vtype, val.bytes),
+        .CharRef => |charref| try writer.print("&#{d};", .{charref}),
+        .EntityRef => |name| {
+            try writer.writeByte('&');
+            try writeNameXml(name, writer);
+            try writer.writeByte(';');
+        },
+        .CData => |cdata| {
+            if (in_attribute) {
+                // Attributes cannot contain CDATA sections - escape instead
+                try util.writeUtf16LeXmlEscaped(writer, cdata.utf16, cdata.num_chars);
+            } else {
+                try writer.writeAll("<![CDATA[");
+                try util.writeUtf16LeRawToUtf8(writer, cdata.utf16, cdata.num_chars);
+                try writer.writeAll("]]>");
+            }
+        },
+        .PITarget => |name| {
+            try writer.writeAll("<?");
+            try writeNameXml(name, writer);
+        },
+        .PIData => |pidata| {
+            try writer.writeByte(' ');
+            try util.writeUtf16LeRawToUtf8(writer, pidata.utf16, pidata.num_chars);
+            try writer.writeAll("?>");
+        },
+        .Element => {},
+        .Placeholder => unreachable, // ElementTree guarantees no placeholders
     }
+}
+
+/// Render a slice of IR nodes; thin loop over `renderNode`.
+fn renderNodes(nodes: []const IR.Node, writer: *std.Io.Writer, comptime in_attribute: bool) WriterError!void {
+    for (nodes) |node| try renderNode(node, writer, in_attribute);
 }
 
 // ============================================================================
@@ -147,7 +150,7 @@ fn renderElementIRXml(element: *const IR.Element, writer: *std.Io.Writer, indent
             },
             else => {
                 try writeSpaces(writer, indent + 2);
-                try renderNodes(&[_]IR.Node{node}, writer, false);
+                try renderNode(node, writer, false);
                 try writer.writeByte('\n');
             },
         }

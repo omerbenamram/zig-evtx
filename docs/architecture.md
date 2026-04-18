@@ -176,24 +176,73 @@ writer, and option state down into parsing and rendering code.
   paths.
 - They should not re-derive a global runtime internally.
 
+### Concurrent worker engine
+
+`src/parser/evtx/worker.zig` runs the concurrent parser as a small graph of
+`std.Io` futures and queues; there is no `std.Thread.spawn`, no shared
+cancellation flag, and no hand-rolled output slot.
+
+```
+                 ┌──────────────┐
+                 │ orchestrator │   parseConcurrentWithSink
+                 │  (foreground)│
+                 └──┬────────┬──┘
+   io.concurrent ───┘        └─── io.concurrent
+                 │                │
+          ┌──────▼─────┐    ┌─────▼─────┐
+          │   intake   │    │   drain   │
+          │  (future)  │    │  (future) │
+          └──────┬─────┘    └─────▲─────┘
+   io.concurrent │                │
+       per chunk│           ordered: meta queue
+        ┌───────▼────────┐   ┌──────────────────┐
+        │ worker future  │──►│ Io.Queue per task│──► drain reads in
+        │  + per-chunk   │   │  (RecordQueue)   │    spawn order
+        │  RecordQueue   │   └──────────────────┘
+        └────────────────┘
+                          unordered: single shared
+                          Io.Queue(EmittedRecord)
+```
+
+Key invariants:
+
+- **No global I/O fallback.** `SharedState.io` is a required field threaded
+  from the entrypoint. `std.Options.debug_threaded_io` is not referenced
+  anywhere outside of `logger.zig`'s historical comment.
+- **Cancellation is implicit.** Every spawn site uses
+  `defer _ = future.cancel(io) catch {}`. There is no `cancelled` /
+  `broken_pipe` / `fatal_error` atomic and no `setFatal` helper. Errors
+  propagate by being returned from `Future.await` (or `Future.cancel`,
+  which is await-equivalent).
+- **Backpressure via queue capacity.** Per-task queues are 16 records;
+  the unordered shared queue is 128. Workers block on `putOne` if the
+  drain falls behind.
+- **Ordered drain reads `tasks[i].queue` in spawn order via the meta
+  queue**, so output is byte-for-byte equivalent to sequential parsing
+  even though chunks are processed in parallel.
+
 ### Cancellation ownership
 
-Cancellation in zig-evtx should be single-owner and top-down.
+Cancellation in zig-evtx is single-owner and top-down. The orchestrator in
+`worker.zig` (`runOrchestratedConcurrent`) decides when the pipeline stops:
 
 - The entrypoint chooses the high-level stop conditions: CLI record limit,
   explicit cancellation, process write failure, or broken pipe.
-- The orchestration layer translates those conditions into worker stop signals
-  and ordered-drain termination.
-- The pure parser core stays cancellation-aware only through return paths and
-  bounded work units. It should not own shared cancellation state.
+- The orchestration layer awaits the drain future first; if it returns early
+  (max_records reached) or with a sink error (broken pipe, write failure), the
+  orchestrator calls `intake_future.cancel(io)` which cascades through
+  intake's deferred `Future.cancel` calls on every in-flight worker. Workers
+  unblock from any `Queue.putOne` via `error.Canceled`.
+- The pure parser core stays cancellation-aware only through return paths
+  and bounded work units. It does not own shared cancellation state.
 
-For concurrent execution this implies:
+For concurrent execution this means:
 
 - `max_records` belongs to orchestration, because it is an emission policy.
-- broken-pipe and write-failure handling belong at the shell or parser
-  boundary, because they are properties of the active sink.
-- worker threads should observe one explicit cancellation source rather than
-  mix local flags, implicit runtime state, and shell-specific error handling.
+- Broken-pipe and write-failure handling belong at the orchestration seam,
+  where the active sink's `kind` is known via `runtime.shouldTreatOutputErrorAsCleanExitForKind`.
+- Workers themselves are oblivious: they push records to a queue and let
+  cancellation propagate through `try` returns.
 
 ### Backend strategy
 
@@ -217,27 +266,36 @@ Practical rule:
 ### Anti-patterns to avoid during the Zig 0.16 migration
 
 - Initializing or looking up std.Io runtime state deep inside `worker.zig`,
-  renderers, or parsing helpers.
+  renderers, or parsing helpers. Use `SharedState.io` (or an explicit `io`
+  parameter) instead.
 - Letting parser internals depend on process stdout or stderr ownership.
 - Reintroducing 0.15-style `.interface` probing or multiple reader and writer
-  shape fallbacks in core code.
+  shape fallbacks in core code. `OutputWriter` now stores `?*std.Io.Writer`
+  directly; do not regress to `?*anyopaque` adapters.
 - Creating extra buffering layers whose only job is to count bytes or mimic old
   generic wrappers.
 - Encoding broken-pipe behavior directly into pure rendering logic.
+- Reintroducing `std.atomic.Value(bool)` flags for "is cancelled" / "is
+  broken pipe" / "fatal error". Use `defer future.cancel(io) catch {}` and
+  let errors propagate through `Future.await`.
+- Calling `std.Thread.spawn` directly. Use `io.concurrent` so the parser
+  remains portable across `std.Io` implementations (threaded today, possibly
+  io_uring + coroutines later).
 - Making concurrency tests rely only on shell pipelines when a controlled sink
   can be injected at the orchestration seam.
 
-### Current repo read, relevant to this boundary
+### Current repo state, relevant to this boundary
 
-- `src/parser/evtx/output.zig`, `src/main.zig`, and `src/snapshot_tool.zig`
-  already reflect part of the intended 0.16 direction.
-- `OutputWriter.initSerializeOnly` already keeps scratch buffering local. That
-  matches the desired pure-core boundary.
-- `src/parser/evtx/worker.zig` is still the hottest integration seam because it
-  mixes scheduling, serialization, draining, cancellation, and pipe behavior.
-- The active stabilization work should keep owning `worker.zig`. Documentation
-  in this file exists to lock the target boundary without changing that code in
-  parallel.
+- `src/parser/evtx/output.zig` stores `?*std.Io.Writer` directly. Callers
+  with a concrete `std.Io.File.Writer` pass `&file_writer.interface`.
+- `src/parser/evtx/worker.zig` has been redesigned around `io.concurrent`
+  futures and `std.Io.Queue` for record handoff. `SharedState` no longer
+  contains `cancelled`, `broken_pipe`, or `fatal_error`.
+- `src/logger.zig` uses a small atomic spinlock instead of a global I/O
+  mutex, breaking the cross-cutting dependency on
+  `std.Options.debug_threaded_io`.
+- `src/runtime.zig`'s `shouldTreatOutputFileErrorAsCleanExit` takes
+  `io: std.Io` as a parameter rather than building its own `Threaded`.
 
 ### Review checklist for future changes
 

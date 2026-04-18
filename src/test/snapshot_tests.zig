@@ -104,14 +104,14 @@ fn getRecordById(io: std.Io, allocator: std.mem.Allocator, evtx_path: []const u8
     var reader = file.reader(io, &read_buf);
 
     // Read file header
-    const hdr = try evtx.FileHeader.read(&reader);
+    const hdr = try evtx.FileHeader.read(&reader.interface);
     _ = hdr; // We'll iterate all chunks in carve mode
 
-    // Create an output writer to serialize records
-    var out = switch (format) {
-        .xml => try evtx.OutputWriter.initSerializeOnly(allocator, .xml),
-        .json => try evtx.OutputWriter.initSerializeOnly(allocator, .json_lines),
-    };
+    // Create a serializer for record output
+    var out = try evtx.Serializer.init(allocator, switch (format) {
+        .xml => .xml,
+        .json => .json_lines,
+    });
     defer out.deinit();
 
     // Create context for parsing
@@ -120,14 +120,15 @@ fn getRecordById(io: std.Io, allocator: std.mem.Allocator, evtx_path: []const u8
 
     // Read chunks until EOF or we find the record
     while (true) {
-        const chunk = evtx.Chunk.read(&reader) catch |e| switch (e) {
+        const chunk = evtx.Chunk.read(allocator, &reader.interface) catch |e| switch (e) {
             error.EndOfStream => break,
             else => return e,
         };
+        defer chunk.deinit();
 
         // Reset context for each chunk and pre-cache common strings
         ctx.resetPerChunk();
-        try ctx.preCacheFromChunkHeader(&chunk.buf, &chunk.header.common_string_offsets);
+        try ctx.preCacheFromChunkHeader(chunk.buf, &chunk.header.common_string_offsets);
 
         var rec_iter = chunk.records();
         while (try rec_iter.next()) |rec| {

@@ -100,6 +100,18 @@ Clone + Resolve approach is **1.65x faster** than re-parsing templates:
 - Each instance: clone tree + resolve placeholders (mostly memcpy)
 - Avoids repeated token dispatch and parsing overhead
 
+### Concurrent worker engine (`src/parser/evtx/worker.zig`)
+
+- Workers and the chunk-reader run as `io.concurrent` futures, not raw
+  `std.Thread.spawn`. This keeps the parser portable across `std.Io`
+  implementations.
+- Output handoff uses `std.Io.Queue(EmittedRecord)`: one per chunk in
+  ordered mode (chained through a meta queue to preserve order) or one
+  shared queue in unordered mode.
+- Cancellation is implicit via `defer future.cancel(io) catch {}` at every
+  spawn site. There is no shared `cancelled` / `broken_pipe` / `fatal_error`
+  atomic; errors propagate through `Future.await`.
+
 ## Current State
 
 The parser implements basic EVTX file and chunk parsing with partial Binary XML support. See TODO.md for pending implementation items including:

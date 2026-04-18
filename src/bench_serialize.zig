@@ -16,14 +16,14 @@ const binxml = @import("parser/binxml/mod.zig");
 const EventRecordRaw = format.EventRecordRaw;
 const Chunk = format.Chunk;
 const FileHeader = format.FileHeader;
-const OutputWriter = output.OutputWriter;
+const Serializer = output.Serializer;
 
 // ============================================================================
 // Global Fixture Data
 // ============================================================================
 
-/// Store chunk buffers (64KB each). Records reference these.
-var g_chunk_bufs: std.ArrayList([65536]u8) = undefined;
+/// Store chunk buffers (64KB each, heap-allocated). Records reference these.
+var g_chunk_bufs: std.ArrayList([]u8) = undefined;
 
 /// Pre-parsed records ready for serialization benchmarking.
 var g_records: std.ArrayList(EventRecordRaw) = undefined;
@@ -58,7 +58,7 @@ fn beforeAll() void {
     var reader = file.reader(&read_buf);
 
     // Read file header
-    _ = FileHeader.read(&reader) catch |err| {
+    _ = FileHeader.read(&reader.interface) catch |err| {
         std.debug.print("Failed to read file header: {}\n", .{err});
         @panic("Cannot read file header");
     };
@@ -66,38 +66,28 @@ fn beforeAll() void {
     // Read chunks and collect records until we have enough
     var records_collected: usize = 0;
     while (records_collected < NUM_RECORDS) {
-        const chunk = Chunk.read(&reader) catch |err| {
+        const chunk = Chunk.read(g_alloc, &reader.interface) catch |err| {
             if (err == error.EndOfStream) break;
             std.debug.print("Failed to read chunk: {}\n", .{err});
             break;
         };
 
-        // Store chunk buffer (records will reference it)
+        // Record the chunk's owned buffer. Records below reference it.
         const chunk_idx = g_chunk_bufs.items.len;
         g_chunk_bufs.append(g_alloc, chunk.buf) catch @panic("alloc");
-
-        // Get pointer to the stored chunk buffer
-        const stored_buf: *const [65536]u8 = &g_chunk_bufs.items[chunk_idx];
-
-        // Re-parse chunk header from stored buffer to get iterator
-        const stored_chunk = Chunk{
-            .header = format.ChunkHeader.parse(stored_buf) catch @panic("chunk parse"),
-            .buf = stored_buf.*,
-        };
+        const stored_buf: []const u8 = g_chunk_bufs.items[chunk_idx];
 
         // Collect records from this chunk
-        var iter = stored_chunk.records();
+        var iter = chunk.records();
         while (iter.next() catch |err| {
             std.debug.print("Record iterator error: {}\n", .{err});
             @panic("record iterator failed");
         }) |rec| {
-            // Calculate offset of binxml slice within chunk buffer
-            const binxml_offset = @intFromPtr(rec.binxml.ptr) - @intFromPtr(rec.chunk_buf);
-            // Create record pointing to our stored buffer
+            const binxml_offset = @intFromPtr(rec.binxml.ptr) - @intFromPtr(rec.chunk_buf.ptr);
             const stored_rec = EventRecordRaw{
                 .identifier = rec.identifier,
                 .written_time = rec.written_time,
-                .binxml = g_chunk_bufs.items[chunk_idx][binxml_offset..][0..rec.binxml.len],
+                .binxml = stored_buf[binxml_offset..][0..rec.binxml.len],
                 .chunk_buf = stored_buf,
             };
             g_records.append(g_alloc, stored_rec) catch @panic("alloc");
@@ -121,9 +111,9 @@ fn bench_serialize_xml(_: std.mem.Allocator) void {
     var ctx = binxml.Context.init(g_alloc);
     defer ctx.deinit();
 
-    var writer = OutputWriter.initSerializeOnly(g_alloc, .xml) catch |err| {
-        std.debug.print("OutputWriter.initSerializeOnly(xml) failed: {s}\n", .{@errorName(err)});
-        @panic("initSerializeOnly failed");
+    var writer = Serializer.init(g_alloc, .xml) catch |err| {
+        std.debug.print("Serializer.init(xml) failed: {s}\n", .{@errorName(err)});
+        @panic("Serializer.init failed");
     };
     defer writer.deinit();
 
@@ -140,9 +130,9 @@ fn bench_serialize_json(_: std.mem.Allocator) void {
     var ctx = binxml.Context.init(g_alloc);
     defer ctx.deinit();
 
-    var writer = OutputWriter.initSerializeOnly(g_alloc, .json_lines) catch |err| {
-        std.debug.print("OutputWriter.initSerializeOnly(json) failed: {s}\n", .{@errorName(err)});
-        @panic("initSerializeOnly failed");
+    var writer = Serializer.init(g_alloc, .json_lines) catch |err| {
+        std.debug.print("Serializer.init(json) failed: {s}\n", .{@errorName(err)});
+        @panic("Serializer.init failed");
     };
     defer writer.deinit();
 

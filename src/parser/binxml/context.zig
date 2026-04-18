@@ -184,15 +184,15 @@ fn resolveSingleValue(
     // String types (0x01) become Text nodes for proper XML escaping
     if (base_type == @intFromEnum(types.ValueType.string)) {
         var num_chars = val.data.len / 2;
-        // Remove null terminator
+        // Remove null terminator. `num_chars > 0` implies `data.len >= 2`.
         if (num_chars > 0) {
-            const last_char = value_reader.readValue(u16, val.data[val.data.len - 2 ..]) orelse unreachable;
+            const last_char = std.mem.readInt(u16, val.data[val.data.len - 2 ..][0..2], .little);
             if (last_char == 0) num_chars -= 1;
         }
         // Trim trailing spaces (0x0020 in UTF-16LE) to match Rust evtx_dump behavior
         while (num_chars > 0) {
             const pos = (num_chars - 1) * 2;
-            const ch = value_reader.readValue(u16, val.data[pos..]) orelse unreachable;
+            const ch = std.mem.readInt(u16, val.data[pos..][0..2], .little);
             if (ch != 0x0020) break;
             num_chars -= 1;
         }
@@ -234,45 +234,51 @@ fn resolveArrayValue(
 
 /// Shared parsing context for BinXML processing.
 ///
-/// Manages per-chunk state including template caches, name caches, and a scoped
-/// arena allocator. All chunk-scoped allocations use the arena, which is reset
-/// atomically between chunks via `resetPerChunk()`.
+/// All chunk-scoped allocations — IR elements, converted names, and the two
+/// cache hash maps themselves — live in a single per-chunk arena. Advancing
+/// to a new chunk is therefore a single `arena.reset(.retain_capacity)`: the
+/// caches' hash map storage, the template IR they pointed into, and all name
+/// strings all become live-dead in lock-step, which makes the lifetime
+/// invariant ("caches are arena-scoped") impossible to get wrong.
+///
+/// Callers must invoke `resetPerChunk` before any `getOrReadName` /
+/// `preCacheFromChunkHeader` / template-cache lookup, including on the first
+/// chunk. This binds the two hash maps to the arena for the first time.
 pub const Context = struct {
-    /// Backing allocator for long-lived allocations (cache hash maps).
+    /// Backing allocator handed to the arena.
     allocator: std.mem.Allocator,
-    /// Arena for chunk-scoped allocations (IR elements, names, etc.).
+    /// Arena for all chunk-scoped allocations, including the cache maps
+    /// below.
     arena: std.heap.ArenaAllocator,
-    /// Template definition cache: GUID -> parsed Template with Placeholder nodes.
-    /// The GUID uniquely identifies each template definition.
-    cache: std.AutoHashMap([16]u8, Template),
-    /// Name cache: offset -> pre-converted UTF-8 string.
-    name_cache: std.AutoHashMap(u32, NameCacheEntry),
+    /// Template definition cache: GUID -> parsed Template with Placeholder
+    /// nodes. Lifetime: arena. Valid between `resetPerChunk` calls.
+    cache: std.AutoHashMap([16]u8, Template) = undefined,
+    /// Name cache: offset -> pre-converted UTF-8 string. Lifetime: arena.
+    /// Valid between `resetPerChunk` calls.
+    name_cache: std.AutoHashMap(u32, NameCacheEntry) = undefined,
 
-    /// Creates a new context with the given backing allocator.
+    /// Creates a new context. The template/name caches are left `undefined`
+    /// until the first `resetPerChunk`, which binds them to the arena.
     pub fn init(allocator: std.mem.Allocator) Context {
         return .{
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
-            .cache = std.AutoHashMap([16]u8, Template).init(allocator),
-            .name_cache = std.AutoHashMap(u32, NameCacheEntry).init(allocator),
         };
     }
 
-    /// Releases all resources held by this context.
+    /// Releases the arena, which in turn frees the hash maps and every
+    /// arena-allocated name / IR element in one step.
     pub fn deinit(self: *Context) void {
-        self.cache.deinit();
-        self.name_cache.deinit();
         self.arena.deinit();
     }
 
-    /// Resets chunk-local state for processing a new chunk.
-    ///
-    /// Clears all caches and resets the arena allocator while retaining
-    /// hash map capacity to avoid repeated allocations.
+    /// Starts a fresh per-chunk lifetime. All previously cached templates
+    /// and names are invalidated along with the arena memory they lived in.
     pub fn resetPerChunk(self: *Context) void {
-        self.cache.clearRetainingCapacity();
-        self.name_cache.clearRetainingCapacity();
         _ = self.arena.reset(.retain_capacity);
+        const arena_alloc = self.arena.allocator();
+        self.cache = std.AutoHashMap([16]u8, Template).init(arena_alloc);
+        self.name_cache = std.AutoHashMap(u32, NameCacheEntry).init(arena_alloc);
     }
 
     pub fn getOrReadName(self: *Context, chunk: []const u8, off_u32: u32) ParseError!IR.Name {
@@ -293,10 +299,12 @@ pub const Context = struct {
         if (r.rem() < byte_len) return BinXmlError.UnexpectedEof;
         const str_start = r.pos;
 
-        // Adjust length for trailing nulls if necessary
+        // Adjust length for trailing nulls if necessary. `byte_len >= 2`
+        // and the `r.rem() < byte_len` check above guarantee the 2-byte
+        // window at `str_start + byte_len - 2` is in range.
         var take_chars = num_chars;
         if (byte_len >= 2) {
-            const last = value_reader.readValue(u16, chunk[str_start + byte_len - 2 ..]) orelse unreachable;
+            const last = std.mem.readInt(u16, chunk[str_start + byte_len - 2 ..][0..2], .little);
             if (last == 0 and take_chars > 0) take_chars -= 1;
         }
 

@@ -1,4 +1,25 @@
-//! Concurrent EVTX parsing with explicit std.Thread workers.
+//! Concurrent EVTX parsing built on Zig 0.16 std.Io primitives.
+//!
+//! Architecture:
+//! - A fixed pool of `worker_limit` long-lived worker futures. Each worker
+//!   owns its `Serializer` and `Context` and reuses them across every chunk
+//!   it processes, so the allocator never sees per-chunk setup cost.
+//! - A fixed pool of `Buffer`s (double-buffered: `2 * worker_limit`). Each
+//!   `Buffer` holds the serialised bytes of one chunk plus `RecordSpan`
+//!   metadata. Workers rent a `Buffer` from a free-list queue, fill it, and
+//!   publish a `ChunkBatch` pointing at it. The drain emits the spans and
+//!   returns the `Buffer` to the free-list.
+//! - Three `std.Io.Queue`s thread the stages together: intake→workers
+//!   (`task_queue`), workers→drain (`batch_queue`), drain→workers
+//!   (`free_list`).
+//! - Cancellation is cooperative via `Future.cancel` from the orchestrator.
+//!   Early-exit (max_records reached, sink error) closes the queues, which
+//!   causes any blocked `putOne` / `getOne` to return `error.Closed`; workers
+//!   and intake then unwind cleanly.
+//! - Buffer memory is owned by the orchestrator for the entire parse. The
+//!   free-list queue only passes around `*Buffer` pointers, so "orphaned"
+//!   buffers (e.g. a worker holding one when the free-list closes) never
+//!   leak — the orchestrator's teardown deinits every buffer in the pool.
 
 const std = @import("std");
 const binxml = @import("../binxml/mod.zig");
@@ -9,13 +30,22 @@ const runtime = @import("../../runtime.zig");
 const format = @import("format.zig");
 const output = @import("output.zig");
 const parser_mod = @import("parser.zig");
+const err_mod = @import("../err.zig");
 
 pub const FileHeader = format.FileHeader;
 pub const Chunk = format.Chunk;
-pub const OutputWriter = output.OutputWriter;
+pub const Serializer = output.Serializer;
 pub const ParserOptions = parser_mod.ParserOptions;
 pub const OutKind = output.OutputMode;
 pub const EventRecordRaw = format.EventRecordRaw;
+
+/// Errors the worker pipeline (parse + publish) can surface. Sink-side
+/// functions still return `anyerror!void` because user-supplied sinks
+/// (Python bindings, test stubs) can fail with arbitrary errors.
+pub const WorkerError = err_mod.RenderError ||
+    std.Io.Cancelable ||
+    std.mem.Allocator.Error ||
+    error{Closed};
 
 pub const IoRuntime = struct {
     io: std.Io,
@@ -23,35 +53,42 @@ pub const IoRuntime = struct {
     stdout_writer: *std.Io.File.Writer,
 };
 
+// ---------------------------------------------------------------------------
+// Public collect API (unchanged surface for tests and Python bindings)
+// ---------------------------------------------------------------------------
+
+/// A single serialized record with heap-owned bytes. Only materialised on the
+/// `collectConcurrentOutput*` paths (tests, bindings). The stdout drain
+/// writes spans directly and never allocates an `EmittedRecord`.
 pub const EmittedRecord = struct {
     identifier: u64,
     bytes: []u8,
-};
+    allocator: std.mem.Allocator,
 
-pub fn deinitEmittedRecords(allocator: std.mem.Allocator, records: []const EmittedRecord) void {
-    for (records) |record| allocator.free(record.bytes);
-}
+    pub fn init(allocator: std.mem.Allocator, identifier: u64, bytes: []const u8) !EmittedRecord {
+        const owned = try allocator.dupe(u8, bytes);
+        return .{ .identifier = identifier, .bytes = owned, .allocator = allocator };
+    }
+
+    pub fn deinit(self: *const EmittedRecord) void {
+        self.allocator.free(self.bytes);
+    }
+};
 
 pub fn duplicateEmittedRecord(allocator: std.mem.Allocator, identifier: u64, bytes: []const u8) !EmittedRecord {
-    const owned = try allocator.dupe(u8, bytes);
-    errdefer allocator.free(owned);
-    return .{
-        .identifier = identifier,
-        .bytes = owned,
-    };
+    return EmittedRecord.init(allocator, identifier, bytes);
 }
 
-const PendingRecord = struct {
-    identifier: u64,
-    bytes: []u8,
-};
+pub fn deinitEmittedRecords(_: std.mem.Allocator, records: []const EmittedRecord) void {
+    for (records) |*record| record.deinit();
+}
 
 pub const CollectedOutput = struct {
     allocator: std.mem.Allocator,
     records: std.ArrayList(EmittedRecord) = .empty,
 
     pub fn deinit(self: *CollectedOutput) void {
-        deinitEmittedRecords(self.allocator, self.records.items);
+        for (self.records.items) |*record| record.deinit();
         self.records.deinit(self.allocator);
     }
 };
@@ -61,22 +98,31 @@ const CollectState = struct {
     records: std.ArrayList(EmittedRecord) = .empty,
     fail_after_records: ?usize = null,
     fail_error: anyerror = error.Unexpected,
+    /// Test-only: artificial delay injected before each record is appended,
+    /// used to widen the window between workers and drain so that any
+    /// ordering/ownership bug surfaces as dropped or reordered records.
+    per_record_delay: ?std.Io.Duration = null,
+    io: ?std.Io = null,
 
     fn deinit(self: *CollectState) void {
-        deinitEmittedRecords(self.allocator, self.records.items);
+        for (self.records.items) |*record| record.deinit();
         self.records.deinit(self.allocator);
     }
 
-    fn writeRecord(self: *CollectState, record: PendingRecord) !void {
+    fn writeRecord(self: *CollectState, identifier: u64, bytes: []const u8) !void {
         const index = self.records.items.len;
         if (self.fail_after_records) |limit| {
             if (index >= limit) return self.fail_error;
         }
 
-        try self.records.append(self.allocator, .{
-            .identifier = record.identifier,
-            .bytes = record.bytes,
-        });
+        if (self.per_record_delay) |dur| {
+            if (self.io) |io| std.Io.sleep(io, dur, .awake) catch |e| switch (e) {
+                error.Canceled => return e,
+            };
+        }
+
+        const record = try EmittedRecord.init(self.allocator, identifier, bytes);
+        try self.records.append(self.allocator, record);
     }
 
     fn takeOutput(self: *CollectState) CollectedOutput {
@@ -91,111 +137,91 @@ const ConcurrentSink = union(enum) {
     collect: *CollectState,
 };
 
-const RecordSpan = struct {
-    identifier: u64,
-    start: u32,
-    len: u32,
-};
+// ---------------------------------------------------------------------------
+// Internal pipeline types
+// ---------------------------------------------------------------------------
 
-const OutputSlot = struct {
+const RecordSpan = struct { identifier: u64, start: u32, len: u32 };
+
+/// Reusable output buffer for one chunk. Workers rent one from the free-list,
+/// fill `data` with serialised records and `spans` with `(id, offset, len)`
+/// tuples, then hand off ownership (the `*Buffer` pointer) to the drain. The
+/// drain emits the spans and returns the pointer to the free-list. The
+/// underlying `ArrayList`s keep their capacity via `clearRetainingCapacity`,
+/// so steady-state workload performs zero allocations per chunk.
+const Buffer = struct {
     data: std.ArrayList(u8) = .empty,
     spans: std.ArrayList(RecordSpan) = .empty,
-    ready: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn reset(self: *Buffer) void {
+        self.data.clearRetainingCapacity();
+        self.spans.clearRetainingCapacity();
+    }
+
+    fn deinit(self: *Buffer, allocator: std.mem.Allocator) void {
+        self.data.deinit(allocator);
+        self.spans.deinit(allocator);
+    }
 };
 
-const JoinedTask = struct {
+/// Worker output: a chunk index (for ordered reassembly) plus a borrowed
+/// buffer pointer. The drain owns the pointer transiently and returns it
+/// to the free-list after emitting.
+const ChunkBatch = struct {
     chunk_index: usize,
-    err: ?anyerror,
+    record_base: usize,
+    buffer: *Buffer,
 };
 
+/// Intake output: a chunk ready for a worker to parse.
+const WorkerTask = struct {
+    chunk_index: usize,
+    record_base: usize,
+    chunk: Chunk,
+
+    fn deinit(self: *WorkerTask) void {
+        self.chunk.deinit();
+    }
+};
+
+const TaskQueue = std.Io.Queue(WorkerTask);
+const BatchQueue = std.Io.Queue(ChunkBatch);
+const FreeListQueue = std.Io.Queue(*Buffer);
+
+/// Shared state threaded through every pipeline task by pointer.
 const SharedState = struct {
     allocator: std.mem.Allocator,
+    io: std.Io,
     sink: ConcurrentSink,
     opts: ParserOptions,
     out_kind: OutKind,
     stdout_kind: ?std.Io.File.Kind = null,
-    fatal_mutex: std.Io.Mutex = .init,
-    write_mutex: std.Io.Mutex = .init,
-    fatal_error: ?anyerror = null,
-    cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    broken_pipe: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    task_queue: *TaskQueue,
+    batch_queue: *BatchQueue,
+    free_list: *FreeListQueue,
+
+    /// Counts down as workers exit; the last one out closes `batch_queue`
+    /// so the drain observes end-of-stream without orchestrator intervention
+    /// on the clean path.
+    workers_alive: std.atomic.Value(usize),
+    /// Set by the orchestrator before it starts cancelling sub-tasks.
+    /// Intake reads this to tell "my read syscall failed on its own" apart
+    /// from "the orchestrator interrupted me" — a plain `std.Io.checkCancel`
+    /// doesn't catch the latter because the Threaded runtime consumes the
+    /// cancel signal when the syscall surfaces it as `ReadFailed`.
+    teardown_started: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    // Counters retained for observability and for selection accounting.
     emitted: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     failed: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     skipped: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
-    records_skipped: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     records_selected: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
-    output_slots: ?[]OutputSlot = null,
 };
 
-const WorkerTask = struct {
-    thread: std.Thread,
-    chunk_index: usize,
-    chunk: Chunk,
-    record_base: usize = 0,
-    err: ?anyerror = null,
-};
-
-fn sharedIo(shared: *SharedState) std.Io {
-    return switch (shared.sink) {
-        .stdout => |io_runtime| io_runtime.io,
-        .collect => std.Options.debug_threaded_io.?.io(),
-    };
-}
-
-fn setFatal(shared: *SharedState, err: anyerror) void {
-    const io = sharedIo(shared);
-    shared.fatal_mutex.lockUncancelable(io);
-    defer shared.fatal_mutex.unlock(io);
-    if (shared.fatal_error == null) {
-        shared.fatal_error = err;
-        shared.cancelled.store(true, .release);
-    }
-}
-
-fn writeAll(shared: *SharedState, record: PendingRecord) !void {
-    const io = sharedIo(shared);
-    shared.write_mutex.lockUncancelable(io);
-    defer shared.write_mutex.unlock(io);
-
-    switch (shared.sink) {
-        .stdout => |io_runtime| {
-            try io_runtime.stdout_writer.interface.writeAll(record.bytes);
-            try io_runtime.stdout_writer.interface.flush();
-            shared.allocator.free(record.bytes);
-        },
-        .collect => |collector| {
-            try collector.writeRecord(record);
-        },
-    }
-}
-
-fn writeOwnedRecord(shared: *SharedState, record: PendingRecord) !void {
-    errdefer shared.allocator.free(record.bytes);
-    try writeAll(shared, record);
-}
-
-fn writeAllCatchPipe(shared: *SharedState, record: PendingRecord) void {
-    writeOwnedRecord(shared, record) catch |err| {
-        handleWriteError(shared, err);
-    };
-}
-
-fn setBrokenPipe(shared: *SharedState) void {
-    shared.broken_pipe.store(true, .release);
-    shared.cancelled.store(true, .release);
-}
-
-fn handleWriteError(shared: *SharedState, err: anyerror) void {
-    if (shouldTreatSinkErrorAsCleanStop(shared, err)) {
-        setBrokenPipe(shared);
-        return;
-    }
-
-    switch (err) {
-        error.BrokenPipe => setBrokenPipe(shared),
-        else => setFatal(shared, err),
-    }
-}
+// ---------------------------------------------------------------------------
+// Sink helpers
+// ---------------------------------------------------------------------------
 
 fn shouldTreatSinkErrorAsCleanStop(shared: *const SharedState, err: anyerror) bool {
     return switch (shared.sink) {
@@ -204,105 +230,36 @@ fn shouldTreatSinkErrorAsCleanStop(shared: *const SharedState, err: anyerror) bo
     };
 }
 
-fn nextRecord(shared: *SharedState, iter: *format.RecordIterator) ?EventRecordRaw {
-    if (shared.cancelled.load(.acquire)) return null;
-    return iter.next() catch |err| {
-        setFatal(shared, err);
-        return null;
-    };
+fn isCleanStopError(shared: *const SharedState, err: anyerror) bool {
+    if (err == error.BrokenPipe) return true;
+    return shouldTreatSinkErrorAsCleanStop(shared, err);
 }
 
-fn appendToOutputSlot(shared: *SharedState, slot: *OutputSlot, identifier: u64, bytes: []const u8) bool {
-    const allocator = shared.allocator;
-    const start_usize = slot.data.items.len;
-    if (start_usize > std.math.maxInt(u32) or bytes.len > std.math.maxInt(u32)) {
-        setFatal(shared, error.OutOfBounds);
-        return false;
-    }
-
-    const start: u32 = @intCast(start_usize);
-    const len: u32 = @intCast(bytes.len);
-
-    slot.data.appendSlice(allocator, bytes) catch |err| {
-        setFatal(shared, err);
-        return false;
-    };
-    slot.spans.append(allocator, .{ .identifier = identifier, .start = start, .len = len }) catch |err| {
-        slot.data.shrinkRetainingCapacity(start_usize);
-        setFatal(shared, err);
-        return false;
-    };
-    return true;
-}
-
-fn reserveEmitSlot(shared: *SharedState) bool {
-    const max_records = shared.opts.max_records;
-    if (max_records == 0) return true;
-
-    while (true) {
-        const observed = shared.emitted.load(.acquire);
-        if (observed >= max_records) {
-            shared.cancelled.store(true, .release);
-            return false;
-        }
-        if (shared.emitted.cmpxchgWeak(observed, observed + 1, .acq_rel, .acquire) == null) {
-            if (observed + 1 >= max_records) shared.cancelled.store(true, .release);
-            return true;
-        }
+/// Writes one record span to the sink. The drain calls this once per span
+/// inside a ChunkBatch. No flushing here — the drain flushes once at
+/// end-of-stream, matching the sequential path's behaviour.
+fn writeSpanToSink(shared: *SharedState, data: []const u8, span: RecordSpan) anyerror!void {
+    const bytes = data[span.start .. span.start + span.len];
+    switch (shared.sink) {
+        .stdout => |io_runtime| {
+            try io_runtime.stdout_writer.interface.writeAll(bytes);
+        },
+        .collect => |collector| {
+            try collector.writeRecord(span.identifier, bytes);
+        },
     }
 }
 
-fn releaseEmitSlot(shared: *SharedState) void {
-    const previous = shared.emitted.fetchSub(1, .acq_rel);
-    std.debug.assert(previous > 0);
-}
-
-fn reserveSelectedRecord(shared: *SharedState) bool {
-    const max_records = shared.opts.max_records;
-    if (max_records == 0) return true;
-
-    while (true) {
-        const observed = shared.records_selected.load(.acquire);
-        if (observed >= max_records) {
-            shared.cancelled.store(true, .release);
-            return false;
-        }
-        if (shared.records_selected.cmpxchgWeak(observed, observed + 1, .acq_rel, .acquire) == null) {
-            return true;
-        }
+fn flushSink(shared: *SharedState) anyerror!void {
+    switch (shared.sink) {
+        .stdout => |io_runtime| try io_runtime.stdout_writer.interface.flush(),
+        .collect => {},
     }
 }
 
-fn assertReadyToDrain(slot: *const OutputSlot, chunk_index: usize) void {
-    std.debug.assert(slot.ready.load(.acquire));
-    var previous_end: usize = 0;
-    for (slot.spans.items) |span| {
-        const start: usize = span.start;
-        const end: usize = start + span.len;
-        if (start < previous_end) {
-            std.debug.panic("ordered output slot {d} spans overlap", .{chunk_index});
-        }
-        if (end > slot.data.items.len) {
-            std.debug.panic("ordered output slot {d} span out of bounds", .{chunk_index});
-        }
-        previous_end = end;
-    }
-}
-
-fn scheduleOrderedRecord(shared: *SharedState, slot: *OutputSlot, identifier: u64, bytes: []const u8) !void {
-    if (!appendToOutputSlot(shared, slot, identifier, bytes)) return error.OutOfMemory;
-}
-
-fn makePendingRecord(shared: *SharedState, identifier: u64, bytes: []const u8) !PendingRecord {
-    const record = try duplicateEmittedRecord(shared.allocator, identifier, bytes);
-    return .{ .identifier = record.identifier, .bytes = record.bytes };
-}
-
-fn trySkipRecord(shared: *SharedState, skip_counter: *std.atomic.Value(usize)) bool {
-    if (shared.opts.skip_first == 0) return false;
-    const prev = skip_counter.fetchAdd(1, .monotonic);
-    return prev < shared.opts.skip_first;
-}
+// ---------------------------------------------------------------------------
+// Selection helpers (skip_first / max_records)
+// ---------------------------------------------------------------------------
 
 fn selectedRecordRangeEnd(opts: ParserOptions) ?usize {
     if (opts.max_records == 0) return null;
@@ -313,243 +270,469 @@ fn usesLogicalSubsetSelection(opts: ParserOptions) bool {
     return !opts.ordered and opts.skip_first > 0;
 }
 
-fn countChunkRecords(chunk: *const Chunk) !usize {
-    var rec_iter = chunk.records();
+/// Per-worker record-selection predicate. Exactly the semantics the pre-batch
+/// code had; the sequential parser in `parser.zig` also uses this via
+/// `forSequential`, so we must keep the public surface stable.
+pub const RecordFilter = struct {
+    mode: Mode,
+    skip_first: usize = 0,
+    selection_end: ?usize = null,
+    record_index: usize = 0,
+
+    const Mode = enum { take_all, logical_subset, shared_counter };
+    pub const Decision = enum { take, skip, stop };
+
+    fn forTask(opts: ParserOptions, record_base: usize) RecordFilter {
+        if (opts.ordered) return .{ .mode = .take_all };
+        if (usesLogicalSubsetSelection(opts)) return .{
+            .mode = .logical_subset,
+            .skip_first = opts.skip_first,
+            .selection_end = selectedRecordRangeEnd(opts),
+            .record_index = record_base,
+        };
+        if (opts.max_records != 0) return .{ .mode = .shared_counter };
+        return .{ .mode = .take_all };
+    }
+
+    pub fn forSequential(opts: ParserOptions) RecordFilter {
+        return .{
+            .mode = .logical_subset,
+            .skip_first = opts.skip_first,
+            .selection_end = selectedRecordRangeEnd(opts),
+            .record_index = 0,
+        };
+    }
+
+    pub fn acceptLocal(self: *RecordFilter) Decision {
+        switch (self.mode) {
+            .take_all => return .take,
+            .logical_subset => {
+                const i = self.record_index;
+                self.record_index += 1;
+                if (i < self.skip_first) return .skip;
+                if (self.selection_end) |end| {
+                    if (i >= end) return .stop;
+                }
+                return .take;
+            },
+            .shared_counter => unreachable,
+        }
+    }
+
+    fn accept(self: *RecordFilter, shared: *SharedState) Decision {
+        return switch (self.mode) {
+            .take_all, .logical_subset => self.acceptLocal(),
+            .shared_counter => blk: {
+                if (trySkipRecord(shared, &shared.skipped)) break :blk .skip;
+                if (!reserveSelectedRecord(shared)) break :blk .stop;
+                break :blk .take;
+            },
+        };
+    }
+};
+
+fn countChunkRecords(chunk: *const Chunk) usize {
+    const buf = chunk.buf;
+    const end = @min(buf.len, chunk.header.free_space_offset);
+    var offset: usize = format.CHUNK_HEADER_SIZE;
     var count: usize = 0;
-    while (try rec_iter.next()) |_| count += 1;
+    while (offset + 24 <= end) {
+        if (!std.mem.eql(u8, buf[offset..][0..4], &[_]u8{ 0x2a, 0x2a, 0x00, 0x00 })) break;
+        const size = std.mem.readInt(u32, buf[offset + 4 ..][0..4], .little);
+        if (size < 32) break;
+        if (offset + size > end) break;
+        offset += size;
+        count += 1;
+    }
     return count;
 }
 
-fn noteJoinedTaskError(shared: *SharedState, joined: JoinedTask, first_err: *?anyerror) void {
-    if (joined.err) |err| {
-        if (shouldTreatSinkErrorAsCleanStop(shared, err)) {
-            setBrokenPipe(shared);
-            return;
+fn trySkipRecord(shared: *SharedState, skip_counter: *std.atomic.Value(usize)) bool {
+    if (shared.opts.skip_first == 0) return false;
+    const prev = skip_counter.fetchAdd(1, .monotonic);
+    return prev < shared.opts.skip_first;
+}
+
+fn reserveSelectedRecord(shared: *SharedState) bool {
+    const max_records = shared.opts.max_records;
+    if (max_records == 0) return true;
+    while (true) {
+        const observed = shared.records_selected.load(.acquire);
+        if (observed >= max_records) return false;
+        if (shared.records_selected.cmpxchgWeak(observed, observed + 1, .acq_rel, .acquire) == null) return true;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Worker
+// ---------------------------------------------------------------------------
+
+/// Long-lived worker. Loops pulling `WorkerTask`s, renting a `*Buffer`,
+/// serialising the chunk into it, and publishing a `ChunkBatch`. Exits
+/// when `task_queue` is closed (clean shutdown) or any queue op returns
+/// an error we can't recover from. The last worker to exit closes
+/// `batch_queue` so the drain observes end-of-stream.
+fn workerLoop(shared: *SharedState) WorkerError!void {
+    // Last-worker-out closes the batch queue so the drain unblocks on
+    // end-of-stream. Runs on every exit path (clean, error, cancel).
+    defer {
+        if (shared.workers_alive.fetchSub(1, .acq_rel) == 1) {
+            shared.batch_queue.close(shared.io);
         }
-        log.err("worker for chunk {d} failed: {s}", .{ joined.chunk_index, @errorName(err) });
-        shared.cancelled.store(true, .release);
-        if (first_err.* == null) first_err.* = err;
     }
-}
-
-fn joinRemainingWorkers(shared: *SharedState, active: *std.ArrayList(*WorkerTask), first_err: *?anyerror) void {
-    while (active.pop()) |task| {
-        const joined = joinWorker(shared.allocator, task);
-        noteJoinedTaskError(shared, joined, first_err);
-    }
-}
-
-fn cancelAndJoinActiveWorkers(shared: *SharedState, active: *std.ArrayList(*WorkerTask), first_err: *?anyerror) void {
-    shared.cancelled.store(true, .release);
-    joinRemainingWorkers(shared, active, first_err);
-}
-
-fn startWorkerTask(shared: *SharedState, active: *std.ArrayList(*WorkerTask), chunk_index: usize, chunk: Chunk, record_base: usize) !void {
-    const allocator = shared.allocator;
-
-    const task = try allocator.create(WorkerTask);
-    errdefer allocator.destroy(task);
-    task.* = .{
-        .thread = undefined,
-        .chunk_index = chunk_index,
-        .chunk = chunk,
-        .record_base = record_base,
-    };
-
-    task.thread = try std.Thread.spawn(.{}, workerMain, .{ shared, task });
-    errdefer {
-        shared.cancelled.store(true, .release);
-        task.thread.join();
-    }
-
-    try active.append(allocator, task);
-}
-
-fn serializeChunkRecords(shared: *SharedState, task: *WorkerTask, chunk: *Chunk, out: *OutputWriter, ctx: *binxml.Context) !void {
-    const opts = shared.opts;
-    var rec_iter = chunk.records();
-
-    if (shared.output_slots) |slots| {
-        const slot = &slots[task.chunk_index];
-
-        while (nextRecord(shared, &rec_iter)) |rec| {
-            if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
-            const view = EventRecordRaw{ .identifier = rec.identifier, .written_time = rec.written_time, .binxml = rec.binxml, .chunk_buf = &chunk.buf };
-            const bytes = out.serializeRecord(view, ctx) catch |e| {
-                _ = shared.failed.fetchAdd(1, .acq_rel);
-                log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
-                continue;
-            };
-            try scheduleOrderedRecord(shared, slot, rec.identifier, bytes);
-        }
-        return;
-    }
-
-    if (usesLogicalSubsetSelection(opts)) {
-        const selection_end = selectedRecordRangeEnd(opts);
-        var record_index = task.record_base;
-
-        while (nextRecord(shared, &rec_iter)) |rec| : (record_index += 1) {
-            if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
-            if (record_index < opts.skip_first) continue;
-            if (selection_end) |end| {
-                if (record_index >= end) return;
-            }
-
-            const view = EventRecordRaw{ .identifier = rec.identifier, .written_time = rec.written_time, .binxml = rec.binxml, .chunk_buf = &chunk.buf };
-            const bytes = out.serializeRecord(view, ctx) catch |e| {
-                _ = shared.failed.fetchAdd(1, .acq_rel);
-                log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
-                continue;
-            };
-            const pending = try makePendingRecord(shared, rec.identifier, bytes);
-            writeOwnedRecord(shared, pending) catch |err| {
-                handleWriteError(shared, err);
-                return err;
-            };
-            _ = shared.emitted.fetchAdd(1, .acq_rel);
-        }
-        return;
-    }
-
-    const has_limits = (opts.max_records != 0) or (opts.skip_first > 0);
-    if (!has_limits) {
-        while (nextRecord(shared, &rec_iter)) |rec| {
-            if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
-            const view = EventRecordRaw{ .identifier = rec.identifier, .written_time = rec.written_time, .binxml = rec.binxml, .chunk_buf = &chunk.buf };
-            const bytes = out.serializeRecord(view, ctx) catch |e| {
-                _ = shared.failed.fetchAdd(1, .acq_rel);
-                log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
-                continue;
-            };
-            const pending = try makePendingRecord(shared, rec.identifier, bytes);
-            writeOwnedRecord(shared, pending) catch |err| {
-                handleWriteError(shared, err);
-                return err;
-            };
-        }
-        return;
-    }
-
-    while (nextRecord(shared, &rec_iter)) |rec| {
-        if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
-        if (trySkipRecord(shared, &shared.skipped)) continue;
-        if (!reserveSelectedRecord(shared)) return;
-        if (!reserveEmitSlot(shared)) return;
-
-        const view = EventRecordRaw{ .identifier = rec.identifier, .written_time = rec.written_time, .binxml = rec.binxml, .chunk_buf = &chunk.buf };
-        const bytes = out.serializeRecord(view, ctx) catch |e| {
-            _ = shared.failed.fetchAdd(1, .acq_rel);
-            releaseEmitSlot(shared);
-            log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
-            continue;
-        };
-        const pending = makePendingRecord(shared, rec.identifier, bytes) catch |err| {
-            releaseEmitSlot(shared);
-            return err;
-        };
-
-        writeOwnedRecord(shared, pending) catch |err| {
-            releaseEmitSlot(shared);
-            handleWriteError(shared, err);
-            return err;
-        };
-    }
-}
-
-fn processChunk(shared: *SharedState, task: *WorkerTask) !void {
-    if (shared.output_slots) |slots| {
-        const slot = &slots[task.chunk_index];
-        defer slot.ready.store(true, .release);
-    }
-
-    if (shared.cancelled.load(.acquire)) return;
 
     const allocator = shared.allocator;
-    const opts = shared.opts;
+    const out_kind = shared.out_kind;
 
-    var out = OutputWriter.initSerializeOnly(allocator, shared.out_kind) catch |err| {
-        setFatal(shared, err);
-        return err;
-    };
-    defer out.deinit();
+    var serializer = try Serializer.init(allocator, out_kind);
+    defer serializer.deinit();
     var ctx = binxml.Context.init(allocator);
     defer ctx.deinit();
 
-    var mutable_chunk = task.chunk;
+    while (true) {
+        var task = shared.task_queue.getOne(shared.io) catch |e| switch (e) {
+            error.Closed => return,
+            else => return e,
+        };
+        // Chunk ownership is ours once we've dequeued the task. On every
+        // exit path below we must free it (either by publishing the batch
+        // and letting drain drop the chunk's buf via `task.chunk.deinit()`,
+        // or by dropping it ourselves on error).
+        //
+        // Actually the drain doesn't need the chunk buffer — the buffer
+        // holds the serialised bytes. So we free the chunk right after
+        // parsing it into the output buffer.
 
-    if (opts.verbosity >= 1) log.info("chunk {d}: free_off=0x{x}, last_rec_off=0x{x}", .{ task.chunk_index, mutable_chunk.header.free_space_offset, mutable_chunk.header.last_event_record_offset });
+        const buffer = shared.free_list.getOne(shared.io) catch |e| switch (e) {
+            error.Closed => {
+                task.deinit();
+                return;
+            },
+            else => {
+                task.deinit();
+                return e;
+            },
+        };
+        buffer.reset();
+
+        processChunk(shared, &task, buffer, &serializer, &ctx) catch |e| {
+            task.deinit();
+            // Return the buffer to the free-list so another worker can use
+            // it. If the free-list is closed, the buffer is still in the
+            // orchestrator's pool and will be deinited at teardown.
+            shared.free_list.putOne(shared.io, buffer) catch {};
+            return e;
+        };
+        task.deinit();
+
+        shared.batch_queue.putOne(shared.io, .{
+            .chunk_index = task.chunk_index,
+            .record_base = task.record_base,
+            .buffer = buffer,
+        }) catch |e| switch (e) {
+            error.Closed => {
+                // Drain exited early. Return buffer to free-list if we can.
+                shared.free_list.putOne(shared.io, buffer) catch {};
+                return;
+            },
+            else => {
+                shared.free_list.putOne(shared.io, buffer) catch {};
+                return e;
+            },
+        };
+    }
+}
+
+/// Serialises every record in `task.chunk` into `buffer`, honouring the
+/// opts-derived `RecordFilter`. Reuses the worker-owned `serializer` and
+/// `ctx` across chunks.
+fn processChunk(shared: *SharedState, task: *WorkerTask, buffer: *Buffer, serializer: *Serializer, ctx: *binxml.Context) WorkerError!void {
+    const allocator = shared.allocator;
+    const opts = shared.opts;
+    const chunk = &task.chunk;
+
+    if (opts.verbosity >= 1) log.info("chunk {d}: free_off=0x{x}, last_rec_off=0x{x}", .{
+        task.chunk_index,
+        chunk.header.free_space_offset,
+        chunk.header.last_event_record_offset,
+    });
 
     if (opts.validate_checksums) {
-        mutable_chunk.validateChecksums() catch |e| {
+        chunk.validateChecksums() catch |e| {
             log.err("chunk {d} checksum error: {s}", .{ task.chunk_index, @errorName(e) });
             return;
         };
     }
 
     ctx.resetPerChunk();
-    ctx.preCacheFromChunkHeader(&mutable_chunk.buf, &mutable_chunk.header.common_string_offsets) catch |err| {
-        setFatal(shared, err);
-        return err;
-    };
+    try ctx.preCacheFromChunkHeader(chunk.buf, &chunk.header.common_string_offsets);
 
-    serializeChunkRecords(shared, task, &mutable_chunk, &out, &ctx) catch |err| {
-        setFatal(shared, err);
-        return err;
-    };
+    var filter = RecordFilter.forTask(opts, task.record_base);
+    var rec_iter = if (opts.carve) chunk.recordsCarve() else chunk.records();
+
+    while (try rec_iter.next()) |rec| {
+        if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
+        switch (filter.accept(shared)) {
+            .stop => return,
+            .skip => continue,
+            .take => {},
+        }
+
+        const view = EventRecordRaw{
+            .identifier = rec.identifier,
+            .written_time = rec.written_time,
+            .binxml = rec.binxml,
+            .chunk_buf = chunk.buf,
+        };
+        const bytes = serializer.serializeRecord(view, ctx) catch |e| {
+            _ = shared.failed.fetchAdd(1, .acq_rel);
+            log.err("record id={d} parse error: {s}", .{ rec.identifier, @errorName(e) });
+            switch (opts.on_record_error) {
+                .continue_with_log => continue,
+                .fail_fast => return e,
+            }
+        };
+
+        const start: u32 = @intCast(buffer.data.items.len);
+        try buffer.data.appendSlice(allocator, bytes);
+        try buffer.spans.append(allocator, .{
+            .identifier = rec.identifier,
+            .start = start,
+            .len = @intCast(bytes.len),
+        });
+    }
 }
 
-fn workerMain(shared: *SharedState, task: *WorkerTask) void {
-    processChunk(shared, task) catch |err| {
-        task.err = err;
-    };
-}
+// ---------------------------------------------------------------------------
+// Drain
+// ---------------------------------------------------------------------------
 
-fn joinWorker(allocator: std.mem.Allocator, finished: *WorkerTask) JoinedTask {
-    defer allocator.destroy(finished);
-    finished.thread.join();
-    return .{
-        .chunk_index = finished.chunk_index,
-        .err = finished.err,
-    };
-}
+/// Emits spans from one batch. Returns the buffer to the free-list on every
+/// exit path, including errors.
+///
+/// In ordered mode, workers run `take_all`, so the drain must apply
+/// `skip_first` and `max_records` itself; `skipped` is threaded across
+/// batches to keep the filter global. In unordered mode, workers have
+/// already enforced both via the `logical_subset` or `shared_counter`
+/// filters — the drain just emits.
+fn emitBatch(
+    shared: *SharedState,
+    batch: ChunkBatch,
+    skipped: *usize,
+    should_stop: *bool,
+) anyerror!void {
+    defer shared.free_list.putOne(shared.io, batch.buffer) catch {};
 
-fn drainOrderedOutput(shared: *SharedState, actual_chunks: usize) !void {
-    const slots = shared.output_slots orelse return;
-    std.debug.assert(actual_chunks <= slots.len);
+    if (should_stop.*) return;
 
-    var drained_chunks: usize = 0;
-    var skipped: usize = 0;
-    drain_loop: for (slots[0..actual_chunks], 0..) |*slot, chunk_index| {
-        if (!slot.ready.load(.acquire)) break :drain_loop;
+    const opts = shared.opts;
+    const data = batch.buffer.data.items;
 
-        assertReadyToDrain(slot, chunk_index);
-        for (slot.spans.items) |span| {
-            if (shared.opts.skip_first > 0 and skipped < shared.opts.skip_first) {
-                skipped += 1;
+    for (batch.buffer.spans.items) |span| {
+        if (opts.ordered) {
+            if (opts.skip_first > 0 and skipped.* < opts.skip_first) {
+                skipped.* += 1;
                 continue;
             }
-            if (!reserveEmitSlot(shared)) break :drain_loop;
-
-            const start: usize = span.start;
-            const end: usize = start + span.len;
-            const pending = try makePendingRecord(shared, span.identifier, slot.data.items[start..end]);
-            writeAllCatchPipe(shared, pending);
-            if (shared.broken_pipe.load(.acquire)) break :drain_loop;
-            if (shared.fatal_error) |e| return e;
+            if (opts.max_records != 0 and shared.emitted.load(.acquire) >= opts.max_records) {
+                should_stop.* = true;
+                return;
+            }
         }
-        drained_chunks += 1;
-    }
 
-    if (drained_chunks < actual_chunks) {
-        std.debug.assert(shared.cancelled.load(.acquire));
+        try writeSpanToSink(shared, data, span);
+        _ = shared.emitted.fetchAdd(1, .acq_rel);
     }
 }
+
+/// Ordered drain: batches arrive in completion order from workers, but we
+/// must emit in chunk-index order. Buffer out-of-order batches in a small
+/// hash map keyed by chunk_index; whenever the next expected chunk arrives,
+/// drain it plus any already-buffered successors.
+fn drainOrdered(shared: *SharedState) anyerror!void {
+    const allocator = shared.allocator;
+    var pending: std.AutoHashMapUnmanaged(usize, ChunkBatch) = .empty;
+    defer {
+        // Anything still in the reorder map on exit: return its buffer so
+        // the free-list can be drained by the orchestrator (or a blocked
+        // worker can be unblocked if the free-list is still open).
+        var it = pending.valueIterator();
+        while (it.next()) |batch| {
+            shared.free_list.putOne(shared.io, batch.buffer) catch {};
+        }
+        pending.deinit(allocator);
+    }
+
+    var next_expected: usize = 0;
+    var skipped: usize = 0;
+    var should_stop = false;
+
+    while (!should_stop) {
+        const batch = shared.batch_queue.getOne(shared.io) catch |e| switch (e) {
+            error.Closed => break,
+            else => return e,
+        };
+
+        if (batch.chunk_index == next_expected) {
+            try emitBatch(shared, batch, &skipped, &should_stop);
+            next_expected += 1;
+
+            // Drain any subsequent chunks that arrived early.
+            while (pending.fetchRemove(next_expected)) |kv| {
+                if (should_stop) {
+                    // Drop without emitting; still return the buffer.
+                    shared.free_list.putOne(shared.io, kv.value.buffer) catch {};
+                    next_expected += 1;
+                    continue;
+                }
+                try emitBatch(shared, kv.value, &skipped, &should_stop);
+                next_expected += 1;
+            }
+        } else {
+            try pending.put(allocator, batch.chunk_index, batch);
+        }
+    }
+
+    // batch_queue is closed. Anything still in `pending` is a real batch
+    // whose predecessor chunk_index never arrived — intake can legitimately
+    // skip indices (carve mode past bad chunks, logical_subset skip of
+    // whole chunks inside skip_first). Drain them in chunk_index order so
+    // those records still reach the sink; sequential parsing would have
+    // emitted them.
+    if (!should_stop and pending.count() != 0) {
+        const indices = try allocator.alloc(usize, pending.count());
+        defer allocator.free(indices);
+        var iter = pending.keyIterator();
+        var i: usize = 0;
+        while (iter.next()) |k| : (i += 1) indices[i] = k.*;
+        std.mem.sort(usize, indices, {}, comptime std.sort.asc(usize));
+        for (indices) |idx| {
+            const batch = pending.fetchRemove(idx).?.value;
+            if (should_stop) {
+                shared.free_list.putOne(shared.io, batch.buffer) catch {};
+                continue;
+            }
+            try emitBatch(shared, batch, &skipped, &should_stop);
+        }
+    }
+}
+
+/// Unordered drain: emit batches as they arrive, respecting skip_first (via
+/// the shared-counter filter in workers) and max_records (here globally).
+fn drainUnordered(shared: *SharedState) anyerror!void {
+    var skipped: usize = 0;
+    var should_stop = false;
+
+    while (!should_stop) {
+        const batch = shared.batch_queue.getOne(shared.io) catch |e| switch (e) {
+            error.Closed => return,
+            else => return e,
+        };
+
+        try emitBatch(shared, batch, &skipped, &should_stop);
+    }
+}
+
+/// Top-level drain dispatcher. Flushes the sink once at end-of-stream so we
+/// match the sequential path's one-flush behaviour.
+fn drainMain(shared: *SharedState) anyerror!void {
+    const result = if (shared.opts.ordered) drainOrdered(shared) else drainUnordered(shared);
+    // Flush before propagating the result so partial output gets written.
+    flushSink(shared) catch |flush_err| {
+        if (result) |_| {
+            return flush_err;
+        } else |_| {}
+    };
+    try result;
+}
+
+// ---------------------------------------------------------------------------
+// Intake
+// ---------------------------------------------------------------------------
+
+/// Reads chunks sequentially and pushes them into the task queue. Closes
+/// `task_queue` on exit so workers observe end-of-input.
+fn intakeLoop(
+    shared: *SharedState,
+    reader: *std.Io.Reader,
+    num_chunks: usize,
+    carve: bool,
+) anyerror!void {
+    const allocator = shared.allocator;
+    defer shared.task_queue.close(shared.io);
+
+    var chunk_index: usize = 0;
+    var record_base: usize = 0;
+    const selection_end = if (usesLogicalSubsetSelection(shared.opts)) selectedRecordRangeEnd(shared.opts) else null;
+
+    while (carve or chunk_index < num_chunks) : (chunk_index += 1) {
+        // Lock-free early-exit checks. The drain/workers may have progressed
+        // past max_records since we last looked.
+        if (shared.opts.max_records != 0 and shared.emitted.load(.acquire) >= shared.opts.max_records) break;
+        if (selection_end) |end| {
+            if (record_base >= end) break;
+        }
+
+        var chunk = Chunk.read(allocator, reader) catch |e| switch (e) {
+            error.EndOfStream => break,
+            // Bad/empty chunks (e.g. zero-filled regions in a dirty file)
+            // are the norm in carve mode; skip and keep scanning. In strict
+            // mode (explicit `--no-carve`) we treat them as end-of-data.
+            error.BadChunkSignature => if (shared.opts.carve) continue else break,
+            else => {
+                // Distinguish "orchestrator is tearing us down" from "real
+                // I/O error". Either signal is sufficient: the runtime may
+                // still have a pending cancel on `checkCancel`, or the
+                // orchestrator has already set `teardown_started`.
+                std.Io.checkCancel(shared.io) catch |ce| switch (ce) {
+                    error.Canceled => return,
+                };
+                if (shared.teardown_started.load(.acquire)) return;
+                log.err("failed to read chunk {d}: {s}", .{ chunk_index, @errorName(e) });
+                return e;
+            },
+        };
+
+        const chunk_record_base = record_base;
+        if (selection_end != null or usesLogicalSubsetSelection(shared.opts)) {
+            record_base += countChunkRecords(&chunk);
+        }
+
+        if (usesLogicalSubsetSelection(shared.opts)) {
+            // Whole chunk falls inside skip_first prefix; don't queue it.
+            if (record_base <= shared.opts.skip_first) {
+                chunk.deinit();
+                continue;
+            }
+        }
+
+        shared.task_queue.putOne(shared.io, .{
+            .chunk_index = chunk_index,
+            .record_base = chunk_record_base,
+            .chunk = chunk,
+        }) catch |e| switch (e) {
+            error.Closed => {
+                // Pipeline teardown requested; drop this chunk and exit.
+                chunk.deinit();
+                return;
+            },
+            else => {
+                chunk.deinit();
+                return e;
+            },
+        };
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Orchestrator
+// ---------------------------------------------------------------------------
 
 fn parseConcurrentWithSink(
     allocator: std.mem.Allocator,
+    io: std.Io,
     sink: ConcurrentSink,
-    reader: anytype,
+    reader: *std.Io.Reader,
     opts: ParserOptions,
     out_kind: OutKind,
     num_threads: usize,
@@ -559,25 +742,53 @@ fn parseConcurrentWithSink(
 
     const hdr: FileHeader = try FileHeader.read(reader);
     const num_chunks: usize = hdr.core.num_chunks;
-    var output_slots: ?[]OutputSlot = null;
-    if (opts.ordered and num_chunks > 0) {
-        output_slots = try allocator.alloc(OutputSlot, num_chunks);
-        for (output_slots.?) |*slot| slot.* = .{};
+    const worker_limit = @max(@as(usize, 1), num_threads);
+
+    // Queue capacities. Scaled to worker_limit so we never stall because of
+    // tiny fixed buffers. `buffer_count` > `worker_limit` gives the pipeline
+    // slack: a worker can start filling the next buffer while a previous
+    // one is still on its way through the drain.
+    const buffer_count = worker_limit * 2;
+    const task_cap = @max(worker_limit * 2, 4);
+    const batch_cap = @max(buffer_count, 4);
+    const free_cap = buffer_count;
+
+    // Orchestrator owns the buffer pool for the entire parse. Workers and
+    // the drain only borrow `*Buffer` pointers; on teardown we deinit every
+    // buffer regardless of which queue still holds the pointer.
+    const buffers = try allocator.alloc(Buffer, buffer_count);
+    for (buffers) |*b| b.* = .{};
+    defer {
+        for (buffers) |*b| b.deinit(allocator);
+        allocator.free(buffers);
     }
-    defer if (output_slots) |slots| {
-        for (slots) |*slot| {
-            slot.data.deinit(allocator);
-            slot.spans.deinit(allocator);
-        }
-        allocator.free(slots);
-    };
+
+    const task_buf = try allocator.alloc(WorkerTask, task_cap);
+    defer allocator.free(task_buf);
+    var task_queue = TaskQueue.init(task_buf);
+
+    const batch_buf = try allocator.alloc(ChunkBatch, batch_cap);
+    defer allocator.free(batch_buf);
+    var batch_queue = BatchQueue.init(batch_buf);
+
+    const free_buf = try allocator.alloc(*Buffer, free_cap);
+    defer allocator.free(free_buf);
+    var free_list = FreeListQueue.init(free_buf);
+    // Seed the free-list with every buffer up-front.
+    for (buffers) |*b| {
+        free_list.putOne(io, b) catch unreachable; // capacity == buffer_count
+    }
 
     var shared = SharedState{
         .allocator = allocator,
+        .io = io,
         .sink = sink,
         .opts = opts,
         .out_kind = out_kind,
-        .output_slots = output_slots,
+        .task_queue = &task_queue,
+        .batch_queue = &batch_queue,
+        .free_list = &free_list,
+        .workers_alive = std.atomic.Value(usize).init(worker_limit),
     };
     shared.stdout_kind = switch (sink) {
         .stdout => |io_runtime| blk: {
@@ -587,73 +798,166 @@ fn parseConcurrentWithSink(
         .collect => null,
     };
 
-    var active = std.ArrayList(*WorkerTask).empty;
-    defer active.deinit(allocator);
-    const worker_limit = @max(@as(usize, 1), num_threads);
-    var worker_error: ?anyerror = null;
-    errdefer cancelAndJoinActiveWorkers(&shared, &active, &worker_error);
+    // Spawn the pipeline. Intake first (producers ready before consumers
+    // spin up), then workers, then drain.
+    var intake_future = try io.concurrent(intakeLoop, .{ &shared, reader, num_chunks, opts.carve });
+    defer _ = intake_future.cancel(io) catch {};
 
-    var chunk_index: usize = 0;
-    var actual_chunks: usize = 0;
-    var record_base: usize = 0;
-    const selection_end = if (usesLogicalSubsetSelection(opts)) selectedRecordRangeEnd(opts) else null;
-    while (opts.carve or chunk_index < num_chunks) : (chunk_index += 1) {
-        if (shared.cancelled.load(.acquire)) break;
-        if (selection_end) |end| {
-            if (record_base >= end) break;
-        }
-        const chunk = Chunk.read(reader) catch |e| switch (e) {
-            error.EndOfStream, error.BadChunkSignature => break,
-            else => {
-                log.err("failed to read chunk {d}: {s}", .{ chunk_index, @errorName(e) });
-                break;
-            },
-        };
-        actual_chunks += 1;
-
-        const chunk_record_base = record_base;
-        if (selection_end != null or usesLogicalSubsetSelection(opts)) {
-            record_base += try countChunkRecords(&chunk);
-        }
-
-        if (usesLogicalSubsetSelection(opts)) {
-            if (record_base <= opts.skip_first) continue;
-        }
-
-        try startWorkerTask(&shared, &active, chunk_index, chunk, chunk_record_base);
-
-        if (active.items.len >= worker_limit) {
-            const joined = joinWorker(allocator, active.orderedRemove(0));
-            noteJoinedTaskError(&shared, joined, &worker_error);
-            if (worker_error != null) break;
-        }
-
-        if (shared.cancelled.load(.acquire)) break;
-        if (!opts.ordered and opts.max_records != 0 and shared.emitted.load(.acquire) >= opts.max_records) break;
+    const worker_futures = try allocator.alloc(std.Io.Future(WorkerError!void), worker_limit);
+    defer allocator.free(worker_futures);
+    var spawned: usize = 0;
+    errdefer {
+        // Cancel any workers we managed to spawn before a spawn failure.
+        var i: usize = 0;
+        while (i < spawned) : (i += 1) _ = worker_futures[i].cancel(io) catch {};
+    }
+    while (spawned < worker_limit) : (spawned += 1) {
+        worker_futures[spawned] = try io.concurrent(workerLoop, .{&shared});
     }
 
-    joinRemainingWorkers(&shared, &active, &worker_error);
+    var drain_future = try io.concurrent(drainMain, .{&shared});
+    defer _ = drain_future.cancel(io) catch {};
 
-    if (shared.broken_pipe.load(.acquire)) return;
-    if (worker_error) |err| return err;
-    if (shared.fatal_error) |e| return e;
+    // Wait for the drain to finish (it's the deciding stage: max_records,
+    // sink failure, or end-of-stream). Stash its error and move into
+    // teardown; the rest of the pipeline is squeezed out below.
+    var drain_err: ?anyerror = null;
+    drain_future.await(io) catch |err| {
+        drain_err = err;
+    };
 
-    try drainOrderedOutput(&shared, actual_chunks);
+    // Mark teardown so intake can distinguish an orchestrator-induced
+    // `ReadFailed` (interrupted syscall) from a genuine I/O error and
+    // suppress the misleading `log.err` in that case. Set before any
+    // cancel/close to avoid a race where intake observes the interrupt
+    // before the flag.
+    shared.teardown_started.store(true, .release);
 
-    if (shared.broken_pipe.load(.acquire)) return;
-    if (opts.verbosity >= 1) log.info("done. emitted={d} failed={d}", .{ shared.emitted.load(.acquire), shared.failed.load(.acquire) });
+    // Force everything else to unblock. Close order is arbitrary; each
+    // `close` is idempotent and unblocks any in-flight put/get on that
+    // queue with `error.Closed`.
+    task_queue.close(io);
+    batch_queue.close(io);
+    free_list.close(io);
+
+    // Intake may be mid-`Chunk.read` (blocked on the file reader). `cancel`
+    // interrupts the syscall and awaits intake's return in one call. We
+    // always cancel intake after the drain returns (the drain owns the
+    // "are we done?" decision — max_records, sink failure, or end-of-
+    // stream), so any error intake reports here is either the direct
+    // effect of that cancel (e.g. `ReadFailed` from an interrupted
+    // syscall) or it was already surfaced through `log.err`. Swallow it.
+    _ = intake_future.cancel(io) catch {};
+
+    // Workers should now all be returning from their blocked queue ops.
+    // Await each one so their `defer` cleanup runs before we deinit the
+    // buffer pool. We also capture the first "real" worker error so
+    // `on_record_error: .fail_fast` failures aren't silently lost when the
+    // drain completes cleanly. `error.Canceled` / `error.Closed` are the
+    // expected effects of our own teardown (cancel + queue close) and are
+    // dropped; anything else — parse errors, allocator failures, sink
+    // writer errors — is a legitimate failure the caller needs to see.
+    var worker_err: ?anyerror = null;
+    for (worker_futures[0..spawned]) |*f| {
+        f.cancel(io) catch |err| switch (err) {
+            error.Canceled, error.Closed => {},
+            else => if (worker_err == null) {
+                worker_err = err;
+            },
+        };
+    }
+
+    // Drain any WorkerTasks still sitting in `task_queue`. On the clean path
+    // workers consume every task before exiting, but if the drain aborted
+    // early (max_records, sink error) we closed `free_list` / `batch_queue`
+    // which causes workers to exit before they've drained every task. Each
+    // leftover task still owns a heap-allocated `chunk.buf` — free it here
+    // so the pool deinit below doesn't leak.
+    while (task_queue.getOneUncancelable(io)) |leftover| {
+        var t = leftover;
+        t.deinit();
+    } else |err| switch (err) {
+        error.Closed => {},
+    }
+
+    if (opts.verbosity >= 1) log.info("done. emitted={d} failed={d}", .{
+        shared.emitted.load(.acquire),
+        shared.failed.load(.acquire),
+    });
+
+    if (drain_err) |err| {
+        if (isCleanStopError(&shared, err)) return;
+        return err;
+    }
+    if (worker_err) |err| {
+        if (isCleanStopError(&shared, err)) return;
+        return err;
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Public entrypoints
+// ---------------------------------------------------------------------------
 
 pub fn parseConcurrent(
     allocator: std.mem.Allocator,
     io_runtime: IoRuntime,
-    reader: anytype,
+    reader: *std.Io.Reader,
     opts: ParserOptions,
     out_kind: OutKind,
     num_threads: usize,
 ) !void {
-    try parseConcurrentWithSink(allocator, .{ .stdout = io_runtime }, reader, opts, out_kind, num_threads);
+    try parseConcurrentWithSink(allocator, io_runtime.io, .{ .stdout = io_runtime }, reader, opts, out_kind, num_threads);
 }
+
+pub fn collectConcurrentOutput(allocator: std.mem.Allocator, io: std.Io, reader: *std.Io.Reader, opts: ParserOptions, out_kind: OutKind, num_threads: usize) !CollectedOutput {
+    var collector = CollectState{ .allocator = allocator };
+    errdefer collector.deinit();
+
+    try parseConcurrentWithSink(allocator, io, .{ .collect = &collector }, reader, opts, out_kind, num_threads);
+    return collector.takeOutput();
+}
+
+pub fn collectConcurrentOutputWithFailure(allocator: std.mem.Allocator, io: std.Io, reader: *std.Io.Reader, opts: ParserOptions, out_kind: OutKind, num_threads: usize, fail_after_records: usize, fail_error: anyerror) !CollectedOutput {
+    var collector = CollectState{ .allocator = allocator, .fail_after_records = fail_after_records, .fail_error = fail_error };
+    errdefer collector.deinit();
+
+    try parseConcurrentWithSink(allocator, io, .{ .collect = &collector }, reader, opts, out_kind, num_threads);
+    return collector.takeOutput();
+}
+
+pub fn collectConcurrentOutputWithSlowDrain(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    reader: *std.Io.Reader,
+    opts: ParserOptions,
+    out_kind: OutKind,
+    num_threads: usize,
+    per_record_delay: std.Io.Duration,
+) !CollectedOutput {
+    var collector = CollectState{
+        .allocator = allocator,
+        .per_record_delay = per_record_delay,
+        .io = io,
+    };
+    errdefer collector.deinit();
+
+    try parseConcurrentWithSink(allocator, io, .{ .collect = &collector }, reader, opts, out_kind, num_threads);
+    return collector.takeOutput();
+}
+
+// ---------------------------------------------------------------------------
+// Internal tests
+// ---------------------------------------------------------------------------
+
+const test_util = @import("../../test/util.zig");
+
+fn getProjectRoot() []const u8 {
+    return comptime test_util.getProjectRoot(@src().file);
+}
+
+const project_root = getProjectRoot();
+const test_evtx_path = project_root ++ "/samples/security.evtx";
 
 fn countRecordsSingleThreaded(file_path: []const u8, skip_first: usize) !usize {
     var io_impl = std.Io.Threaded.init(std.testing.allocator, .{});
@@ -666,16 +970,17 @@ fn countRecordsSingleThreaded(file_path: []const u8, skip_first: usize) !usize {
     var read_buf: [8192]u8 = undefined;
     var reader = file.reader(io, &read_buf);
 
-    const hdr = try FileHeader.read(&reader);
+    const hdr = try FileHeader.read(&reader.interface);
     var count: usize = 0;
     var skipped: usize = 0;
 
     var chunk_index: usize = 0;
     while (chunk_index < hdr.core.num_chunks) : (chunk_index += 1) {
-        const chunk = Chunk.read(&reader) catch |e| switch (e) {
+        const chunk = Chunk.read(std.testing.allocator, &reader.interface) catch |e| switch (e) {
             error.EndOfStream, error.BadChunkSignature => break,
             else => return e,
         };
+        defer chunk.deinit();
 
         var rec_iter = chunk.records();
         while (try rec_iter.next()) |_| {
@@ -690,300 +995,7 @@ fn countRecordsSingleThreaded(file_path: []const u8, skip_first: usize) !usize {
     return count;
 }
 
-pub fn collectConcurrentOutput(allocator: std.mem.Allocator, reader: anytype, opts: ParserOptions, out_kind: OutKind, num_threads: usize) !CollectedOutput {
-    var collector = CollectState{ .allocator = allocator };
-    errdefer collector.deinit();
-
-    try parseConcurrentWithSink(allocator, .{ .collect = &collector }, reader, opts, out_kind, num_threads);
-    return collector.takeOutput();
-}
-
-pub fn collectConcurrentOutputWithFailure(allocator: std.mem.Allocator, reader: anytype, opts: ParserOptions, out_kind: OutKind, num_threads: usize, fail_after_records: usize, fail_error: anyerror) !CollectedOutput {
-    var collector = CollectState{ .allocator = allocator, .fail_after_records = fail_after_records, .fail_error = fail_error };
-    errdefer collector.deinit();
-
-    try parseConcurrentWithSink(allocator, .{ .collect = &collector }, reader, opts, out_kind, num_threads);
-    return collector.takeOutput();
-}
-
-const test_util = @import("../../test/util.zig");
-
-fn getProjectRoot() []const u8 {
-    return comptime test_util.getProjectRoot(@src().file);
-}
-
-const project_root = getProjectRoot();
-const test_evtx_path = project_root ++ "/samples/security.evtx";
-
-const JoinWorkersTestState = struct {
-    blocker_entered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    release_blocker: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    blocker_exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    releaser_started: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-};
-
-fn failingWorkerTask(task: *WorkerTask) void {
-    task.err = error.TestWorkerFailure;
-}
-
-fn blockingWorkerTask(task: *WorkerTask, state: *JoinWorkersTestState) void {
-    state.blocker_entered.store(true, .release);
-    while (!state.release_blocker.load(.acquire)) {
-        std.Thread.yield() catch unreachable;
-    }
-    state.blocker_exited.store(true, .release);
-    task.err = null;
-}
-
-fn releaseBlockingWorker(state: *JoinWorkersTestState) void {
-    state.releaser_started.store(true, .release);
-    while (!state.blocker_entered.load(.acquire)) {
-        std.Thread.yield() catch unreachable;
-    }
-    state.release_blocker.store(true, .release);
-}
-
-const StartupCleanupWorkerState = struct {
-    entered: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-};
-
-const StartupFailureMode = enum {
-    create,
-    spawn,
-    append,
-};
-
-fn cancelAwareWorkerTask(task: *WorkerTask, state: *StartupCleanupWorkerState, cancelled: *std.atomic.Value(bool)) void {
-    state.entered.store(true, .release);
-    while (!cancelled.load(.acquire)) {
-        std.Thread.yield() catch unreachable;
-    }
-    state.exited.store(true, .release);
-    task.err = null;
-}
-
-fn spawnCancelAwareWorker(shared: *SharedState, chunk_index: usize, state: *StartupCleanupWorkerState) !*WorkerTask {
-    const task = try shared.allocator.create(WorkerTask);
-    errdefer shared.allocator.destroy(task);
-
-    task.* = .{
-        .thread = undefined,
-        .chunk_index = chunk_index,
-        .chunk = undefined,
-    };
-    task.thread = try std.Thread.spawn(.{}, cancelAwareWorkerTask, .{ task, state, &shared.cancelled });
-    return task;
-}
-
-fn simulateStartupFailure(shared: *SharedState, active: *std.ArrayList(*WorkerTask), mode: StartupFailureMode, startup_state: *StartupCleanupWorkerState) !void {
-    var worker_error: ?anyerror = null;
-    errdefer cancelAndJoinActiveWorkers(shared, active, &worker_error);
-
-    switch (mode) {
-        .create => return error.TestStartupCreateFailure,
-        .spawn => {
-            const task = try shared.allocator.create(WorkerTask);
-            errdefer shared.allocator.destroy(task);
-            task.* = .{
-                .thread = undefined,
-                .chunk_index = 1,
-                .chunk = undefined,
-            };
-            return error.TestStartupSpawnFailure;
-        },
-        .append => {
-            const task = try spawnCancelAwareWorker(shared, 1, startup_state);
-            errdefer shared.allocator.destroy(task);
-            errdefer {
-                shared.cancelled.store(true, .release);
-                task.thread.join();
-            }
-            return error.TestStartupAppendFailure;
-        },
-    }
-}
-
-fn expectStartupFailureCleanup(mode: StartupFailureMode, expected_err: anyerror) !void {
-    const allocator = std.testing.allocator;
-
-    var collector = CollectState{ .allocator = allocator };
-    defer collector.deinit();
-
-    var shared = SharedState{
-        .allocator = allocator,
-        .sink = .{ .collect = &collector },
-        .opts = .{},
-        .out_kind = .xml,
-    };
-
-    var active = std.ArrayList(*WorkerTask).empty;
-    defer active.deinit(allocator);
-
-    var active_state = StartupCleanupWorkerState{};
-    const active_task = try spawnCancelAwareWorker(&shared, 0, &active_state);
-    try active.append(allocator, active_task);
-
-    var startup_state = StartupCleanupWorkerState{};
-    try std.testing.expectError(expected_err, simulateStartupFailure(&shared, &active, mode, &startup_state));
-
-    try std.testing.expect(shared.cancelled.load(.acquire));
-    try std.testing.expect(active_state.entered.load(.acquire));
-    try std.testing.expect(active_state.exited.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 0), active.items.len);
-
-    switch (mode) {
-        .create, .spawn => {
-            try std.testing.expect(!startup_state.entered.load(.acquire));
-            try std.testing.expect(!startup_state.exited.load(.acquire));
-        },
-        .append => {
-            try std.testing.expect(startup_state.entered.load(.acquire));
-            try std.testing.expect(startup_state.exited.load(.acquire));
-        },
-    }
-}
-
 test "skip: single-threaded skip_first skips exact number of records" {
     const total = try countRecordsSingleThreaded(test_evtx_path, 0);
     try std.testing.expect(total > 10);
-}
-
-test "ordered worker cleanup joins remaining active workers after first worker error" {
-    const allocator = std.testing.allocator;
-
-    var collector = CollectState{ .allocator = allocator };
-    defer collector.deinit();
-
-    var shared = SharedState{
-        .allocator = allocator,
-        .sink = .{ .collect = &collector },
-        .opts = .{},
-        .out_kind = .xml,
-    };
-
-    var active = std.ArrayList(*WorkerTask).empty;
-    defer active.deinit(allocator);
-
-    const failing_task = try allocator.create(WorkerTask);
-    errdefer allocator.destroy(failing_task);
-    failing_task.* = .{ .thread = undefined, .chunk_index = 0, .chunk = undefined };
-    failing_task.thread = try std.Thread.spawn(.{}, failingWorkerTask, .{failing_task});
-    try active.append(allocator, failing_task);
-
-    var state = JoinWorkersTestState{};
-    const blocking_task = try allocator.create(WorkerTask);
-    errdefer allocator.destroy(blocking_task);
-    blocking_task.* = .{ .thread = undefined, .chunk_index = 1, .chunk = undefined };
-    blocking_task.thread = try std.Thread.spawn(.{}, blockingWorkerTask, .{ blocking_task, &state });
-    try active.append(allocator, blocking_task);
-
-    var releaser = try std.Thread.spawn(.{}, releaseBlockingWorker, .{&state});
-    defer releaser.join();
-
-    const joined = joinWorker(allocator, active.orderedRemove(0));
-    var first_err: ?anyerror = null;
-    noteJoinedTaskError(&shared, joined, &first_err);
-    joinRemainingWorkers(&shared, &active, &first_err);
-
-    try std.testing.expect(first_err != null);
-    try std.testing.expect(first_err.? == error.TestWorkerFailure);
-    try std.testing.expect(state.releaser_started.load(.acquire));
-    try std.testing.expect(state.blocker_exited.load(.acquire));
-    try std.testing.expectEqual(@as(usize, 0), active.items.len);
-}
-
-test "stdout pipe write failures are not reported as worker errors" {
-    const allocator = std.testing.allocator;
-
-    var dummy_stdout = std.Io.File.stdout();
-    var dummy_write_buf: [16]u8 = undefined;
-    var dummy_stdout_writer = dummy_stdout.writer(std.Options.debug_threaded_io.?.io(), &dummy_write_buf);
-    var shared = SharedState{
-        .allocator = allocator,
-        .sink = .{ .stdout = .{
-            .io = std.Options.debug_threaded_io.?.io(),
-            .stdout_file = &dummy_stdout,
-            .stdout_writer = &dummy_stdout_writer,
-        } },
-        .opts = .{},
-        .out_kind = .xml,
-        .stdout_kind = .named_pipe,
-    };
-
-    var first_err: ?anyerror = null;
-    noteJoinedTaskError(&shared, .{ .chunk_index = 0, .err = error.WriteFailed }, &first_err);
-
-    try std.testing.expect(first_err == null);
-    try std.testing.expect(shared.cancelled.load(.acquire));
-    try std.testing.expect(shared.broken_pipe.load(.acquire));
-}
-
-test "collect sink write failures still surface as worker errors" {
-    const allocator = std.testing.allocator;
-
-    var collector = CollectState{ .allocator = allocator };
-    defer collector.deinit();
-
-    var shared = SharedState{
-        .allocator = allocator,
-        .sink = .{ .collect = &collector },
-        .opts = .{},
-        .out_kind = .xml,
-    };
-
-    var first_err: ?anyerror = null;
-    noteJoinedTaskError(&shared, .{ .chunk_index = 0, .err = error.WriteFailed }, &first_err);
-
-    try std.testing.expect(first_err != null);
-    try std.testing.expect(first_err.? == error.WriteFailed);
-    try std.testing.expect(shared.cancelled.load(.acquire));
-    try std.testing.expect(!shared.broken_pipe.load(.acquire));
-}
-
-test "startup failure cleanup joins active workers when task allocation fails" {
-    try expectStartupFailureCleanup(.create, error.TestStartupCreateFailure);
-}
-
-test "startup failure cleanup joins active workers when thread spawn fails" {
-    try expectStartupFailureCleanup(.spawn, error.TestStartupSpawnFailure);
-}
-
-test "startup failure cleanup joins active workers when active append fails" {
-    try expectStartupFailureCleanup(.append, error.TestStartupAppendFailure);
-}
-
-test "ordered output slot is marked ready when chunk processing returns early" {
-    const allocator = std.testing.allocator;
-
-    var collector = CollectState{ .allocator = allocator };
-    defer collector.deinit();
-
-    var slots = try allocator.alloc(OutputSlot, 1);
-    defer {
-        for (slots) |*slot| {
-            slot.data.deinit(allocator);
-            slot.spans.deinit(allocator);
-        }
-        allocator.free(slots);
-    }
-    for (slots) |*slot| slot.* = .{};
-
-    var shared = SharedState{
-        .allocator = allocator,
-        .sink = .{ .collect = &collector },
-        .opts = .{ .ordered = true },
-        .out_kind = .xml,
-        .output_slots = slots,
-    };
-    shared.cancelled.store(true, .release);
-
-    var task = WorkerTask{
-        .thread = undefined,
-        .chunk_index = 0,
-        .chunk = undefined,
-    };
-
-    try processChunk(&shared, &task);
-    try std.testing.expect(slots[0].ready.load(.acquire));
 }
