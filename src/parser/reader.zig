@@ -231,7 +231,7 @@ pub const Reader = struct {
             .@"enum" => |e| {
                 const TagType = e.tag_type;
                 const val = try self.readAny(TagType);
-                return std.meta.intToEnum(T, val) catch return BinXmlError.BadToken;
+                return std.enums.fromInt(T, val) orelse return BinXmlError.BadToken;
             },
             // Structs: packed use bytesToValue, others read field-by-field
             .@"struct" => |s| {

@@ -146,8 +146,10 @@ fn calcValuesOffset(chunk: []const u8, after_header: usize, def_data_off: u32) u
     // Definition is inline - skip past it (and any chained definitions)
     var offset = after_header;
     while (offset + types.TemplateDefinitionHeader.binary_size <= chunk.len) {
-        const next_off = value_reader.readValue(u32, chunk[offset..]) orelse unreachable;
-        const data_size = value_reader.readValue(u32, chunk[offset + 20 ..]) orelse unreachable;
+        // Safe: the loop condition guarantees offset + 24 <= chunk.len, so
+        // both 4-byte reads stay in range without a runtime bounds check.
+        const next_off = std.mem.readInt(u32, chunk[offset..][0..4], .little);
+        const data_size = std.mem.readInt(u32, chunk[offset + 20 ..][0..4], .little);
         const data_end = offset + types.TemplateDefinitionHeader.binary_size + data_size;
 
         if (data_end > chunk.len) break;
@@ -581,7 +583,7 @@ fn parseValueToken(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize
     if (log.enabled(.trace)) log.trace("  vtype=0x{x}", .{h.vtype});
 
     // BinXML type (or array of BinXML)
-    if (h.vt.isBinXml()) {
+    if (h.isBinXml()) {
         const blen = try ps.r.readIntBounded(u16, end_pos);
         const payload = try ps.r.readSliceBounded(blen, end_pos);
         try out.append(ps.alloc(), .{ .Value = .{ .vtype = h.vtype, .bytes = payload } });
@@ -589,7 +591,7 @@ fn parseValueToken(ps: *ParseState, out: *std.ArrayList(IR.Node), end_pos: usize
     }
 
     // Convert raw vtype to enum for semantic switching
-    const base_type = h.vt.valueType() orelse {
+    const base_type = h.valueType() orelse {
         log.err("unknown value vtype=0x{x} at pos=0x{x} has_dep_id={}", .{ h.vtype, ps.r.pos, ps.has_dep_id });
         return BinXmlError.BadToken;
     };
@@ -631,8 +633,11 @@ fn resolveName(ps: *ParseState, name_offset: u32) ParseError!IR.Name {
         log.trace("resolveName: name_off=0x{x} current_chunk_pos=0x{x} chunk_base=0x{x}", .{ name_offset, current_chunk_pos, ps.chunk_base });
     }
 
-    // If offset points to current position, name is inline
-    if (name_offset == @as(u32, @intCast(current_chunk_pos))) {
+    // If offset points to current position, name is inline. Compare in
+    // usize space so we don't lose information when chunk positions exceed
+    // u32 (which they cannot today, but the cast was load-bearing only by
+    // accident).
+    if (@as(usize, name_offset) == current_chunk_pos) {
         return readNameInline(ps);
     }
 

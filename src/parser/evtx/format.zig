@@ -19,24 +19,11 @@ pub const COMMON_STRING_SLOTS: usize = 64;
 /// Number of template pointer slots in chunk header
 pub const TEMPLATE_PTR_SLOTS: usize = 32;
 
-/// Read all bytes into buffer from any reader type that can fill a slice.
-fn readAll(reader: anytype, buf: []u8) !void {
-    switch (@typeInfo(@TypeOf(reader))) {
-        .pointer => |ptr| {
-            const ReaderType = ptr.child;
-            if (@hasField(ReaderType, "interface")) {
-                try reader.interface.readSliceAll(buf);
-            } else if (@hasDecl(ReaderType, "readSliceAll")) {
-                try reader.readSliceAll(buf);
-            } else if (@hasDecl(ReaderType, "readNoEof")) {
-                try reader.readNoEof(buf);
-            } else {
-                @compileError("Reader must provide interface, readSliceAll, or readNoEof");
-            }
-        },
-        else => @compileError("Reader must be passed by pointer"),
-    }
-}
+/// Reader alias used throughout the EVTX format layer. Standardising on
+/// `*std.Io.Reader` means callers wrap their underlying source (file,
+/// in-memory bytes, etc.) into a single concrete interface, and the
+/// format code never needs to probe for ad-hoc method shapes.
+pub const Reader = std.Io.Reader;
 
 /// Packed struct for file header core fields at offset 8-44
 pub const FileHeaderCore = packed struct {
@@ -60,9 +47,9 @@ pub const FileHeader = struct {
     core: FileHeaderCore,
     tail: FileHeaderTail,
 
-    pub fn read(reader: anytype) !FileHeader {
+    pub fn read(reader: *Reader) !FileHeader {
         var buf: [FILE_HEADER_SIZE]u8 = undefined;
-        try readAll(reader, &buf);
+        try reader.readSliceAll(&buf);
         if (!std.mem.eql(u8, buf[0..8], "ElfFile\x00")) return error.BadSignature;
 
         // Read contiguous fields via packed structs (comptime type dispatch)
@@ -81,25 +68,39 @@ pub const FileHeader = struct {
 
 pub const Chunk = struct {
     header: ChunkHeader,
-    buf: [CHUNK_SIZE]u8,
+    /// Heap-owned 64 KB chunk buffer. Callers allocate the chunk via
+    /// `Chunk.read` (or take ownership via `Chunk.initOwned`) and release
+    /// it via `deinit`.
+    buf: []u8,
+    allocator: std.mem.Allocator,
 
-    pub fn read(reader: anytype) !Chunk {
-        var buf: [CHUNK_SIZE]u8 = undefined;
-        try readAll(reader, &buf);
-        const h = try ChunkHeader.parse(&buf);
-        return .{ .header = h, .buf = buf };
+    /// Reads a single chunk off `reader` into a fresh heap allocation.
+    ///
+    /// Errors: any reader error (propagated) or `error.BadChunkSignature`
+    /// when the chunk magic is missing. The buffer is freed on error, so
+    /// callers never need to deinit on the failure path.
+    pub fn read(allocator: std.mem.Allocator, reader: *Reader) !Chunk {
+        const buf = try allocator.alloc(u8, CHUNK_SIZE);
+        errdefer allocator.free(buf);
+        try reader.readSliceAll(buf);
+        const h = try ChunkHeader.parse(buf);
+        return .{ .header = h, .buf = buf, .allocator = allocator };
+    }
+
+    pub fn deinit(self: Chunk) void {
+        self.allocator.free(self.buf);
     }
 
     pub fn validateChecksums(self: *const Chunk) !void {
         // Header checksum: CRC32 over bytes 0..120 and 128..512
-        const stored_hdr_crc = value_reader.readValue(u32, self.buf[124..]) orelse unreachable;
+        const stored_hdr_crc = std.mem.readInt(u32, self.buf[124..128], .little);
         var h = crc32.Crc32.init();
         h.update(self.buf[0..120]);
         h.update(self.buf[128..512]);
         if (h.final() != stored_hdr_crc) return error.BadChunkHeaderChecksum;
 
         // Events checksum: CRC32 over event records data
-        const stored_events_crc = value_reader.readValue(u32, self.buf[52..]) orelse unreachable;
+        const stored_events_crc = std.mem.readInt(u32, self.buf[52..56], .little);
         var e = crc32.Crc32.init();
         const start: usize = 512;
         const end: usize = @min(self.buf.len, self.header.free_space_offset);
@@ -130,7 +131,8 @@ pub const ChunkHeader = struct {
     common_strings_count: usize = 0,
     template_ptrs_count: usize = 0,
 
-    pub fn parse(buf: *const [CHUNK_SIZE]u8) !ChunkHeader {
+    pub fn parse(buf: []const u8) !ChunkHeader {
+        if (buf.len < CHUNK_HEADER_SIZE) return error.BadChunkSignature;
         if (!std.mem.eql(u8, buf[0..8], "ElfChnk\x00")) return error.BadChunkSignature;
 
         // Read core header fields via packed struct (comptime type dispatch)
@@ -143,13 +145,13 @@ pub const ChunkHeader = struct {
 
         // Common string offset array at 128: COMMON_STRING_SLOTS u32
         for (0..COMMON_STRING_SLOTS) |i| {
-            const off = value_reader.readValue(u32, buf[128 + i * 4 ..]) orelse unreachable;
+            const off = std.mem.readInt(u32, buf[128 + i * 4 ..][0..4], .little);
             ch.common_string_offsets[i] = off;
             if (off != 0 and off < buf.len) ch.common_strings_count += 1;
         }
         // TemplatePtr array at 384: TEMPLATE_PTR_SLOTS u32
         for (0..TEMPLATE_PTR_SLOTS) |i| {
-            const off = value_reader.readValue(u32, buf[384 + i * 4 ..]) orelse unreachable;
+            const off = std.mem.readInt(u32, buf[384 + i * 4 ..][0..4], .little);
             ch.template_ptrs[i] = off;
             if (off != 0 and off < buf.len) ch.template_ptrs_count += 1;
         }
@@ -183,11 +185,11 @@ pub const RecordIterator = struct {
         if (size < 32) return null;
         // If the record claims to run past the free-space boundary or chunk buffer, stop
         if (self.offset + size > self.chunk.buf.len or (self.offset + size) > self.chunk.header.free_space_offset) return null;
-        const end_copy = value_reader.readValue(u32, slice[size - 4 ..]) orelse unreachable;
+        const end_copy = std.mem.readInt(u32, slice[size - 4 ..][0..4], .little);
         // Mismatched end size indicates a truncated tail; stop record iteration
         if (end_copy != size) return null;
         const event_data = slice[24 .. size - 4];
-        const rec = EventRecordRaw{ .identifier = hdr.identifier, .written_time = hdr.written_time, .binxml = event_data, .chunk_buf = &self.chunk.buf };
+        const rec = EventRecordRaw{ .identifier = hdr.identifier, .written_time = hdr.written_time, .binxml = event_data, .chunk_buf = self.chunk.buf };
         self.offset += size;
         return rec;
     }
@@ -197,5 +199,5 @@ pub const EventRecordRaw = struct {
     identifier: u64,
     written_time: u64,
     binxml: []const u8,
-    chunk_buf: *const [CHUNK_SIZE]u8,
+    chunk_buf: []const u8,
 };

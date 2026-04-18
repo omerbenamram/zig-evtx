@@ -120,15 +120,15 @@ pub fn formatUtf16StringXml(w: *std.Io.Writer, data: []const u8) WriterError!voi
     if (data.len == 0) return;
     if ((data.len & 1) != 0) return;
     var num = data.len / 2;
-    // Remove null terminator
+    // Remove null terminator. `num > 0` implies `data.len >= 2`.
     if (num > 0) {
-        const last = reader.readValue(u16, data[data.len - 2 ..]) orelse unreachable;
+        const last = std.mem.readInt(u16, data[data.len - 2 ..][0..2], .little);
         if (last == 0) num -= 1;
     }
     // Trim trailing spaces (0x0020 in UTF-16LE)
     while (num > 0) {
         const pos = (num - 1) * 2;
-        const ch = reader.readValue(u16, data[pos..]) orelse unreachable;
+        const ch = std.mem.readInt(u16, data[pos..][0..2], .little);
         if (ch != 0x0020) break;
         num -= 1;
     }
@@ -263,7 +263,7 @@ fn formatUtf16StringArrayXml(w: *std.Io.Writer, data: []const u8) WriterError!vo
     var start: usize = 0;
     var i: usize = 0;
     while (i + 2 <= data.len) : (i += 2) {
-        const ch = reader.readValue(u16, data[i..]) orelse unreachable;
+        const ch = std.mem.readInt(u16, data[i..][0..2], .little);
         if (ch == 0) {
             if (!first) try w.writeByte(',');
             first = false;

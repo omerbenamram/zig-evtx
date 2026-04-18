@@ -50,35 +50,29 @@ const JsonlLineSet = struct {
 const SequentialParserCollector = struct {
     allocator: std.mem.Allocator,
     collector: LogicalRecordCollector,
-    out: evtx.OutputWriter,
-    pending_identifier: ?u64 = null,
+    serializer: evtx.Serializer,
 
     fn init(allocator: std.mem.Allocator, mode: evtx.OutputMode) !SequentialParserCollector {
         return .{
             .allocator = allocator,
             .collector = .{ .allocator = allocator },
-            .out = try evtx.OutputWriter.initSerializeOnly(allocator, mode),
+            .serializer = try evtx.Serializer.init(allocator, mode),
         };
     }
 
     fn deinit(self: *SequentialParserCollector) void {
-        self.out.deinit();
+        self.serializer.deinit();
         self.collector.deinit();
     }
 
-    pub fn serializeRecord(self: *SequentialParserCollector, record: evtx.EventRecordRaw, ctx: *evtx.Context) ![]const u8 {
-        self.pending_identifier = record.identifier;
-        return self.out.serializeRecord(record, ctx);
-    }
-
-    pub fn writeSerialized(self: *SequentialParserCollector, bytes: []const u8) !void {
-        const identifier = self.pending_identifier orelse unreachable;
+    /// Sink entry point: consumes (identifier, bytes) and copies them into the collector.
+    pub fn emit(self: *SequentialParserCollector, identifier: u64, bytes: []const u8) !void {
         try self.collector.append(identifier, bytes);
     }
 
     fn takeOutput(self: *SequentialParserCollector) ParsedOutput {
-        self.out.deinit();
-        self.out = undefined;
+        self.serializer.deinit();
+        self.serializer = undefined;
         return self.collector.takeOutput();
     }
 };
@@ -97,7 +91,7 @@ fn withSampleReader(allocator: std.mem.Allocator, comptime ReturnType: type, rea
 
     var read_buf: [8192]u8 = undefined;
     var reader = file.reader(io, &read_buf);
-    return try @call(.auto, reader_fn, .{ context, &reader });
+    return try @call(.auto, reader_fn, .{ context, &reader.interface });
 }
 
 fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions, mode: evtx.OutputMode) !ParsedOutput {
@@ -108,7 +102,7 @@ fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions,
     };
 
     const Runner = struct {
-        fn run(ctx_data: Context, reader: anytype) !ParsedOutput {
+        fn run(ctx_data: Context, reader: *std.Io.Reader) !ParsedOutput {
             const hdr = try evtx.worker.FileHeader.read(reader);
             var collector = LogicalRecordCollector{ .allocator = ctx_data.allocator };
             errdefer collector.deinit();
@@ -116,21 +110,21 @@ fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions,
 
             var chunk_index: usize = 0;
             while (chunk_index < hdr.core.num_chunks) : (chunk_index += 1) {
-                const chunk = evtx.worker.Chunk.read(reader) catch |err| switch (err) {
+                const chunk = evtx.worker.Chunk.read(ctx_data.allocator, reader) catch |err| switch (err) {
                     error.EndOfStream, error.BadChunkSignature => break,
                     else => return err,
                 };
+                defer chunk.deinit();
 
-                var out = try evtx.OutputWriter.initSerializeOnly(ctx_data.allocator, ctx_data.mode);
-                defer out.deinit();
+                var serializer = try evtx.Serializer.init(ctx_data.allocator, ctx_data.mode);
+                defer serializer.deinit();
                 var ctx = evtx.Context.init(ctx_data.allocator);
                 defer ctx.deinit();
 
-                var mutable_chunk = chunk;
                 ctx.resetPerChunk();
-                try ctx.preCacheFromChunkHeader(&mutable_chunk.buf, &mutable_chunk.header.common_string_offsets);
+                try ctx.preCacheFromChunkHeader(chunk.buf, &chunk.header.common_string_offsets);
 
-                var rec_iter = mutable_chunk.records();
+                var rec_iter = chunk.records();
                 while (try rec_iter.next()) |rec| {
                     if (ctx_data.opts.skip_first > 0 and skipped < ctx_data.opts.skip_first) {
                         skipped += 1;
@@ -143,9 +137,9 @@ fn parseSequentialOutput(allocator: std.mem.Allocator, opts: evtx.ParserOptions,
                         .identifier = rec.identifier,
                         .written_time = rec.written_time,
                         .binxml = rec.binxml,
-                        .chunk_buf = &mutable_chunk.buf,
+                        .chunk_buf = chunk.buf,
                     };
-                    const bytes = out.serializeRecord(view, &ctx) catch continue;
+                    const bytes = serializer.serializeRecord(view, &ctx) catch continue;
                     try collector.append(rec.identifier, bytes);
                 }
             }
@@ -165,11 +159,11 @@ fn parseSequentialParserOutput(allocator: std.mem.Allocator, opts: evtx.ParserOp
     };
 
     const Runner = struct {
-        fn run(ctx_data: Context, reader: anytype) !ParsedOutput {
+        fn run(ctx_data: Context, reader: *std.Io.Reader) !ParsedOutput {
             var parser = evtx.EvtxParser.init(ctx_data.allocator, ctx_data.opts);
             var collector = try SequentialParserCollector.init(ctx_data.allocator, ctx_data.mode);
             errdefer collector.deinit();
-            try parser.parse(reader, &collector);
+            try parser.parse(reader, &collector.serializer, &collector);
             return collector.takeOutput();
         }
     };
@@ -237,7 +231,7 @@ fn collectConcurrentRedirectedJsonlLines(allocator: std.mem.Allocator, opts: evt
             .io = io,
             .stdout_file = &out_file,
             .stdout_writer = &out_writer,
-        }, &reader, .json_lines, num_threads);
+        }, &reader.interface, .json_lines, num_threads);
     }
 
     const contents = try readDirFileAlloc(io, tmp.dir, allocator, "out.jsonl", 8 * 1024 * 1024);
@@ -279,7 +273,7 @@ fn collectConcurrentOutput(allocator: std.mem.Allocator, opts: evtx.ParserOption
     var reader = file.reader(io, &read_buf);
 
     var parser = evtx.EvtxParser.init(allocator, opts);
-    return try parser.collectConcurrent(io, &reader, .xml, num_threads);
+    return try parser.collectConcurrent(io, &reader.interface, .xml, num_threads);
 }
 
 fn collectConcurrentOutputWithFailure(allocator: std.mem.Allocator, opts: evtx.ParserOptions, num_threads: usize, fail_after_records: usize, fail_error: anyerror) !evtx.worker.CollectedOutput {
@@ -294,7 +288,22 @@ fn collectConcurrentOutputWithFailure(allocator: std.mem.Allocator, opts: evtx.P
     var reader = file.reader(io, &read_buf);
 
     var parser = evtx.EvtxParser.init(allocator, opts);
-    return try parser.collectConcurrentWithFailure(io, &reader, .xml, num_threads, fail_after_records, fail_error);
+    return try parser.collectConcurrentWithFailure(io, &reader.interface, .xml, num_threads, fail_after_records, fail_error);
+}
+
+fn collectConcurrentOutputWithSlowDrain(allocator: std.mem.Allocator, opts: evtx.ParserOptions, num_threads: usize, per_record_delay: std.Io.Duration) !evtx.worker.CollectedOutput {
+    var io_impl = std.Io.Threaded.init(allocator, .{});
+    defer io_impl.deinit();
+    const io = io_impl.io();
+
+    var file = try openSample(io);
+    defer file.close(io);
+
+    var read_buf: [8192]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+
+    var parser = evtx.EvtxParser.init(allocator, opts);
+    return try parser.collectConcurrentWithSlowDrain(io, &reader.interface, .xml, num_threads, per_record_delay);
 }
 
 fn sortCollectedById(records: []evtx.worker.EmittedRecord) void {
@@ -545,5 +554,40 @@ test "concurrency: unordered redirected jsonl preserves sequential subset record
     try std.testing.expectEqual(expected.lines.items.len, actual.lines.items.len);
     for (expected.lines.items, actual.lines.items) |want, got| {
         try std.testing.expectEqualStrings(want, got);
+    }
+}
+
+// Regression test for the intake/drain per-task-queue race.
+//
+// In ordered mode with a slow sink, the intake used to bound concurrency by
+// popping the oldest task off its `active` list, awaiting its worker, then
+// calling `freeQueuedRecords` + `allocator.destroy` on that task's per-chunk
+// queue. But the drain future was concurrently reading from the same
+// `meta.task.queue`. If the drain fell behind, intake would:
+//
+//   (a) steal records off the queue before the drain had a chance to emit
+//       them (silent record loss), and/or
+//   (b) destroy the task struct backing `meta.task.queue`, so the drain's
+//       next `getOne` on that pointer would be a use-after-free.
+//
+// By slowing the sink, we force drain to fall behind intake by many chunks,
+// widening the race window until it fires reliably. With the current fix
+// (tasks destroyed only by the drain or the orchestrator cleanup; intake
+// never touches per-task queues in ordered mode), output must still match
+// sequential parsing byte-for-byte.
+test "concurrency: ordered mode preserves records even with a slow drain" {
+    const allocator = std.testing.allocator;
+
+    var sequential = try parseSequentialOutput(allocator, .{}, .xml);
+    defer sequential.deinit();
+
+    const delay = std.Io.Duration.fromMicroseconds(50);
+    var concurrent = try collectConcurrentOutputWithSlowDrain(allocator, .{ .ordered = true }, 4, delay);
+    defer concurrent.deinit();
+
+    try std.testing.expectEqual(sequential.records.items.len, concurrent.records.items.len);
+    for (sequential.records.items, concurrent.records.items) |seq, conc| {
+        try std.testing.expectEqual(seq.identifier, conc.identifier);
+        try std.testing.expectEqualStrings(seq.bytes, conc.bytes);
     }
 }

@@ -1,7 +1,15 @@
-//! Output serialization for EVTX records (XML/JSON).
+//! Record serialization and output sinks for the EVTX parser.
 //!
-//! Keeps std.Io construction at the call boundary and scratch buffering local
-//! to the serializer so parser and test code can share one explicit I/O model.
+//! This module separates two previously conflated roles:
+//!
+//! - `Serializer` owns a scratch buffer and turns an `EventRecordRaw` into
+//!   bytes in its format of choice (XML or one of the two JSON flavors).
+//!   Each call to `serializeRecord` reuses the same buffer; the returned
+//!   slice is valid only until the next call.
+//!
+//! - `Sink` values (any struct with `emit(identifier, bytes) !void`) consume
+//!   those bytes. `WriterSink` is a sink that forwards to a concrete
+//!   `*std.Io.Writer`; tests and the worker path supply their own sinks.
 
 const std = @import("std");
 const binxml = @import("../binxml/mod.zig");
@@ -13,93 +21,62 @@ const err = @import("../err.zig");
 pub const EventRecordRaw = format.EventRecordRaw;
 pub const WriterError = err.WriterError;
 
-pub const JsonMode = enum { single, lines };
-
 pub const OutputMode = enum { xml, json_single, json_lines };
 
-/// Wraps `std.Io.Writer.Allocating` so it can be the scratch buffer for
-/// serialization. The wrapper exists only to expose a `*std.Io.Writer`
-/// uniformly; callers should otherwise treat it as a thin shim.
-pub const SerializeWriter = struct {
-    value: std.Io.Writer.Allocating,
-
-    pub fn init(value: std.Io.Writer.Allocating) SerializeWriter {
-        return .{ .value = value };
-    }
-
-    pub fn writeAll(self: *SerializeWriter, bytes: []const u8) WriterError!void {
-        try self.value.writer.writeAll(bytes);
-    }
-
-    pub fn writeByte(self: *SerializeWriter, byte: u8) WriterError!void {
-        try self.value.writer.writeByte(byte);
-    }
-
-    pub fn writer(self: *SerializeWriter) *std.Io.Writer {
-        return &self.value.writer;
-    }
-};
-
-pub const OutputWriter = struct {
-    /// Destination writer for final output. Null in serialize-only mode.
-    /// Stored as the abstract `*std.Io.Writer`; callers that have a concrete
-    /// `std.Io.File.Writer` should pass `&file_writer.interface`.
-    dest: ?*std.Io.Writer,
-    /// Output format mode
+/// Serialize one record at a time into an owned scratch buffer.
+///
+/// The buffer is cleared between calls, so the slice returned by
+/// `serializeRecord` is only valid until the next `serializeRecord` call.
+/// Callers that need to retain the bytes must copy them out.
+pub const Serializer = struct {
     mode: OutputMode,
-    /// Scratch writer for serialized output.
-    scratch: SerializeWriter,
+    scratch: std.Io.Writer.Allocating,
 
-    pub fn initXml(allocator: std.mem.Allocator, dest: *std.Io.Writer) !OutputWriter {
-        return initWriter(allocator, dest, .xml);
-    }
-
-    pub fn initJson(allocator: std.mem.Allocator, dest: *std.Io.Writer, json_mode: JsonMode) !OutputWriter {
-        return initWriter(allocator, dest, if (json_mode == .single) .json_single else .json_lines);
-    }
-
-    /// Initialize for serialize-only mode (no destination writer needed).
-    pub fn initSerializeOnly(allocator: std.mem.Allocator, mode_: OutputMode) !OutputWriter {
-        return initWriter(allocator, null, mode_);
-    }
-
-    fn initWriter(allocator: std.mem.Allocator, dest: ?*std.Io.Writer, mode: OutputMode) !OutputWriter {
+    pub fn init(allocator: std.mem.Allocator, mode: OutputMode) !Serializer {
         return .{
-            .dest = dest,
             .mode = mode,
-            .scratch = .init(try std.Io.Writer.Allocating.initCapacity(allocator, 4096)),
+            .scratch = try std.Io.Writer.Allocating.initCapacity(allocator, 4096),
         };
     }
 
-    pub fn deinit(self: *OutputWriter) void {
-        self.scratch.value.deinit();
+    pub fn deinit(self: *Serializer) void {
+        self.scratch.deinit();
     }
 
-    pub fn serializeRecord(self: *OutputWriter, record: EventRecordRaw, ctx: *binxml.Context) ![]const u8 {
-        self.scratch.value.clearRetainingCapacity();
+    pub fn serializeRecord(self: *Serializer, record: EventRecordRaw, ctx: *binxml.Context) ![]const u8 {
+        self.scratch.clearRetainingCapacity();
+        const w = &self.scratch.writer;
         switch (self.mode) {
             .xml => {
-                try render_xml.renderXmlWithContext(ctx, record.chunk_buf, record.binxml, self.scratch.writer());
-                try self.scratch.writeByte('\n');
+                try render_xml.renderXmlWithContext(ctx, record.chunk_buf, record.binxml, w);
+                try w.writeByte('\n');
             },
             .json_single, .json_lines => {
-                // Rust-compatible format: {"Event": ...}
                 const tree = try binxml.parseRecord(ctx, record.chunk_buf, record.binxml);
-                try self.scratch.writeAll("{\"Event\":");
-                try render_json.renderElementJson(tree.element, ctx.arena.allocator(), self.scratch.writer());
-                try self.scratch.writeAll("}\n");
+                try w.writeAll("{\"Event\":");
+                try render_json.renderElementJson(tree.element, ctx.arena.allocator(), w);
+                try w.writeAll("}\n");
             },
         }
-        return self.scratch.value.written();
+        return self.scratch.written();
+    }
+};
+
+/// Thin sink that forwards every record's bytes to a `*std.Io.Writer`.
+/// Intended for the single-threaded path where each record is written
+/// directly to its destination.
+pub const WriterSink = struct {
+    dest: *std.Io.Writer,
+
+    pub fn init(dest: *std.Io.Writer) WriterSink {
+        return .{ .dest = dest };
     }
 
-    pub fn writeSerialized(self: *OutputWriter, bytes: []const u8) WriterError!void {
-        const dest = self.dest orelse return;
-        try dest.writeAll(bytes);
+    pub fn emit(self: *WriterSink, _: u64, bytes: []const u8) WriterError!void {
+        try self.dest.writeAll(bytes);
     }
 
-    pub fn flush(self: *OutputWriter) WriterError!void {
-        const dest = self.dest orelse return;
-        try dest.flush();
+    pub fn flush(self: *WriterSink) WriterError!void {
+        try self.dest.flush();
     }
 };

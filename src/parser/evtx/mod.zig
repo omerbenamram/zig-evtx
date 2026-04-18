@@ -2,13 +2,15 @@
 //!
 //! Main entry points:
 //! - `EvtxParser` for sequential and concurrent parsing
-//! - `Output` for configuring output format (XML/JSON)
+//! - `Serializer` for turning records into XML/JSON bytes
+//! - `WriterSink` for the sequential path's `*std.Io.Writer` forwarding
 
 pub const ParserOptions = @import("parser.zig").ParserOptions;
+pub const ErrorPolicy = @import("parser.zig").ErrorPolicy;
 pub const EvtxParser = @import("parser.zig").EvtxParser;
 
-pub const OutputWriter = @import("output.zig").OutputWriter;
-pub const JsonMode = @import("output.zig").JsonMode;
+pub const Serializer = @import("output.zig").Serializer;
+pub const WriterSink = @import("output.zig").WriterSink;
 pub const OutputMode = @import("output.zig").OutputMode;
 pub const worker = @import("worker.zig");
 
