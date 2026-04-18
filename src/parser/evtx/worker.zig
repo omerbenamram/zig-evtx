@@ -70,10 +70,6 @@ pub const EmittedRecord = struct {
         return .{ .identifier = identifier, .bytes = owned, .allocator = allocator };
     }
 
-    pub fn takeOwned(allocator: std.mem.Allocator, identifier: u64, owned_bytes: []u8) EmittedRecord {
-        return .{ .identifier = identifier, .bytes = owned_bytes, .allocator = allocator };
-    }
-
     pub fn deinit(self: *const EmittedRecord) void {
         self.allocator.free(self.bytes);
     }
@@ -209,6 +205,12 @@ const SharedState = struct {
     /// so the drain observes end-of-stream without orchestrator intervention
     /// on the clean path.
     workers_alive: std.atomic.Value(usize),
+    /// Set by the orchestrator before it starts cancelling sub-tasks.
+    /// Intake reads this to tell "my read syscall failed on its own" apart
+    /// from "the orchestrator interrupted me" — a plain `std.Io.checkCancel`
+    /// doesn't catch the latter because the Threaded runtime consumes the
+    /// cancel signal when the syscall surfaces it as `ReadFailed`.
+    teardown_started: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     // Counters retained for observability and for selection accounting.
     emitted: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
@@ -466,7 +468,7 @@ fn processChunk(shared: *SharedState, task: *WorkerTask, buffer: *Buffer, serial
     try ctx.preCacheFromChunkHeader(chunk.buf, &chunk.header.common_string_offsets);
 
     var filter = RecordFilter.forTask(opts, task.record_base);
-    var rec_iter = chunk.records();
+    var rec_iter = if (opts.carve) chunk.recordsCarve() else chunk.records();
 
     while (try rec_iter.next()) |rec| {
         if (opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
@@ -591,10 +593,28 @@ fn drainOrdered(shared: *SharedState) anyerror!void {
         }
     }
 
-    // On clean shutdown (batch_queue closed by last worker), any pending
-    // entries represent chunks that were skipped by intake (e.g. due to
-    // logical_subset selection). Return their buffers.
-    // Handled by the deferred cleanup above.
+    // batch_queue is closed. Anything still in `pending` is a real batch
+    // whose predecessor chunk_index never arrived — intake can legitimately
+    // skip indices (carve mode past bad chunks, logical_subset skip of
+    // whole chunks inside skip_first). Drain them in chunk_index order so
+    // those records still reach the sink; sequential parsing would have
+    // emitted them.
+    if (!should_stop and pending.count() != 0) {
+        const indices = try allocator.alloc(usize, pending.count());
+        defer allocator.free(indices);
+        var iter = pending.keyIterator();
+        var i: usize = 0;
+        while (iter.next()) |k| : (i += 1) indices[i] = k.*;
+        std.mem.sort(usize, indices, {}, comptime std.sort.asc(usize));
+        for (indices) |idx| {
+            const batch = pending.fetchRemove(idx).?.value;
+            if (should_stop) {
+                shared.free_list.putOne(shared.io, batch.buffer) catch {};
+                continue;
+            }
+            try emitBatch(shared, batch, &skipped, &should_stop);
+        }
+    }
 }
 
 /// Unordered drain: emit batches as they arrive, respecting skip_first (via
@@ -654,11 +674,20 @@ fn intakeLoop(
         }
 
         var chunk = Chunk.read(allocator, reader) catch |e| switch (e) {
-            error.EndOfStream, error.BadChunkSignature => break,
+            error.EndOfStream => break,
+            // Bad/empty chunks (e.g. zero-filled regions in a dirty file)
+            // are the norm in carve mode; skip and keep scanning. In strict
+            // mode (explicit `--no-carve`) we treat them as end-of-data.
+            error.BadChunkSignature => if (shared.opts.carve) continue else break,
             else => {
+                // Distinguish "orchestrator is tearing us down" from "real
+                // I/O error". Either signal is sufficient: the runtime may
+                // still have a pending cancel on `checkCancel`, or the
+                // orchestrator has already set `teardown_started`.
                 std.Io.checkCancel(shared.io) catch |ce| switch (ce) {
                     error.Canceled => return,
                 };
+                if (shared.teardown_started.load(.acquire)) return;
                 log.err("failed to read chunk {d}: {s}", .{ chunk_index, @errorName(e) });
                 return e;
             },
@@ -797,6 +826,13 @@ fn parseConcurrentWithSink(
         drain_err = err;
     };
 
+    // Mark teardown so intake can distinguish an orchestrator-induced
+    // `ReadFailed` (interrupted syscall) from a genuine I/O error and
+    // suppress the misleading `log.err` in that case. Set before any
+    // cancel/close to avoid a race where intake observes the interrupt
+    // before the flag.
+    shared.teardown_started.store(true, .release);
+
     // Force everything else to unblock. Close order is arbitrary; each
     // `close` is idempotent and unblocks any in-flight put/get on that
     // queue with `error.Closed`.
@@ -815,9 +851,20 @@ fn parseConcurrentWithSink(
 
     // Workers should now all be returning from their blocked queue ops.
     // Await each one so their `defer` cleanup runs before we deinit the
-    // buffer pool.
+    // buffer pool. We also capture the first "real" worker error so
+    // `on_record_error: .fail_fast` failures aren't silently lost when the
+    // drain completes cleanly. `error.Canceled` / `error.Closed` are the
+    // expected effects of our own teardown (cancel + queue close) and are
+    // dropped; anything else — parse errors, allocator failures, sink
+    // writer errors — is a legitimate failure the caller needs to see.
+    var worker_err: ?anyerror = null;
     for (worker_futures[0..spawned]) |*f| {
-        _ = f.cancel(io) catch {};
+        f.cancel(io) catch |err| switch (err) {
+            error.Canceled, error.Closed => {},
+            else => if (worker_err == null) {
+                worker_err = err;
+            },
+        };
     }
 
     // Drain any WorkerTasks still sitting in `task_queue`. On the clean path
@@ -839,6 +886,10 @@ fn parseConcurrentWithSink(
     });
 
     if (drain_err) |err| {
+        if (isCleanStopError(&shared, err)) return;
+        return err;
+    }
+    if (worker_err) |err| {
         if (isCleanStopError(&shared, err)) return;
         return err;
     }

@@ -50,9 +50,19 @@ pub const ParserOptions = struct {
     /// When true (default), verify chunk header and events CRC32 sums.
     validate_checksums: bool = true,
 
-    /// When true, scan every valid chunk until EOF instead of trusting the
-    /// file header's `num_chunks`. Useful for corrupted files or chunk
-    /// carving from disk images.
+    /// When true, enable dirty-file tolerance:
+    ///   1. scan every chunk-sized window until EOF instead of capping at
+    ///      the file header's `num_chunks`,
+    ///   2. skip past chunks whose `ElfChnk\x00` magic is missing or
+    ///      corrupted instead of stopping on the first one,
+    ///   3. trust record headers' `size` field even if the trailing
+    ///      size-repeat (last 4 bytes of the record, used for
+    ///      self-synchronisation by the spec) disagrees.
+    ///
+    /// Default is `false` — strict, spec-conformant parsing. `--carve`
+    /// matches the Rust `evtx` crate's default tolerance and is what you
+    /// want for forensic / recovery work on dirty or partially corrupted
+    /// files.
     carve: bool = false,
 
     // -- Error handling --
@@ -112,7 +122,8 @@ pub const EvtxParser = struct {
 
         while (self.opts.carve or chunk_index < hdr.core.num_chunks) : (chunk_index += 1) {
             const chunk = Chunk.read(self.allocator, reader) catch |e| switch (e) {
-                error.EndOfStream, error.BadChunkSignature => break,
+                error.EndOfStream => break,
+                error.BadChunkSignature => if (self.opts.carve) continue else break,
                 else => return e,
             };
             defer chunk.deinit();
@@ -121,7 +132,7 @@ pub const EvtxParser = struct {
             ctx.resetPerChunk();
             try ctx.preCacheFromChunkHeader(chunk.buf, &chunk.header.common_string_offsets);
 
-            var rec_iter = chunk.records();
+            var rec_iter = if (self.opts.carve) chunk.recordsCarve() else chunk.records();
             while (try rec_iter.next()) |rec| {
                 if (self.opts.verbosity >= 2) log.debug("record id={d} time={d}", .{ rec.identifier, rec.written_time });
                 switch (filter.acceptLocal()) {

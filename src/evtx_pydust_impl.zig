@@ -185,22 +185,34 @@ const IterState = struct {
         if (self.have_iter) {
             return true;
         }
-        // In carve mode, scan until EOF/invalid signature. Otherwise, trust header's num_chunks.
-        if (!self.opts.carve and self.chunk_index >= self.hdr.core.num_chunks) return false;
 
         // Free the previous chunk, if any, before replacing it.
         self.releaseCurrentChunk();
 
-        self.current_chunk = format.Chunk.read(self.allocator, self.reader()) catch |e| switch (e) {
-            error.EndOfStream, error.BadChunkSignature => return false,
-            else => return e,
-        };
+        // Scan forward for the next parseable chunk. In carve mode we skip
+        // over bad/empty 64 KB chunks (common in dirty files) until we find
+        // good data or hit EOF. In strict mode we stop at the first bad
+        // chunk, and also honour `num_chunks` from the header.
+        while (true) {
+            if (!self.opts.carve and self.chunk_index >= self.hdr.core.num_chunks) return false;
+
+            self.current_chunk = format.Chunk.read(self.allocator, self.reader()) catch |e| switch (e) {
+                error.EndOfStream => return false,
+                error.BadChunkSignature => {
+                    if (!self.opts.carve) return false;
+                    self.chunk_index += 1;
+                    continue;
+                },
+                else => return e,
+            };
+            break;
+        }
         self.chunk_owned = true;
         if (self.opts.validate_checksums) try self.current_chunk.validateChecksums();
         self.ctx.resetPerChunk();
         try self.ctx.preCacheFromChunkHeader(self.current_chunk.buf, &self.current_chunk.header.common_string_offsets);
         if (self.opts.verbosity >= 3) logger.setModuleLevel("binxml", .trace);
-        self.rec_iter = self.current_chunk.records();
+        self.rec_iter = if (self.opts.carve) self.current_chunk.recordsCarve() else self.current_chunk.records();
         self.have_iter = true;
         return true;
     }

@@ -24,7 +24,10 @@ const help_message =
     \\  -n N                Stop after N records (0 = all)
     \\  -s N                Skip first N records
     \\  --no-checks         Disable EVTX checksum validation
-    \\  --carve             Scan all chunks until EOF (ignore header's chunk count)
+    \\  --carve             Dirty-file recovery mode: scan past the header's
+    \\                        num_chunks, skip corrupted chunks, and tolerate
+    \\                        records whose trailing size-repeat disagrees.
+    \\                        Off by default (strict spec parsing).
     \\  --unordered         Output chunks as they complete (faster, non-deterministic order)
     \\  -t NUM_THREADS      Override number of worker threads (default: CPU count)
     \\

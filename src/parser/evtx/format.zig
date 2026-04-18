@@ -47,20 +47,20 @@ pub const FileHeader = struct {
     core: FileHeaderCore,
     tail: FileHeaderTail,
 
+    /// Reads the file header and verifies the `ElfFile\x00` magic. The
+    /// stored CRC32 over bytes [0..120] is not validated by default: dirty
+    /// EVTX files often carry stale header checksums despite otherwise
+    /// parseable chunk data, and both the Rust `evtx` crate and our own
+    /// `validate_checksums` option leave header CRC alone. Callers that
+    /// need strict validation can compare `tail.checksum` against a freshly
+    /// computed CRC32 themselves.
     pub fn read(reader: *Reader) !FileHeader {
         var buf: [FILE_HEADER_SIZE]u8 = undefined;
         try reader.readSliceAll(&buf);
         if (!std.mem.eql(u8, buf[0..8], "ElfFile\x00")) return error.BadSignature;
 
-        // Read contiguous fields via packed structs (comptime type dispatch)
         const core = std.mem.bytesToValue(FileHeaderCore, buf[8..44]);
         const tail = std.mem.bytesToValue(FileHeaderTail, buf[120..128]);
-
-        // Verify header CRC32 over first 120 bytes
-        var hasher = crc32.Crc32.init();
-        hasher.update(buf[0..120]);
-        const computed = hasher.final();
-        if (computed != tail.checksum) return error.BadHeaderChecksum;
 
         return .{ .core = core, .tail = tail };
     }
@@ -109,8 +109,17 @@ pub const Chunk = struct {
     }
 
     pub fn records(self: *const Chunk) RecordIterator {
-        // Event data starts after chunk header
+        // Event data starts after chunk header. Strict by default — the
+        // iterator enforces every per-record invariant in the spec.
         return RecordIterator{ .chunk = self, .offset = CHUNK_HEADER_SIZE };
+    }
+
+    /// Like `records`, but tolerant of the kinds of tail corruption found
+    /// in dirty EVTX files: specifically, the 4-byte size-repeat at the
+    /// end of each record is ignored. Paired with the `carve` parser
+    /// option.
+    pub fn recordsCarve(self: *const Chunk) RecordIterator {
+        return RecordIterator{ .chunk = self, .offset = CHUNK_HEADER_SIZE, .carve = true };
     }
 };
 
@@ -169,6 +178,10 @@ const RecordHeaderCore = packed struct {
 pub const RecordIterator = struct {
     chunk: *const Chunk,
     offset: u32,
+    /// When true, skip the end-of-record size-repeat check (see spec-strict
+    /// code path below). Set via `Chunk.recordsCarve()` when the parser's
+    /// `--carve` flag is in effect.
+    carve: bool = false,
 
     pub fn next(self: *RecordIterator) !?EventRecordRaw {
         if (self.offset == 0 or self.offset + 8 > self.chunk.buf.len) return null;
@@ -185,9 +198,16 @@ pub const RecordIterator = struct {
         if (size < 32) return null;
         // If the record claims to run past the free-space boundary or chunk buffer, stop
         if (self.offset + size > self.chunk.buf.len or (self.offset + size) > self.chunk.header.free_space_offset) return null;
-        const end_copy = std.mem.readInt(u32, slice[size - 4 ..][0..4], .little);
-        // Mismatched end size indicates a truncated tail; stop record iteration
-        if (end_copy != size) return null;
+        // Spec-strict mode: the last 4 bytes of every record repeat the
+        // size field for self-synchronisation. Enforce this by default so
+        // we surface truncation bugs early. In carve mode we trust the
+        // header's size unconditionally — dirty EVTX files routinely carry
+        // corrupted tails on otherwise parseable records, and Rust's
+        // `evtx` crate ignores the repeat entirely.
+        if (!self.carve) {
+            const end_copy = std.mem.readInt(u32, slice[size - 4 ..][0..4], .little);
+            if (end_copy != size) return null;
+        }
         const event_data = slice[24 .. size - 4];
         const rec = EventRecordRaw{ .identifier = hdr.identifier, .written_time = hdr.written_time, .binxml = event_data, .chunk_buf = self.chunk.buf };
         self.offset += size;
